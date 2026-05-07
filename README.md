@@ -84,6 +84,24 @@ For questions about PyMACS, molecular dynamics workflow support, CGenFF setup, G
 
 ---
 
+<p align="center">
+  <img 
+    src="images/Pymacs_Logo.png" 
+    alt="PyMACS logo" 
+    width="420"
+  >
+</p>
+
+<p align="center">
+  <strong>Automated molecular dynamics. Clean analysis. Publication-ready figurebooks.</strong>
+</p>
+
+<p align="center">
+  <em>From structure preparation to GROMACS execution, trajectory analysis, and polished PDF reporting.</em>
+</p>
+
+---
+
 <a id="overview"></a>
 
 ## 🚀 Overview
