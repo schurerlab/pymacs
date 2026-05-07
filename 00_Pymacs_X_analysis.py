@@ -11,11 +11,11 @@ existing PyMACS / 3A_analysis / 3B-NETWORX outputs without loading huge
 framewise contact files by default.
 
 Normal fast command:
-    python 00_Pymacs_X_analysis_FAST_LIGANDS.py --root . --family HUMAN --open
-    python 00_Pymacs_X_analysis_FAST_LIGANDS.py --root . --family RAT --open
-    python 00_Pymacs_X_analysis_FAST_LIGANDS.py --root . --family MOUSE --open
+    python 00_Pymacs_X_analysis.py --root . --family HUMAN --open
+    python 00_Pymacs_X_analysis.py --root . --family RAT --open
+    python 00_Pymacs_X_analysis.py --root . --family MOUSE --open
 
-    python 00_Pymacs_X_analysis_FAST_LIGANDS.py --root . --family ####ANY SPECIES####### --open
+    python 00_Pymacs_X_analysis_FAST.py --root . --family ####ANY SPECIES####### --open
 
 Optional deep fallback, only if you need to summarize framewise contacts:
     python 00_Pymacs_X_analysis_FAST.py --root . --family HUMAN --use-framewise --open
