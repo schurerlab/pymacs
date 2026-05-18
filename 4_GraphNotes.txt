@@ -258,6 +258,66 @@ This plot compares the number of hydrophobic and hydrophilic contacts formed bet
 Significance:
 
 Helps assess how the ligand interacts with different regions of the protein binding site.
+
+
+protac_rmsd
+PROTAC Component RMSD
+This figure reports RMSD for the PROTAC ternary-complex components and the full complex over time. It is useful for assessing equilibration, overall structural stability, and whether one protein partner drifts more strongly than the other during the simulation. Stable traces suggest convergence, while broad excursions can indicate conformational adaptation, domain rearrangement, or incomplete equilibration.
+
+
+protac_rmsf
+PROTAC Component RMSF
+This figure reports component-resolved RMSF using biologically meaningful residue numbering when available from atomIndex metadata. It highlights flexible loops, linker-adjacent residues, and rigid structural cores, helping identify whether ligand-contacting hotspots are stable anchors or dynamic interface regions.
+
+protac_rmsf_contacts
+PROTAC Component RMSF with Contact Overlays
+This RMSF plot overlays PROTAC-contacting residues on the component flexibility profile. Contact markers indicate residues that interact with the PROTAC above the selected persistence threshold, helping distinguish stable anchoring residues from flexible interface regions. Residues with both elevated RMSF and persistent contact fractions can indicate adaptive binding loops or conformationally dynamic hotspots, whereas low-RMSF / high-contact residues often mark structurally stable anchors.
+
+protac_component_rmsf_contacts
+Per-Component RMSF with PROTAC Contact Overlays
+This figure focuses on one protein component at a time and highlights residues that contact the PROTAC above the chosen persistence threshold. The overlay is intended to make it visually obvious which residues are both flexible and frequently engaged by the ligand, helping separate rigid anchoring residues from dynamic interface positions that may contribute to induced fit or transient contact switching.
+
+protac_water_bridges
+PROTAC Water-Bridge Analysis
+This figure summarizes ligand-water-protein bridge events observed in the raw hydrated trajectory. A bridge event is counted when the same water molecule lies within the selected cutoff of both the PROTAC and a protein residue, highlighting interfacial waters that may transiently or persistently mediate recognition between the ligand and the protein surface.
+
+protac_water_bridge_frequency
+PROTAC Water-Bridge Frequency by Residue
+This figure ranks residues by how often they participate in water-mediated PROTAC interactions. Persistent water-bridge residues can point to solvent-stabilized anchoring sites, structured interfacial waters, or dynamic hydration hotspots that complement direct ligand-protein contacts.
+
+protac_water_bridge_network
+PROTAC Water-Bridge Network
+This network view places water as an intermediate node between the PROTAC and protein residues to emphasize solvent-mediated interaction pathways. High-frequency edges highlight residues most consistently connected to the ligand through bridging waters, complementing direct-contact analyses by revealing hydration-supported recognition patterns.
+
+
+protac_radius_of_gyration
+PROTAC Radius of Gyration
+This figure reports the radius of gyration of the full complex and the individual protein components. It provides a compactness metric complementary to RMSD and helps distinguish local motion from large-scale expansion, compaction, or breathing of the ternary assembly.
+
+
+protac_contacts_timeseries
+PROTAC Contact Timeseries
+This figure tracks how many residues from each protein component contact the PROTAC over time. Comparing the component traces helps reveal whether the ligand remains balanced between the E3 ligase and target side or whether one interface dominates during particular trajectory windows.
+
+
+protac_contact_heatmap
+PROTAC Contact Heatmap
+This heatmap shows which residues contact the PROTAC over time, ordered by protein component and source residue numbering when available. Persistent horizontal bands highlight stable interface hotspots, while intermittent patches indicate transient or adaptive contacts that appear only in subsets of the trajectory.
+
+
+protac_interaction_network
+PROTAC Interaction Network
+This network summarizes the most persistent residue contacts to the PROTAC using filtered, top-ranked residues. It helps spotlight anchor residues and separates meaningful high-frequency contacts from low-frequency noise, making it easier to identify likely interface hotspots for interpretation or follow-up design.
+
+
+protac_interaction_composition
+PROTAC Interaction Composition
+This figure compares the chemical interaction makeup of each protein component, such as hydrophobic, aromatic, ionic, and hydrophilic contacts. It helps determine whether the ligase and target sides engage the PROTAC through similar or distinct interaction strategies.
+
+
+protac_pca
+PROTAC Principal Component Analysis
+This PCA figure summarizes the dominant collective protein motions sampled during the trajectory. It is useful for identifying whether the ternary complex occupies one compact conformational basin or samples multiple states with distinct large-scale motions.
 A high number of hydrophobic contacts suggests the ligand is engaging with nonpolar pockets, which may enhance binding stability in apolar environments.
 A predominance of hydrophilic contacts indicates that the ligand relies on hydrogen bonds and electrostatic interactions for binding.
 The balance between hydrophobic and hydrophilic interactions is crucial for drug design, as excessive hydrophilicity can reduce membrane permeability, while excessive hydrophobicity can lead to aggregation.

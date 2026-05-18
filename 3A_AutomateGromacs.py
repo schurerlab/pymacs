@@ -483,8 +483,30 @@ def dispatch_to_protac_analysis():
     if not os.path.exists(protac_script):
         raise SystemExit("❌ PROTAC mode selected, but 3_PROTAC_Analysis.py was not found in the current directory.")
 
-    print("\n🧬 PROTAC mode selected — handing off to 3_PROTAC_Analysis.py")
-    rc = subprocess.call([sys.executable, protac_script])
+    cmd = [sys.executable, protac_script]
+
+    if args.headless:
+        cmd.extend(["--headless", "--frame-step", "10"])
+        print("\n🧬 PROTAC mode selected — headless handoff to 3_PROTAC_Analysis.py (standard sampling: --frame-step 10)", flush=True)
+    else:
+        print("\n🧬 PROTAC mode selected — choose analysis depth:", flush=True)
+        print("  1. Quick test     (0:500:10)", flush=True)
+        print("  2. Standard       (default PROTAC sampling, --frame-step 10)", flush=True)
+        print("  3. Full           (--frame-step 1)", flush=True)
+        protac_choice = input("Enter choice (1-3) [2]: ").strip() or "2"
+
+        if protac_choice == "1":
+            cmd.append("--quick-test")
+            print("🧪 Using PROTAC quick-test handoff.", flush=True)
+        elif protac_choice == "3":
+            cmd.extend(["--frame-step", "1"])
+            print("🧬 Using full PROTAC frame-by-frame handoff.", flush=True)
+        else:
+            cmd.extend(["--frame-step", "10"])
+            print("🧬 Using standard PROTAC handoff with frame-step 10.", flush=True)
+
+    print(f"🚀 Launching: {' '.join(cmd)}", flush=True)
+    rc = subprocess.call(cmd)
     raise SystemExit(rc)
 
 
