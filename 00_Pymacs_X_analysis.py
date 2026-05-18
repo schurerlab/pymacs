@@ -74,6 +74,7 @@ except Exception:
     RDKIT_AVAILABLE = False
 
 
+# === DARK MODE THEME (TRON/NEON) ===
 TRON_BG = "#05060a"
 TRON_PANEL = "#0b1020"
 TRON_GRID = "#1c2a4a"
@@ -88,6 +89,58 @@ TRON_YELLOW = "#ffe66d"
 TRON_ORANGE = "#ff8a3d"
 TRON_RED = "#ff3b5c"
 TRON_WHITE = "#f5fbff"
+
+# === LIGHT MODE THEME (Professional Clean) ===
+LIGHT_BG = "#f5f7fa"
+LIGHT_PANEL = "#ffffff"
+LIGHT_GRID = "#e8eef5"
+LIGHT_TEXT = "#1a1a1a"
+LIGHT_MUTED = "#4a5f8f"
+LIGHT_CYAN = "#0066cc"
+LIGHT_BLUE = "#003d99"
+LIGHT_MAGENTA = "#cc0066"
+LIGHT_PURPLE = "#5533aa"
+LIGHT_GREEN = "#009966"
+LIGHT_YELLOW = "#cc9900"
+LIGHT_ORANGE = "#cc6600"
+LIGHT_RED = "#cc0033"
+LIGHT_WHITE = "#ffffff"
+
+# Theme palettes (for JSON emission into JS)
+THEME_PALETTES = {
+    "dark": {
+        "bg": TRON_BG,
+        "panel": TRON_PANEL,
+        "grid": TRON_GRID,
+        "text": TRON_TEXT,
+        "muted": TRON_MUTED,
+        "cyan": TRON_CYAN,
+        "green": TRON_GREEN,
+        "yellow": TRON_YELLOW,
+        "magenta": TRON_MAGENTA,
+        "purple": TRON_PURPLE,
+        "orange": TRON_ORANGE,
+        "red": TRON_RED,
+        "hoverBg": "rgba(11,16,32,0.96)",
+        "hoverBorder": TRON_CYAN,
+    },
+    "light": {
+        "bg": LIGHT_BG,
+        "panel": LIGHT_PANEL,
+        "grid": LIGHT_GRID,
+        "text": LIGHT_TEXT,
+        "muted": LIGHT_MUTED,
+        "cyan": LIGHT_CYAN,
+        "green": LIGHT_GREEN,
+        "yellow": LIGHT_YELLOW,
+        "magenta": LIGHT_MAGENTA,
+        "purple": LIGHT_PURPLE,
+        "orange": LIGHT_ORANGE,
+        "red": LIGHT_RED,
+        "hoverBg": "rgba(255,255,255,0.97)",
+        "hoverBorder": LIGHT_CYAN,
+    },
+}
 
 # Ligand SVG atom colors for dark-mode visibility.
 # RDKit's default atom palette can disappear on the dark dashboard background,
@@ -2126,12 +2179,97 @@ def build_stability_flags(runs: List[RunData], apo_delta: pd.DataFrame, binding_
     return pd.DataFrame(rows)
 
 
-def apply_tron_layout(fig: go.Figure, title: str = "", height: int = 520) -> go.Figure:
-    fig.update_layout(title=dict(text=title, font=dict(color=TRON_TEXT, size=19)), paper_bgcolor=TRON_BG, plot_bgcolor=TRON_BG, font=dict(color=TRON_TEXT, size=13), margin=dict(l=70, r=36, t=76, b=64), height=height, legend=dict(bgcolor="rgba(0,0,0,0)", borderwidth=0, font=dict(color=TRON_MUTED)), xaxis=dict(showgrid=True, gridcolor=TRON_GRID, zeroline=False, linecolor=TRON_GRID, tickcolor=TRON_GRID, title_font=dict(color=TRON_TEXT), tickfont=dict(color=TRON_MUTED)), yaxis=dict(showgrid=True, gridcolor=TRON_GRID, zeroline=False, linecolor=TRON_GRID, tickcolor=TRON_GRID, title_font=dict(color=TRON_TEXT), tickfont=dict(color=TRON_MUTED)))
+def apply_plotly_base_layout(
+    fig: go.Figure, 
+    title: str = "", 
+    height: int = 520,
+    paper_bgcolor: Optional[str] = None,
+    plot_bgcolor: Optional[str] = None,
+    text_color: Optional[str] = None,
+    muted_color: Optional[str] = None,
+    grid_color: Optional[str] = None,
+) -> go.Figure:
+    """
+    Apply consistent PyMACS Plotly layout with theme-aware defaults.
+    
+    This function creates Plotly figures with dark-mode colors as defaults,
+    then the JS applyPlotlyTheme() function re-themes all figures to light mode
+    when the user toggles the theme. This keeps one Python plotting path while
+    supporting live light/dark switching.
+    
+    Args:
+        fig: The Plotly figure to update
+        title: Chart title
+        height: Chart height in pixels
+        paper_bgcolor: Override paper background color (default: TRON_BG)
+        plot_bgcolor: Override plot background color (default: TRON_BG)
+        text_color: Override text color (default: TRON_TEXT)
+        muted_color: Override muted text color (default: TRON_MUTED)
+        grid_color: Override grid color (default: TRON_GRID)
+    
+    Returns:
+        The updated figure
+    """
+    # Use provided overrides or fall back to TRON defaults
+    paper_bg = paper_bgcolor if paper_bgcolor is not None else TRON_BG
+    plot_bg = plot_bgcolor if plot_bgcolor is not None else TRON_BG
+    text_col = text_color if text_color is not None else TRON_TEXT
+    muted_col = muted_color if muted_color is not None else TRON_MUTED
+    grid_col = grid_color if grid_color is not None else TRON_GRID
+    
+    fig.update_layout(
+        template=None,
+        title=dict(text=title, font=dict(color=text_col, size=19)),
+        paper_bgcolor=paper_bg,
+        plot_bgcolor=plot_bg,
+        font=dict(color=text_col, size=13),
+        margin=dict(l=70, r=36, t=76, b=64),
+        height=height,
+        legend=dict(
+            bgcolor="rgba(0,0,0,0)",
+            borderwidth=0,
+            font=dict(color=muted_col)
+        ),
+        title_font=dict(color=text_col),
+        hoverlabel=dict(
+            bgcolor=TRON_PANEL,
+            bordercolor=TRON_CYAN,
+            font=dict(color=text_col),
+        ),
+    )
+    
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor=grid_col,
+        zeroline=False,
+        linecolor=grid_col,
+        tickcolor=grid_col,
+        title_font=dict(color=text_col),
+        tickfont=dict(color=muted_col),
+    )
+    
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor=grid_col,
+        zeroline=False,
+        linecolor=grid_col,
+        tickcolor=grid_col,
+        title_font=dict(color=text_col),
+        tickfont=dict(color=muted_col),
+    )
+    
     return fig
 
 
+def apply_tron_layout(fig: go.Figure, title: str = "", height: int = 520) -> go.Figure:
+    """Convenience wrapper for apply_plotly_base_layout using TRON dark colors."""
+    return apply_plotly_base_layout(fig, title=title, height=height)
+
+
 def fig_to_div(fig: Optional[go.Figure]) -> str:
+    # Figures are authored with the dark PyMACS layout, then themed globally in
+    # the exported HTML by applyPlotlyTheme(). This keeps one Python plotting
+    # path while allowing live light/dark switching for every Plotly graph.
     return "" if fig is None else pio.to_html(fig, include_plotlyjs=False, full_html=False, config=PLOTLY_CONFIG)
 
 
@@ -2585,16 +2723,145 @@ def make_cross_species_overlay_figures(runs: List[RunData], comps: Dict[str, Any
 
 
 GLOBAL_CSS = r'''
-:root{--bg:#05060a;--panel:#0b1020;--grid:#1c2a4a;--text:#cfe8ff;--muted:#7aa6d9;--cyan:#35d0ff;--green:#18ff8b;--yellow:#ffe66d;--magenta:#ff2bd6;--purple:#8a5cff;--red:#ff3b5c;--orange:#ff8a3d;--white:#f5fbff}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;padding:22px;background:radial-gradient(circle at top right,rgba(53,208,255,.13),transparent 30%),radial-gradient(circle at top left,rgba(255,43,214,.09),transparent 28%),linear-gradient(180deg,#05060a,#070a12 48%,#05060a);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif}a{color:var(--cyan);text-decoration:none}a:hover{text-decoration:underline}.page{max-width:1580px;margin:0 auto}.card{background:linear-gradient(180deg,rgba(11,16,32,.98),rgba(7,11,22,.98));border:1px solid rgba(28,42,74,.95);border-radius:22px;padding:18px;box-shadow:0 0 0 1px rgba(53,208,255,.025),0 16px 42px rgba(0,0,0,.24);margin-bottom:16px}.hero{position:relative;overflow:hidden;border:1px solid rgba(53,208,255,.28);box-shadow:0 0 46px rgba(53,208,255,.10),inset 0 0 58px rgba(53,208,255,.04);padding:24px}.hero:before{content:"";position:absolute;inset:-45%;background:conic-gradient(from 180deg,transparent,rgba(53,208,255,.12),transparent,rgba(255,43,214,.10),transparent);animation:slowSpin 28s linear infinite;opacity:.7;pointer-events:none}.hero>*{position:relative;z-index:1}@keyframes slowSpin{to{transform:rotate(360deg)}}h1,h2,h3,h4{margin:0 0 10px 0}h1{font-size:clamp(30px,4.4vw,60px);line-height:.98;letter-spacing:-.055em}h2{font-size:22px;letter-spacing:-.02em}.sub,.muted{color:var(--muted)}.eyebrow{color:var(--green);font-weight:800;letter-spacing:.16em;text-transform:uppercase;font-size:12px;margin-bottom:8px}.heroGrid{display:grid;grid-template-columns:minmax(0,1fr) 270px;gap:20px;align-items:center}.brandOrb{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;min-height:220px;border-radius:28px;background:radial-gradient(circle at center,rgba(53,208,255,.16),rgba(138,92,255,.07),rgba(0,0,0,.10) 68%);border:1px solid rgba(53,208,255,.24);box-shadow:inset 0 0 55px rgba(53,208,255,.08),0 0 42px rgba(53,208,255,.06)}.brandOrb img{width:min(185px,82%);height:auto;filter:drop-shadow(0 0 18px rgba(53,208,255,.55)) drop-shadow(0 0 34px rgba(255,43,214,.28));animation:logoPulse 4.8s ease-in-out infinite}.brandOrb .orbText{font-size:12px;color:var(--muted);letter-spacing:.10em;text-transform:uppercase;font-weight:800}@keyframes logoPulse{0%,100%{transform:translateY(0) scale(1);filter:drop-shadow(0 0 16px rgba(53,208,255,.50)) drop-shadow(0 0 30px rgba(255,43,214,.22))}50%{transform:translateY(-3px) scale(1.025);filter:drop-shadow(0 0 26px rgba(53,208,255,.72)) drop-shadow(0 0 48px rgba(255,43,214,.34))}}.heroMeta{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.metaPill{display:inline-flex;gap:8px;align-items:center;padding:8px 11px;border-radius:999px;background:rgba(53,208,255,.08);border:1px solid rgba(53,208,255,.22);font-size:12px;color:var(--text)}.grid2{display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(240px,1fr));gap:16px}.grid4{display:grid;grid-template-columns:repeat(4,minmax(190px,1fr));gap:16px}.metricCard{background:linear-gradient(180deg,rgba(16,23,45,.92),rgba(10,15,28,.96));border:1px solid rgba(53,208,255,.18);border-radius:18px;padding:16px;position:relative;overflow:hidden}.metricCard:after{content:"";position:absolute;inset:auto -20% -50% -20%;height:70%;background:radial-gradient(circle at center,rgba(53,208,255,.09),transparent 70%);pointer-events:none}.metricLabel{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.10em}.metricValue{font-size:26px;font-weight:850;margin-top:6px}.metricHint{color:var(--muted);font-size:12px;margin-top:6px}.brandLinks,.sectionNav,.toggleBar{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.buttonLink,.pill{display:inline-flex;align-items:center;gap:8px;background:rgba(53,208,255,.08);border:1px solid rgba(53,208,255,.24);color:var(--text);border-radius:999px;padding:9px 14px;font-size:13px}.buttonLink.primary{background:linear-gradient(90deg,rgba(53,208,255,.18),rgba(138,92,255,.16))}.buttonLink.green{border-color:rgba(24,255,139,.28);background:rgba(24,255,139,.08)}.buttonLink.magenta{border-color:rgba(255,43,214,.28);background:rgba(255,43,214,.08)}.buttonLink.yellow{border-color:rgba(255,230,109,.30);background:rgba(255,230,109,.08)}.toggleBtn{appearance:none;border:1px solid rgba(53,208,255,.22);background:rgba(53,208,255,.08);color:var(--text);padding:9px 12px;border-radius:999px;cursor:pointer}.toggleBtn:hover{background:rgba(53,208,255,.16)}.readerGuide{border:1px solid rgba(24,255,139,.20);background:linear-gradient(180deg,rgba(24,255,139,.06),rgba(53,208,255,.035));}.guideList{display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:12px;margin-top:12px}.guideItem{border:1px solid rgba(53,208,255,.14);border-radius:16px;padding:13px;background:rgba(0,0,0,.18)}.guideItem b{color:var(--white)}.graphCard{padding:0;overflow:hidden}.graphHeader{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 18px 0 18px}.graphKicker{color:var(--green);font-weight:850;letter-spacing:.15em;text-transform:uppercase;font-size:11px;margin-bottom:5px}.graphTitleLine{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.graphHeader p{margin:0 0 6px 0;max-width:980px}.infoTip{position:relative;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;border:1px solid rgba(53,208,255,.42);background:rgba(53,208,255,.10);color:var(--cyan);font-size:12px;font-weight:900;cursor:help;line-height:1;vertical-align:middle}.tipPanel{position:absolute;left:50%;top:28px;transform:translateX(-50%) translateY(-4px);width:min(430px,calc(100vw - 46px));padding:13px 14px;border-radius:16px;border:1px solid rgba(53,208,255,.28);background:rgba(5,6,10,.98);color:var(--text);box-shadow:0 18px 55px rgba(0,0,0,.55),0 0 32px rgba(53,208,255,.12);font-size:12px;line-height:1.42;text-align:left;opacity:0;visibility:hidden;transition:.16s ease;z-index:50}.infoTip:hover .tipPanel,.infoTip:focus .tipPanel,.infoTip:focus-within .tipPanel{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0)}.tipPanel strong{color:var(--green)}.tipPanel .tipBlock{margin-top:7px}.tableWrap{overflow-x:auto}.search{width:100%;padding:10px 12px;background:rgba(0,0,0,.24);color:var(--text);border:1px solid rgba(28,42,74,.95);border-radius:12px;margin:8px 0 12px 0}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid rgba(28,42,74,.78);padding:8px 10px;text-align:left;vertical-align:top}th{cursor:pointer;color:var(--cyan);position:sticky;top:0;background:#0b1020;z-index:2}.small{font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}.monoBlock{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(0,0,0,.20);padding:12px;border-radius:14px;border:1px solid rgba(28,42,74,.95)}.callout{border-left:3px solid var(--green);padding:12px 14px;background:rgba(24,255,139,.06);border-radius:14px}.warnout{border-left:3px solid var(--yellow);padding:12px 14px;background:rgba(255,230,109,.06);border-radius:14px}hr.sep{border:none;border-top:1px solid rgba(28,42,74,.9);margin:16px 0}details summary{cursor:pointer}.ligandBox{display:flex;flex-direction:column;gap:10px;min-height:100%;}.ligand2dLabel,.ligand3dHead{display:flex;align-items:center;justify-content:space-between;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:800;}.ligandSvgWrap{min-height:330px;display:flex;align-items:center;justify-content:center;padding:8px 4px;border-radius:16px;background:radial-gradient(circle at center,rgba(53,208,255,.045),transparent 62%);border:1px solid rgba(53,208,255,.08);}.pymacs-ligand-svg{width:100%;max-width:660px;height:auto;display:block;overflow:visible;}.lig3dViewer{position:relative;display:block;width:100%;height:320px;border-radius:16px;overflow:hidden;border:1px solid rgba(53,208,255,.18);background:radial-gradient(circle at center,rgba(53,208,255,.05),rgba(0,0,0,.18));box-shadow:inset 0 0 28px rgba(53,208,255,.035);}.lig3dViewer canvas{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;display:block!important;}.ligandMeta{line-height:1.25;}.footerNote{color:var(--muted);font-size:12px;margin-top:14px}@media(max-width:1200px){.grid4{grid-template-columns:repeat(2,minmax(190px,1fr))}.grid3,.guideList{grid-template-columns:repeat(2,minmax(240px,1fr))}.heroGrid{grid-template-columns:1fr}.brandOrb{min-height:180px}}@media(max-width:820px){body{padding:12px}.grid2,.grid3,.grid4,.guideList{grid-template-columns:1fr}.hero{padding:18px}.tipPanel{left:auto;right:-10px;transform:translateY(-4px)}.infoTip:hover .tipPanel,.infoTip:focus .tipPanel,.infoTip:focus-within .tipPanel{transform:translateY(0)}}
+:root{--bg:#05060a;--panel:#0b1020;--grid:#1c2a4a;--text:#cfe8ff;--muted:#7aa6d9;--cyan:#35d0ff;--green:#18ff8b;--yellow:#ffe66d;--magenta:#ff2bd6;--purple:#8a5cff;--red:#ff3b5c;--orange:#ff8a3d;--white:#f5fbff}
+html[data-theme="dark"]{color-scheme:dark;--bg:#05060a;--panel:#0b1020;--grid:#1c2a4a;--text:#cfe8ff;--muted:#7aa6d9;--cyan:#35d0ff;--green:#18ff8b;--yellow:#ffe66d;--magenta:#ff2bd6;--purple:#8a5cff;--red:#ff3b5c;--orange:#ff8a3d;--white:#f5fbff}
+html[data-theme="light"]{color-scheme:light}.js-plotly-plot,.plot-container,.svg-container{transition:background-color .25s ease,color .25s ease}.modebar-btn path{fill:var(--muted)!important}.modebar-btn:hover path{fill:var(--cyan)!important}.themeToggle:focus-visible,.toggleBtn:focus-visible,.buttonLink:focus-visible,.miniNav a:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+html[data-theme="light"]{--bg:#f5f7fa;--panel:#ffffff;--grid:#e8eef5;--text:#1a1a1a;--muted:#4a5f8f;--cyan:#0066cc;--green:#009966;--yellow:#cc9900;--magenta:#cc0066;--purple:#5533aa;--red:#cc0033;--orange:#cc6600;--white:#ffffff}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;padding:22px;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;transition:background 0.3s ease,color 0.3s ease}
+html[data-theme="dark"] body{background:radial-gradient(circle at top right,rgba(53,208,255,.13),transparent 30%),radial-gradient(circle at top left,rgba(255,43,214,.09),transparent 28%),linear-gradient(180deg,#05060a,#070a12 48%,#05060a)}
+html[data-theme="light"] body{background:linear-gradient(135deg, #f5f7fa 0%, #eef2f7 100%)}
+a{color:var(--cyan);text-decoration:none}a:hover{text-decoration:underline}.page{max-width:1580px;margin:0 auto}.card{border-radius:22px;padding:18px;margin-bottom:16px;transition:background 0.3s ease,border-color 0.3s ease,box-shadow 0.3s ease}
+html[data-theme="dark"] .card{background:linear-gradient(180deg,rgba(11,16,32,.98),rgba(7,11,22,.98));border:1px solid rgba(28,42,74,.95);box-shadow:0 0 0 1px rgba(53,208,255,.025),0 16px 42px rgba(0,0,0,.24)}
+html[data-theme="light"] .card{background:rgba(255,255,255,0.95);border:1px solid rgba(26,45,95,0.15);box-shadow:0 4px 12px rgba(26,45,95,0.08)}
+.hero{position:relative;overflow:hidden;padding:24px;border-radius:22px;transition:background 0.3s ease,border-color 0.3s ease,box-shadow 0.3s ease}
+html[data-theme="dark"] .hero{border:1px solid rgba(53,208,255,.28);box-shadow:0 0 46px rgba(53,208,255,.10),inset 0 0 58px rgba(53,208,255,.04)}
+html[data-theme="light"] .hero{border:1px solid rgba(26,45,95,0.25);box-shadow:0 0 46px rgba(26,45,95,0.08),inset 0 0 58px rgba(26,45,95,0.02)}
+.hero:before{content:"";position:absolute;inset:-45%;animation:slowSpin 28s linear infinite;opacity:.7;pointer-events:none}
+html[data-theme="dark"] .hero:before{background:conic-gradient(from 180deg,transparent,rgba(53,208,255,.12),transparent,rgba(255,43,214,.10),transparent)}
+html[data-theme="light"] .hero:before{background:conic-gradient(from 180deg,transparent,rgba(26,45,95,.08),transparent,rgba(204,0,102,.06),transparent)}
+.hero>*{position:relative;z-index:1}@keyframes slowSpin{to{transform:rotate(360deg)}}h1,h2,h3,h4{margin:0 0 10px 0}h1{font-size:clamp(30px,4.4vw,60px);line-height:.98;letter-spacing:-.055em}h2{font-size:22px;letter-spacing:-.02em}.sub,.muted{color:var(--muted)}.eyebrow{color:var(--green);font-weight:800;letter-spacing:.16em;text-transform:uppercase;font-size:12px;margin-bottom:8px}.heroGrid{display:grid;grid-template-columns:minmax(0,1fr) 270px;gap:20px;align-items:center}.brandOrb{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;min-height:220px;border-radius:28px;border:1px solid rgba(53,208,255,.24);transition:background 0.3s ease,border-color 0.3s ease,box-shadow 0.3s ease}
+html[data-theme="dark"] .brandOrb{background:radial-gradient(circle at center,rgba(53,208,255,.16),rgba(138,92,255,.07),rgba(0,0,0,.10) 68%);box-shadow:inset 0 0 55px rgba(53,208,255,.08),0 0 42px rgba(53,208,255,.06)}
+html[data-theme="light"] .brandOrb{background:radial-gradient(circle at center,rgba(26,45,95,0.12),rgba(85,51,170,0.05),rgba(255,255,255,.10) 68%);border:1px solid rgba(26,45,95,0.2);box-shadow:inset 0 0 55px rgba(26,45,95,0.04),0 0 42px rgba(26,45,95,0.03)}
+.brandOrb img{width:min(185px,82%);height:auto;animation:logoPulse 4.8s ease-in-out infinite}
+html[data-theme="dark"] .brandOrb img{filter:drop-shadow(0 0 18px rgba(53,208,255,.55)) drop-shadow(0 0 34px rgba(255,43,214,.28))}
+html[data-theme="light"] .brandOrb img{filter:drop-shadow(0 0 18px rgba(26,45,95,.35)) drop-shadow(0 0 34px rgba(204,0,102,.18))}
+.brandOrb .orbText{font-size:12px;color:var(--muted);letter-spacing:.10em;text-transform:uppercase;font-weight:800}@keyframes logoPulse{0%,100%{transform:translateY(0) scale(1)}50%{transform:translateY(-3px) scale(1.025)}}
+html[data-theme="dark"] @keyframes logoPulse{0%,100%{filter:drop-shadow(0 0 16px rgba(53,208,255,.50)) drop-shadow(0 0 30px rgba(255,43,214,.22))}50%{filter:drop-shadow(0 0 26px rgba(53,208,255,.72)) drop-shadow(0 0 48px rgba(255,43,214,.34))}}
+.heroMeta{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}.metaPill{display:inline-flex;gap:8px;align-items:center;padding:8px 11px;border-radius:999px;font-size:12px;color:var(--text);transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .metaPill{background:rgba(53,208,255,.08);border:1px solid rgba(53,208,255,.22)}
+html[data-theme="light"] .metaPill{background:rgba(26,45,95,0.08);border:1px solid rgba(26,45,95,0.18)}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(240px,1fr));gap:16px}.grid4{display:grid;grid-template-columns:repeat(4,minmax(190px,1fr));gap:16px}.metricCard{border-radius:18px;padding:16px;position:relative;overflow:hidden;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .metricCard{background:linear-gradient(180deg,rgba(16,23,45,.92),rgba(10,15,28,.96));border:1px solid rgba(53,208,255,.18)}
+html[data-theme="light"] .metricCard{background:linear-gradient(180deg,rgba(230,238,248,.92),rgba(240,245,252,.96));border:1px solid rgba(26,45,95,0.15)}
+.metricCard:after{content:"";position:absolute;inset:auto -20% -50% -20%;height:70%;pointer-events:none}
+html[data-theme="dark"] .metricCard:after{background:radial-gradient(circle at center,rgba(53,208,255,.09),transparent 70%)}
+html[data-theme="light"] .metricCard:after{background:radial-gradient(circle at center,rgba(26,45,95,.05),transparent 70%)}
+.metricLabel{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.10em}.metricValue{font-size:26px;font-weight:850;margin-top:6px}.metricHint{color:var(--muted);font-size:12px;margin-top:6px}.brandLinks,.sectionNav,.toggleBar{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}.buttonLink,.pill{display:inline-flex;align-items:center;gap:8px;color:var(--text);border-radius:999px;padding:9px 14px;font-size:13px;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .buttonLink,html[data-theme="dark"] .pill{background:rgba(53,208,255,.08);border:1px solid rgba(53,208,255,.24)}
+html[data-theme="light"] .buttonLink,html[data-theme="light"] .pill{background:rgba(26,45,95,0.08);border:1px solid rgba(26,45,95,0.18)}
+html[data-theme="dark"] .buttonLink.primary{background:linear-gradient(90deg,rgba(53,208,255,.18),rgba(138,92,255,.16))}
+html[data-theme="light"] .buttonLink.primary{background:linear-gradient(90deg,rgba(26,45,95,0.15),rgba(85,51,170,0.12))}
+html[data-theme="dark"] .buttonLink.green{border-color:rgba(24,255,139,.28);background:rgba(24,255,139,.08)}
+html[data-theme="light"] .buttonLink.green{border-color:rgba(0,153,102,0.3);background:rgba(0,153,102,0.08)}
+html[data-theme="dark"] .buttonLink.magenta{border-color:rgba(255,43,214,.28);background:rgba(255,43,214,.08)}
+html[data-theme="light"] .buttonLink.magenta{border-color:rgba(204,0,102,0.3);background:rgba(204,0,102,0.08)}
+html[data-theme="dark"] .buttonLink.yellow{border-color:rgba(255,230,109,.30);background:rgba(255,230,109,.08)}
+html[data-theme="light"] .buttonLink.yellow{border-color:rgba(204,153,0,0.3);background:rgba(204,153,0,0.08)}
+.toggleBtn{appearance:none;padding:9px 12px;border-radius:999px;cursor:pointer;transition:background 0.3s ease,border-color 0.3s ease;font-weight:600;display:inline-flex;align-items:center;gap:6px}
+html[data-theme="dark"] .toggleBtn{border:1px solid rgba(53,208,255,.22);background:rgba(53,208,255,.08);color:var(--text)}
+html[data-theme="light"] .toggleBtn{border:1px solid rgba(26,45,95,0.22);background:rgba(26,45,95,0.08);color:var(--text)}
+html[data-theme="dark"] .toggleBtn:hover{background:rgba(53,208,255,.16)}
+html[data-theme="light"] .toggleBtn:hover{background:rgba(26,45,95,0.15)}
+.readerGuide{border-radius:16px;padding:12px;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .readerGuide{border:1px solid rgba(24,255,139,.20);background:linear-gradient(180deg,rgba(24,255,139,.06),rgba(53,208,255,.035))}
+html[data-theme="light"] .readerGuide{border:1px solid rgba(0,153,102,0.2);background:linear-gradient(180deg,rgba(0,153,102,0.06),rgba(26,45,95,0.025))}
+.guideList{display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:12px;margin-top:12px}.guideItem{border-radius:16px;padding:13px;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .guideItem{border:1px solid rgba(53,208,255,.14);background:rgba(0,0,0,.18)}
+html[data-theme="light"] .guideItem{border:1px solid rgba(26,45,95,0.12);background:rgba(26,45,95,0.05)}
+.guideItem b{color:var(--white)}.graphCard{padding:0;overflow:hidden}.graphHeader{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 18px 0 18px}.graphKicker{color:var(--green);font-weight:850;letter-spacing:.15em;text-transform:uppercase;font-size:11px;margin-bottom:5px}.graphTitleLine{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.graphHeader p{margin:0 0 6px 0;max-width:980px}.infoTip{position:relative;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:rgba(53,208,255,.10);color:var(--cyan);font-size:12px;font-weight:900;cursor:help;line-height:1;vertical-align:middle;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .infoTip{border:1px solid rgba(53,208,255,.42)}
+html[data-theme="light"] .infoTip{border:1px solid rgba(26,45,95,0.3)}
+.tipPanel{position:absolute;left:50%;top:28px;transform:translateX(-50%) translateY(-4px);width:min(430px,calc(100vw - 46px));padding:13px 14px;border-radius:16px;color:var(--text);font-size:12px;line-height:1.42;text-align:left;opacity:0;visibility:hidden;transition:.16s ease;z-index:50}
+html[data-theme="dark"] .tipPanel{border:1px solid rgba(53,208,255,.28);background:rgba(5,6,10,.98);box-shadow:0 18px 55px rgba(0,0,0,.55),0 0 32px rgba(53,208,255,.12)}
+html[data-theme="light"] .tipPanel{border:1px solid rgba(26,45,95,0.2);background:rgba(255,255,255,.98);box-shadow:0 18px 55px rgba(26,45,95,.15),0 0 32px rgba(26,45,95,0.08)}
+.infoTip:hover .tipPanel,.infoTip:focus .tipPanel,.infoTip:focus-within .tipPanel{opacity:1;visibility:visible;transform:translateX(-50%) translateY(0)}.tipPanel strong{color:var(--green)}.tipPanel .tipBlock{margin-top:7px}.tableWrap{overflow-x:auto}.search{width:100%;padding:10px 12px;color:var(--text);border-radius:12px;margin:8px 0 12px 0;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .search{background:rgba(0,0,0,.24);border:1px solid rgba(28,42,74,.95)}
+html[data-theme="light"] .search{background:rgba(26,45,95,0.05);border:1px solid rgba(26,45,95,0.15)}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 10px;text-align:left;vertical-align:top;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] th,html[data-theme="dark"] td{border-bottom:1px solid rgba(28,42,74,.78)}
+html[data-theme="light"] th,html[data-theme="light"] td{border-bottom:1px solid rgba(26,45,95,0.15)}
+th{cursor:pointer;color:var(--cyan);position:sticky;top:0;z-index:2}
+html[data-theme="dark"] th{background:#0b1020}
+html[data-theme="light"] th{background:#f5f7fa}
+.small{font-size:12px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace}.monoBlock{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;border-radius:14px;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .monoBlock{background:rgba(0,0,0,.20);border:1px solid rgba(28,42,74,.95)}
+html[data-theme="light"] .monoBlock{background:rgba(26,45,95,0.05);border:1px solid rgba(26,45,95,0.15)}
+.callout{padding:12px 14px;border-radius:14px;border-left:3px solid var(--green);transition:background 0.3s ease}
+html[data-theme="dark"] .callout{background:rgba(24,255,139,.06)}
+html[data-theme="light"] .callout{background:rgba(0,153,102,0.06)}
+.warnout{padding:12px 14px;border-radius:14px;border-left:3px solid var(--yellow);transition:background 0.3s ease}
+html[data-theme="dark"] .warnout{background:rgba(255,230,109,.06)}
+html[data-theme="light"] .warnout{background:rgba(204,153,0,0.06)}
+hr.sep{border:none;margin:16px 0;transition:border-color 0.3s ease}
+html[data-theme="dark"] hr.sep{border-top:1px solid rgba(28,42,74,.9)}
+html[data-theme="light"] hr.sep{border-top:1px solid rgba(26,45,95,0.15)}
+details summary{cursor:pointer}.ligandBox{display:flex;flex-direction:column;gap:10px;min-height:100%;}.ligand2dLabel,.ligand3dHead{display:flex;align-items:center;justify-content:space-between;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:800;}.ligandSvgWrap{min-height:330px;display:flex;align-items:center;justify-content:center;padding:8px 4px;border-radius:16px;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .ligandSvgWrap{background:radial-gradient(circle at center,rgba(53,208,255,.045),transparent 62%);border:1px solid rgba(53,208,255,.08)}
+html[data-theme="light"] .ligandSvgWrap{background:radial-gradient(circle at center,rgba(26,45,95,0.03),transparent 62%);border:1px solid rgba(26,45,95,0.12)}
+.pymacs-ligand-svg{width:100%;max-width:660px;height:auto;display:block;overflow:visible;}.lig3dViewer{position:relative;display:block;width:100%;height:320px;border-radius:16px;overflow:hidden;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .lig3dViewer{border:1px solid rgba(53,208,255,.18);background:radial-gradient(circle at center,rgba(53,208,255,.05),rgba(0,0,0,.18));box-shadow:inset 0 0 28px rgba(53,208,255,.035)}
+html[data-theme="light"] .lig3dViewer{border:1px solid rgba(26,45,95,0.12);background:radial-gradient(circle at center,rgba(26,45,95,0.03),rgba(255,255,255,0.08));box-shadow:inset 0 0 28px rgba(26,45,95,0.02)}
+.lig3dViewer canvas{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;display:block!important;}.ligandMeta{line-height:1.25;}.footerNote{color:var(--muted);font-size:12px;margin-top:14px}@media(max-width:1200px){.grid4{grid-template-columns:repeat(2,minmax(190px,1fr))}.grid3,.guideList{grid-template-columns:repeat(2,minmax(240px,1fr))}.heroGrid{grid-template-columns:1fr}.brandOrb{min-height:180px}}@media(max-width:820px){body{padding:12px}.grid2,.grid3,.grid4,.guideList{grid-template-columns:1fr}.hero{padding:18px}.tipPanel{left:auto;right:-10px;transform:translateY(-4px)}.infoTip:hover .tipPanel,.infoTip:focus .tipPanel,.infoTip:focus-within .tipPanel{transform:translateY(0)}}
 /* PyMACS polished dashboard overrides */
-.readerGuide,.readerGuide{border:1px solid rgba(24,255,139,.20);background:linear-gradient(180deg,rgba(24,255,139,.06),rgba(53,208,255,.035));}.ligandGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin-top:16px}.ligandBox{position:relative;display:flex;flex-direction:column;gap:12px;min-height:100%;padding:16px;border-radius:22px;background:linear-gradient(180deg,rgba(13,21,42,.98),rgba(7,10,20,.98));border:1px solid rgba(53,208,255,.18);box-shadow:inset 0 0 38px rgba(53,208,255,.025),0 18px 42px rgba(0,0,0,.20);overflow:hidden}.ligandBox:before{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:linear-gradient(90deg,var(--cyan),var(--green),var(--magenta));opacity:.72}.ligandHeader{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.ligandName{font-size:22px;letter-spacing:-.025em;margin-bottom:4px}.ligandRun{letter-spacing:.08em;text-transform:uppercase}.ligandSvgWrap{min-height:285px;background:radial-gradient(circle at center,rgba(53,208,255,.055),transparent 64%),rgba(0,0,0,.10);border:1px solid rgba(53,208,255,.12);box-shadow:inset 0 0 30px rgba(53,208,255,.025)}.pymacs-ligand-svg{max-width:100%;height:auto}.ligandMetaPills{display:flex;flex-wrap:wrap;gap:8px}.ligandPill{display:inline-flex;gap:6px;align-items:center;padding:7px 10px;border-radius:999px;background:rgba(53,208,255,.08);border:1px solid rgba(53,208,255,.16);font-size:12px;color:var(--text)}.ligandPill b{color:var(--green);letter-spacing:.08em;text-transform:uppercase;font-size:10px}.lig3dViewer{height:265px}.ligandDetails{border:1px solid rgba(28,42,74,.95);border-radius:14px;padding:9px 11px;background:rgba(0,0,0,.14)}.ligandDetails summary{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.08em}.smilesText{margin-top:8px;overflow-wrap:anywhere}.footerNote{line-height:1.45}.hero .sub{max-width:1050px;font-size:16px;line-height:1.5}.card>p.muted{line-height:1.45;max-width:1120px}
+.ligandGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin-top:16px}.ligandBox{position:relative;display:flex;flex-direction:column;gap:12px;min-height:100%;padding:16px;border-radius:22px;overflow:hidden;transition:background 0.3s ease,border-color 0.3s ease,box-shadow 0.3s ease}
+html[data-theme="dark"] .ligandBox{background:linear-gradient(180deg,rgba(13,21,42,.98),rgba(7,10,20,.98));border:1px solid rgba(53,208,255,.18);box-shadow:inset 0 0 38px rgba(53,208,255,.025),0 18px 42px rgba(0,0,0,.20)}
+html[data-theme="light"] .ligandBox{background:linear-gradient(180deg,rgba(245,247,250,.98),rgba(255,255,255,.98));border:1px solid rgba(26,45,95,0.12);box-shadow:inset 0 0 38px rgba(26,45,95,0.015),0 18px 42px rgba(26,45,95,0.08)}
+.ligandBox:before{content:"";position:absolute;inset:0 0 auto 0;height:2px;opacity:.72}
+html[data-theme="dark"] .ligandBox:before{background:linear-gradient(90deg,var(--cyan),var(--green),var(--magenta))}
+html[data-theme="light"] .ligandBox:before{background:linear-gradient(90deg,var(--cyan),var(--green),var(--magenta))}
+.ligandHeader{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.ligandName{font-size:22px;letter-spacing:-.025em;margin-bottom:4px}.ligandRun{letter-spacing:.08em;text-transform:uppercase}.ligandSvgWrap{min-height:285px;border-radius:16px;transition:background 0.3s ease,border-color 0.3s ease,box-shadow 0.3s ease}
+html[data-theme="dark"] .ligandSvgWrap{background:radial-gradient(circle at center,rgba(53,208,255,.055),transparent 64%),rgba(0,0,0,.10);border:1px solid rgba(53,208,255,.12);box-shadow:inset 0 0 30px rgba(53,208,255,.025)}
+html[data-theme="light"] .ligandSvgWrap{background:radial-gradient(circle at center,rgba(26,45,95,0.04),transparent 64%),rgba(26,45,95,0.02);border:1px solid rgba(26,45,95,0.1);box-shadow:inset 0 0 30px rgba(26,45,95,0.015)}
+.pymacs-ligand-svg{max-width:100%;height:auto}.ligandMetaPills{display:flex;flex-wrap:wrap;gap:8px}.ligandPill{display:inline-flex;gap:6px;align-items:center;padding:7px 10px;border-radius:999px;font-size:12px;color:var(--text);transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .ligandPill{background:rgba(53,208,255,.08);border:1px solid rgba(53,208,255,.16)}
+html[data-theme="light"] .ligandPill{background:rgba(26,45,95,0.08);border:1px solid rgba(26,45,95,0.14)}
+.ligandPill b{color:var(--green);letter-spacing:.08em;text-transform:uppercase;font-size:10px}.lig3dViewer{height:265px}.ligandDetails{border-radius:14px;padding:9px 11px;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .ligandDetails{border:1px solid rgba(28,42,74,.95);background:rgba(0,0,0,.14)}
+html[data-theme="light"] .ligandDetails{border:1px solid rgba(26,45,95,0.12);background:rgba(26,45,95,0.05)}
+.ligandDetails summary{font-size:12px;color:var(--muted);font-weight:800;text-transform:uppercase;letter-spacing:.08em}.smilesText{margin-top:8px;overflow-wrap:anywhere}.footerNote{line-height:1.45}.hero .sub{max-width:1050px;font-size:16px;line-height:1.5}.card>p.muted{line-height:1.45;max-width:1120px}
 @media(max-width:1320px){.ligandGrid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:820px){.ligandGrid{grid-template-columns:1fr}.lig3dViewer{height:255px}.ligandSvgWrap{min-height:245px}}
-
+.themeToggleContainer{position:sticky;top:10px;z-index:70;margin-bottom:16px;display:flex;justify-content:flex-end}
+.themeToggle{display:flex;align-items:center;gap:6px;padding:8px 12px;border-radius:999px;border:1px solid rgba(53,208,255,0.22);background:rgba(5,6,10,.88);backdrop-filter:blur(10px);cursor:pointer;transition:all 0.3s ease;font-weight:600;font-size:12px;color:var(--text)}
+html[data-theme="light"] .themeToggle{border:1px solid rgba(26,45,95,0.2);background:rgba(255,255,255,.88)}
+.themeToggle:hover{transform:scale(1.05);box-shadow:0 4px 12px rgba(0,0,0,0.15)}
+.themeSun,.themeMoon{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;font-size:14px}
 '''
 
 GLOBAL_JS = r'''
 function hookSearch(tableId){const search=document.getElementById(tableId+'_search');const table=document.getElementById(tableId);if(!search||!table)return;search.addEventListener('input',function(){const q=(this.value||'').toLowerCase().trim();table.querySelectorAll('tbody tr').forEach(tr=>{tr.style.display=tr.innerText.toLowerCase().includes(q)?'':'none';});});}function hookSort(tableId){const table=document.getElementById(tableId);if(!table||!table.tHead)return;const ths=Array.from(table.tHead.rows[0].cells);ths.forEach((th,colIndex)=>{th.addEventListener('click',()=>{const tbody=table.tBodies[0];const rows=Array.from(tbody.querySelectorAll('tr'));const asc=!(th.dataset.asc==='1');ths.forEach(x=>x.dataset.asc='');th.dataset.asc=asc?'1':'0';rows.sort((a,b)=>{const ta=a.cells[colIndex].innerText.trim();const tb=b.cells[colIndex].innerText.trim();const na=parseFloat(ta);const nb=parseFloat(tb);const aNum=!Number.isNaN(na)&&ta.match(/^-?\d+(\.\d+)?/);const bNum=!Number.isNaN(nb)&&tb.match(/^-?\d+(\.\d+)?/);if(aNum&&bNum)return asc?na-nb:nb-na;return asc?ta.localeCompare(tb):tb.localeCompare(ta);});rows.forEach(r=>tbody.appendChild(r));});});}function wireTables(ids){ids.forEach(id=>{hookSearch(id);hookSort(id);});}function togglePanel(kind){document.querySelectorAll('[data-panel="'+kind+'"]').forEach(n=>{n.hidden=!n.hidden;});}
 
+window.__pymacsLigandViewers = window.__pymacsLigandViewers || [];
+
+function decodeBase64Text(b64){
+  try { return decodeURIComponent(escape(window.atob(b64))); }
+  catch (e) { try { return window.atob(b64); } catch (_) { return ''; } }
+}
+
+function getLigandViewerBg(theme){
+  return theme === 'light' ? '#ffffff' : '#05060a';
+}
+
+function updateLigand3DTheme(theme){
+  const bgColor = getLigandViewerBg(theme);
+  (window.__pymacsLigandViewers || []).forEach((entry) => {
+    try {
+      if (entry && entry.viewer && typeof entry.viewer.setBackgroundColor === 'function') {
+        entry.viewer.setBackgroundColor(bgColor);
+        entry.viewer.render();
+      }
+    } catch (e) {}
+  });
+}
 
 function initLigand3DViewers(){
   if (!window.$3Dmol) {
@@ -2603,6 +2870,9 @@ function initLigand3DViewers(){
     });
     return;
   }
+
+  window.__pymacsLigandViewers = window.__pymacsLigandViewers || [];
+
   document.querySelectorAll('.js-lig3d').forEach((el) => {
     if (el.dataset.initialized === '1') return;
     el.dataset.initialized = '1';
@@ -2612,9 +2882,7 @@ function initLigand3DViewers(){
       el.innerHTML = '<div style="padding:12px;color:#7aa6d9;font-size:12px;">No 3D structure payload available.</div>';
       return;
     }
-    let txt = '';
-    try { txt = decodeURIComponent(escape(window.atob(b64))); }
-    catch (e) { try { txt = window.atob(b64); } catch (_) { txt = ''; } }
+    const txt = decodeBase64Text(b64);
     if (!txt) {
       el.innerHTML = '<div style="padding:12px;color:#ff8a3d;font-size:12px;">Could not decode 3D structure payload.</div>';
       return;
@@ -2626,7 +2894,8 @@ function initLigand3DViewers(){
       el.style.position = 'relative';
       el.style.overflow = 'hidden';
       el.style.minHeight = el.style.minHeight || '320px';
-      const viewer = $3Dmol.createViewer(el, {backgroundColor:'#05060a', antialias:true});
+      const theme = document.documentElement.getAttribute('data-theme') || window.__PYMACS_INITIAL_THEME || 'dark';
+      const viewer = $3Dmol.createViewer(el, {backgroundColor:getLigandViewerBg(theme), antialias:true});
       viewer.addModel(txt, fmt);
       viewer.setStyle({}, {stick:{radius:0.16,color:'#ffe66d'}, sphere:{scale:0.22,color:'#ffe66d'}});
       viewer.setStyle({elem:'H'},  {stick:{radius:0.08,color:'#9fb7d5'}, sphere:{scale:0.13,color:'#9fb7d5'}});
@@ -2640,6 +2909,7 @@ function initLigand3DViewers(){
       viewer.setStyle({elem:'P'},  {stick:{radius:0.17,color:'#ffb347'}, sphere:{scale:0.32,color:'#ffb347'}});
       viewer.setStyle({elem:'S'},  {stick:{radius:0.17,color:'#ffd84d'}, sphere:{scale:0.32,color:'#ffd84d'}});
       viewer.zoomTo(); viewer.rotate(18,'y'); viewer.rotate(-8,'x'); viewer.render();
+      window.__pymacsLigandViewers.push({el:el, viewer:viewer});
       setTimeout(() => { try { viewer.resize(); viewer.zoomTo(); viewer.render(); } catch(e) {} }, 250);
     } catch (e) {
       console.warn('3D viewer failed:', e);
@@ -2648,19 +2918,255 @@ function initLigand3DViewers(){
   });
 }
 document.addEventListener('DOMContentLoaded', initLigand3DViewers);
-window.addEventListener('load', initLigand3DViewers);
 
 '''
 
 GLOBAL_CSS += r'''
-.miniNavWrap{position:sticky;top:10px;z-index:60;margin-bottom:16px}.miniNav{display:flex;gap:8px;flex-wrap:wrap;padding:10px 12px;border-radius:16px;background:rgba(5,6,10,.88);backdrop-filter:blur(10px);border:1px solid rgba(53,208,255,.18);box-shadow:0 12px 30px rgba(0,0,0,.24)}.miniNav a{display:inline-flex;align-items:center;padding:8px 10px;border-radius:999px;background:rgba(53,208,255,.08);border:1px solid rgba(53,208,255,.16);color:var(--text);font-size:12px}.miniNav a.active{background:rgba(24,255,139,.12);border-color:rgba(24,255,139,.34);color:var(--white)}.graphCard[id],.card[id]{scroll-margin-top:90px}.backTop{position:fixed;right:16px;bottom:16px;z-index:65;display:inline-flex;align-items:center;justify-content:center;padding:11px 13px;border-radius:999px;background:rgba(53,208,255,.14);border:1px solid rgba(53,208,255,.28);color:var(--text);box-shadow:0 10px 28px rgba(0,0,0,.24)}.notePill{margin:0 0 12px 0;padding:10px 12px;border-radius:14px;background:rgba(53,208,255,.06);border:1px solid rgba(53,208,255,.14);font-size:12px;color:var(--muted)}
+.miniNavWrap{position:sticky;top:10px;z-index:60;margin-bottom:16px}.miniNav{display:flex;gap:8px;flex-wrap:wrap;padding:10px 12px;border-radius:16px;backdrop-filter:blur(10px);box-shadow:0 12px 30px rgba(0,0,0,.24);transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .miniNav{background:rgba(5,6,10,.88);border:1px solid rgba(53,208,255,.18)}
+html[data-theme="light"] .miniNav{background:rgba(255,255,255,.88);border:1px solid rgba(26,45,95,0.15)}
+.miniNav a{display:inline-flex;align-items:center;padding:8px 10px;border-radius:999px;color:var(--text);font-size:12px;transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .miniNav a{background:rgba(53,208,255,.08);border:1px solid rgba(53,208,255,.16)}
+html[data-theme="light"] .miniNav a{background:rgba(26,45,95,0.08);border:1px solid rgba(26,45,95,0.14)}
+html[data-theme="dark"] .miniNav a.active{background:rgba(24,255,139,.12);border-color:rgba(24,255,139,.34);color:var(--white)}
+html[data-theme="light"] .miniNav a.active{background:rgba(0,153,102,.12);border-color:rgba(0,153,102,.34);color:var(--text)}
+.graphCard[id],.card[id]{scroll-margin-top:90px}.backTop{position:fixed;right:16px;bottom:16px;z-index:65;display:inline-flex;align-items:center;justify-content:center;padding:11px 13px;border-radius:999px;color:var(--text);box-shadow:0 10px 28px rgba(0,0,0,.24);transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .backTop{background:rgba(53,208,255,.14);border:1px solid rgba(53,208,255,.28)}
+html[data-theme="light"] .backTop{background:rgba(26,45,95,0.12);border:1px solid rgba(26,45,95,0.2)}
+.notePill{margin:0 0 12px 0;padding:10px 12px;border-radius:14px;font-size:12px;color:var(--muted);transition:background 0.3s ease,border-color 0.3s ease}
+html[data-theme="dark"] .notePill{background:rgba(53,208,255,.06);border:1px solid rgba(53,208,255,.14)}
+html[data-theme="light"] .notePill{background:rgba(26,45,95,0.05);border:1px solid rgba(26,45,95,0.12)}
 @media(max-width:820px){.miniNav{padding:8px}.miniNav a{font-size:11px;padding:7px 9px}.backTop{right:10px;bottom:10px}}
 '''
 
 GLOBAL_JS += r'''
-function initActiveMiniNav(){const links=Array.from(document.querySelectorAll('.miniNav a[href^="#"]'));if(!links.length||!('IntersectionObserver'in window))return;const byId=new Map();links.forEach(link=>{const id=link.getAttribute('href').slice(1);const el=document.getElementById(id);if(el)byId.set(id,{link,el});});const observer=new IntersectionObserver((entries)=>{entries.forEach(entry=>{const id=entry.target.id;const meta=byId.get(id);if(!meta)return;if(entry.isIntersecting){links.forEach(l=>l.classList.remove('active'));meta.link.classList.add('active');}});},{rootMargin:'-25% 0px -60% 0px',threshold:[0,0.2,0.6]});byId.forEach(meta=>observer.observe(meta.el));}
+function initActiveMiniNav(){
+  const links=Array.from(document.querySelectorAll('.miniNav a[href^="#"]'));
+  if(!links.length||!('IntersectionObserver'in window))return;
+  const byId=new Map();
+  links.forEach(link=>{const id=link.getAttribute('href').slice(1);const el=document.getElementById(id);if(el)byId.set(id,{link,el});});
+  const observer=new IntersectionObserver((entries)=>{entries.forEach(entry=>{const id=entry.target.id;const meta=byId.get(id);if(!meta)return;if(entry.isIntersecting){links.forEach(l=>l.classList.remove('active'));meta.link.classList.add('active');}});},{rootMargin:'-25% 0px -60% 0px',threshold:[0,0.2,0.6]});
+  byId.forEach(meta=>observer.observe(meta.el));
+}
 document.addEventListener('DOMContentLoaded', initActiveMiniNav);
-window.addEventListener('load', initActiveMiniNav);
+
+function normalizeTheme(theme){
+  return theme === 'light' || theme === 'dark' ? theme : 'dark';
+}
+
+function getStoredTheme(){
+  try {
+    const saved = localStorage.getItem('pymacs-theme');
+    return normalizeTheme(saved);
+  } catch (e) {
+    return 'dark';
+  }
+}
+
+function getCurrentTheme(){
+  return normalizeTheme(document.documentElement.getAttribute('data-theme') || window.__PYMACS_INITIAL_THEME || getStoredTheme());
+}
+
+function cssVar(name, fallback){
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+function currentThemeValues(theme){
+  return {
+    bg: cssVar('--bg', theme === 'dark' ? '#05060a' : '#f5f7fa'),
+    panel: cssVar('--panel', theme === 'dark' ? '#0b1020' : '#ffffff'),
+    text: cssVar('--text', theme === 'dark' ? '#cfe8ff' : '#1a1a1a'),
+    muted: cssVar('--muted', theme === 'dark' ? '#7aa6d9' : '#4a5f8f'),
+    grid: cssVar('--grid', theme === 'dark' ? '#1c2a4a' : '#d8e0f0'),
+    hoverBg: theme === 'dark' ? 'rgba(11,16,32,0.96)' : 'rgba(255,255,255,0.97)',
+    hoverBorder: theme === 'dark' ? '#35d0ff' : '#1a2d5f'
+  };
+}
+
+function axisRelayout(update, axisName, values){
+  update[axisName + '.showgrid'] = true;
+  update[axisName + '.gridcolor'] = values.grid;
+  update[axisName + '.linecolor'] = values.grid;
+  update[axisName + '.zerolinecolor'] = values.grid;
+  update[axisName + '.tickcolor'] = values.grid;
+  update[axisName + '.tickfont.color'] = values.muted;
+  update[axisName + '.title.font.color'] = values.text;
+}
+
+function colorbarRelayout(update, baseName, values){
+  update[baseName + '.colorbar.tickfont.color'] = values.muted;
+  update[baseName + '.colorbar.title.font.color'] = values.text;
+}
+
+function sceneRelayout(update, sceneName, values){
+  update[sceneName + '.bgcolor'] = values.panel;
+  ['xaxis','yaxis','zaxis'].forEach((axis) => {
+    const base = sceneName + '.' + axis;
+    update[base + '.gridcolor'] = values.grid;
+    update[base + '.linecolor'] = values.grid;
+    update[base + '.zerolinecolor'] = values.grid;
+    update[base + '.tickfont.color'] = values.muted;
+    update[base + '.title.font.color'] = values.text;
+    update[base + '.backgroundcolor'] = values.panel;
+  });
+}
+
+function updateTraceColorbars(gd, values){
+  if (!window.Plotly || !gd || !gd.data) return;
+  gd.data.forEach((trace, i) => {
+    try {
+      if (trace && trace.marker && trace.marker.colorbar) {
+        Plotly.restyle(gd, {
+          'marker.colorbar.tickfont.color': values.muted,
+          'marker.colorbar.title.font.color': values.text
+        }, [i]);
+      }
+      if (trace && trace.colorbar) {
+        Plotly.restyle(gd, {
+          'colorbar.tickfont.color': values.muted,
+          'colorbar.title.font.color': values.text
+        }, [i]);
+      }
+    } catch (e) {}
+  });
+}
+
+function applyPlotlyTheme(theme){
+  if (!window.Plotly) return;
+  theme = normalizeTheme(theme);
+  const values = currentThemeValues(theme);
+
+  document.querySelectorAll('.js-plotly-plot').forEach((gd) => {
+    try {
+      const layout = gd.layout || {};
+      const update = {
+        paper_bgcolor: values.panel,
+        plot_bgcolor: values.panel,
+        'font.color': values.text,
+        'title.font.color': values.text,
+        'legend.font.color': values.muted,
+        'hoverlabel.bgcolor': values.hoverBg,
+        'hoverlabel.bordercolor': values.hoverBorder,
+        'hoverlabel.font.color': values.text
+      };
+
+      Object.keys(layout).forEach((key) => {
+        if (/^xaxis\d*$/.test(key) || /^yaxis\d*$/.test(key)) axisRelayout(update, key, values);
+        if (/^coloraxis\d*$/.test(key)) colorbarRelayout(update, key, values);
+        if (/^scene\d*$/.test(key)) sceneRelayout(update, key, values);
+        if (/^polar\d*$/.test(key)) {
+          update[key + '.bgcolor'] = values.panel;
+          update[key + '.radialaxis.gridcolor'] = values.grid;
+          update[key + '.radialaxis.tickfont.color'] = values.muted;
+          update[key + '.angularaxis.gridcolor'] = values.grid;
+          update[key + '.angularaxis.tickfont.color'] = values.muted;
+        }
+      });
+
+      // Safety net for the common first x/y axes even if Plotly has not yet
+      // materialized full layout keys.
+      axisRelayout(update, 'xaxis', values);
+      axisRelayout(update, 'yaxis', values);
+
+      if (Array.isArray(layout.annotations)) {
+        update.annotations = layout.annotations.map((ann) => ({
+          ...ann,
+          font: {...(ann.font || {}), color: values.text},
+          arrowcolor: ann.arrowcolor || values.muted
+        }));
+      }
+
+      const relayoutResult = Plotly.relayout(gd, update);
+      updateTraceColorbars(gd, values);
+      if (relayoutResult && typeof relayoutResult.then === 'function') {
+        relayoutResult.then(() => { try { Plotly.Plots.resize(gd); } catch (e) {} });
+      } else {
+        try { Plotly.Plots.resize(gd); } catch (e) {}
+      }
+    } catch (e) {
+      console.warn('Could not apply PyMACS Plotly theme:', e);
+    }
+  });
+}
+
+function updateThemeToggleDisplay(theme){
+  const toggleBtn = document.getElementById('themeToggleBtn');
+  if (!toggleBtn) return;
+
+  const sunIcon = toggleBtn.querySelector('.themeSun');
+  const moonIcon = toggleBtn.querySelector('.themeMoon');
+  const label = toggleBtn.querySelector('.themeLabel');
+
+  if (theme === 'light'){
+    if (sunIcon) sunIcon.style.display = 'inline-flex';
+    if (moonIcon) moonIcon.style.display = 'none';
+    if (label) label.textContent = 'Dark Mode';
+    toggleBtn.setAttribute('aria-label', 'Switch to dark mode');
+    toggleBtn.setAttribute('title', 'Switch to dark mode');
+  } else {
+    if (sunIcon) sunIcon.style.display = 'none';
+    if (moonIcon) moonIcon.style.display = 'inline-flex';
+    if (label) label.textContent = 'Light Mode';
+    toggleBtn.setAttribute('aria-label', 'Switch to light mode');
+    toggleBtn.setAttribute('title', 'Switch to light mode');
+  }
+}
+
+function setTheme(theme, options){
+  theme = normalizeTheme(theme);
+  const opts = options || {};
+
+  document.documentElement.setAttribute('data-theme', theme);
+  document.documentElement.style.colorScheme = theme;
+  window.__PYMACS_INITIAL_THEME = theme;
+
+  if (opts.persist !== false) {
+    try { localStorage.setItem('pymacs-theme', theme); } catch (e) {}
+  }
+
+  const metaTheme = document.querySelector('meta[name="theme-color"]');
+  if (metaTheme) metaTheme.setAttribute('content', theme === 'dark' ? '#05060a' : '#ffffff');
+
+  updateThemeToggleDisplay(theme);
+  requestAnimationFrame(() => {
+    applyPlotlyTheme(theme);
+    if (typeof updateLigand3DTheme === 'function') updateLigand3DTheme(theme);
+  });
+}
+
+function initThemeToggle(){
+  const savedTheme = getCurrentTheme();
+  setTheme(savedTheme, {persist:false});
+
+  const toggleBtn = document.getElementById('themeToggleBtn');
+  if (toggleBtn && toggleBtn.dataset.themeBound !== '1') {
+    toggleBtn.dataset.themeBound = '1';
+    toggleBtn.addEventListener('click', () => {
+      const currentTheme = getCurrentTheme();
+      setTheme(currentTheme === 'dark' ? 'light' : 'dark');
+    });
+  }
+
+  // Plotly charts are created by inline Plotly.newPlot scripts. Apply the
+  // selected theme more than once and observe late-added charts so graphs do
+  // not revert to their baked-in dark layout after page load/resizes.
+  const applyCurrent = () => applyPlotlyTheme(getCurrentTheme());
+  requestAnimationFrame(applyCurrent);
+  setTimeout(applyCurrent, 150);
+  setTimeout(applyCurrent, 800);
+
+  try {
+    const observer = new MutationObserver((mutations) => {
+      if (mutations.some(m => Array.from(m.addedNodes || []).some(n => n.nodeType === 1 && (n.classList?.contains('js-plotly-plot') || n.querySelector?.('.js-plotly-plot'))))) {
+        requestAnimationFrame(applyCurrent);
+      }
+    });
+    observer.observe(document.body, {childList:true, subtree:true});
+  } catch (e) {}
+}
+
+document.addEventListener('DOMContentLoaded', initThemeToggle);
 '''
 
 def load_time_series_csv(path: Optional[Path], value_candidates: Sequence[str], out_col: str) -> Optional[pd.DataFrame]:
@@ -3189,7 +3695,20 @@ def page_shell(title: str, body: str, bundle_root: Path, current_file: Path, tab
     plotly_rel = rel_href(current_file, bundle_root / "assets" / "plotly.min.js")
     favicon_rel = rel_href(current_file, bundle_root / PYMACS_LOGO_OUTPUT_REL)
     ids_js = json.dumps(table_ids)
-    return f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>{html_escape(title)}</title><link rel="icon" type="image/png" href="{html_escape(favicon_rel)}"/><link rel="apple-touch-icon" href="{html_escape(favicon_rel)}"/><meta name="theme-color" content="#05060a"/><meta name="description" content="PyMACS comparative molecular dynamics dashboard export."/><script src="{html_escape(plotly_rel)}"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script><style>{GLOBAL_CSS}</style></head><body><div id="top" class="page">{body}</div><script>{GLOBAL_JS}</script><script>wireTables({ids_js});</script></body></html>'
+    theme_toggle = '<div class="themeToggleContainer"><button id="themeToggleBtn" class="themeToggle" type="button" aria-label="Switch theme" title="Switch theme"><span class="themeMoon" aria-hidden="true">🌙</span><span class="themeSun" aria-hidden="true" style="display:none">☀️</span><span class="themeLabel">Light Mode</span></button></div>'
+    early_theme_script = '''<script>
+(function(){
+  var theme = 'dark';
+  try {
+    var saved = localStorage.getItem('pymacs-theme');
+    if (saved === 'light' || saved === 'dark') theme = saved;
+  } catch (e) {}
+  document.documentElement.setAttribute('data-theme', theme);
+  document.documentElement.style.colorScheme = theme;
+  window.__PYMACS_INITIAL_THEME = theme;
+})();
+</script>'''
+    return f'<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>{html_escape(title)}</title><link rel="icon" type="image/png" href="{html_escape(favicon_rel)}"/><link rel="apple-touch-icon" href="{html_escape(favicon_rel)}"/><meta name="theme-color" content="#05060a"/><meta name="description" content="PyMACS comparative molecular dynamics dashboard export."/>{early_theme_script}<script src="{html_escape(plotly_rel)}"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script><style>{GLOBAL_CSS}</style></head><body>{theme_toggle}<div id="top" class="page">{body}</div><script>{GLOBAL_JS}</script><script>wireTables({ids_js});</script></body></html>'
 
 def pymacs_brand_links(github_url: str, preprint_url: str, contact_email: str) -> str:
     subject = "PyMACS comparative MD dashboard"
