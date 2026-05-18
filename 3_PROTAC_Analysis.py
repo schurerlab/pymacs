@@ -1,1924 +1,1720 @@
-import MDAnalysis as mda
-from MDAnalysis.analysis import rms, distances
-from MDAnalysis.analysis.rms import RMSD, RMSF
-from MDAnalysis.analysis.hydrogenbonds.hbond_analysis import HydrogenBondAnalysis
-from MDAnalysis.analysis.contacts import Contacts
+#!/usr/bin/env python3
+"""
+Generic PROTAC / ternary-complex MD analysis.
 
+This script is designed for PROTAC systems prepared by the current
+automation workflow where `atomIndex.txt` is the source of truth for
+protein atom ranges:
+
+  - first protein entry  -> Ligase
+  - later protein entries -> Target_A, Target_B, Target_C, ...
+
+The ligand / PROTAC identity is detected dynamically when possible and
+can always be overridden with `--ligand`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import re
+import sys
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt
+import networkx as nx
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import seaborn as sns
-import os
-import re
-import glob
 import MDAnalysis as mda
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
 
-import mdtraj as md
-from scipy.cluster.hierarchy import linkage, fcluster
-import networkx as nx
-
-from rdkit import Chem
-from rdkit.Chem import rdMolTransforms, AllChem
-from openbabel import openbabel
-from sklearn.decomposition import PCA
-from collections import Counter
-from mdtraj import compute_dssp
-from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib import rcParams
-import matplotlib.font_manager as fm
+from MDAnalysis.analysis import align
+from MDAnalysis.lib.distances import distance_array
 
 
+STANDARD_AMINO_ACIDS = {
+    "ALA",
+    "ARG",
+    "ASN",
+    "ASP",
+    "CYS",
+    "GLN",
+    "GLU",
+    "GLY",
+    "HIS",
+    "ILE",
+    "LEU",
+    "LYS",
+    "MET",
+    "PHE",
+    "PRO",
+    "SER",
+    "THR",
+    "TRP",
+    "TYR",
+    "VAL",
+}
 
+WATER_NAMES = {"HOH", "WAT", "SOL", "TIP3", "TIP3P", "SPC", "SPCE"}
+ION_NAMES = {
+    "NA",
+    "CL",
+    "K",
+    "MG",
+    "CA",
+    "ZN",
+    "MN",
+    "FE",
+    "CU",
+    "CO",
+    "NI",
+    "CD",
+}
+SOLVENT_LIKE_NAMES = {
+    "DMS",
+    "DMSO",
+    "PEG",
+    "EDO",
+    "GOL",
+    "EOH",
+    "IPA",
+    "ACT",
+    "ACN",
+    "SO4",
+    "PO4",
+    "MES",
+    "HEP",
+    "TRS",
+}
+RESNAME_EXCLUDE = STANDARD_AMINO_ACIDS | WATER_NAMES | ION_NAMES | SOLVENT_LIKE_NAMES
 
-from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib import rcParams
-import numpy as np
-import pandas as pd
-import MDAnalysis as mda
-import MDAnalysis.analysis.distances as distances
-import matplotlib.pyplot as plt
-import os
-import re
+HYDROPHOBIC_RESIDUES = {"ALA", "VAL", "ILE", "LEU", "MET", "PRO"}
+AROMATIC_RESIDUES = {"PHE", "TYR", "TRP", "HIS"}
+POLAR_RESIDUES = {"SER", "THR", "ASN", "GLN", "CYS"}
+POSITIVE_RESIDUES = {"ARG", "LYS", "HIS"}
+NEGATIVE_RESIDUES = {"ASP", "GLU"}
 
-import MDAnalysis as mda
-import numpy as np
-import pandas as pd
-import networkx as nx
-import matplotlib.pyplot as plt
-import plotly.graph_objects as go
+FILE_KEYS = [
+    "mol2",
+    "str",
+    "itp",
+    "prm",
+    "ini_pdb",
+    "pose_match_pdb",
+    "from_pdb_pdb",
+    "pose_h_pdb",
+    "gro",
+    "posre",
+    "index",
+]
 
+TOPOLOGY_IGNORE_STEMS = {
+    "forcefield",
+    "posre",
+    "ions",
+    "tip3p",
+    "spce",
+    "watermodels",
+    "atomtypes",
+}
 
-
-# Create output directory if it doesn't exist
-OUTPUT_DIR = "Analysis_Graphs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)  # Ensure folder exist
-
-
-
-# ---- CONFIGURATION ----
-PDB_REFERENCE = "Complex.pdb"  # PDB file with correct chain info
-TOPOLOGY_FILE = "npt.gro"  # Topology filex
-TRAJECTORY_FILE = "md_0_1.xtc"  # Trajectory file
-LIGAND_NAME = "PTC"  # Update if your ligand has a different name
-DISTANCE_CUTOFF = 4.0  # Ligand-Protein interaction cutoff in Å
-
-# Define distance cutoff for interactions in pLOTLY graphs (e.g., 3.5 Å)
-CUTOFF = 3.5
-
-
-# Assign distinct colors for each chain
-CHAIN_COLORS = ["blue", "red", "green", "purple", "orange", "brown", "pink"]
-
-# Map chains to custom labels for the legend
-CHAIN_LABELS = {
-    "A": "Pomalidomide",
-    "B": "HIV Protease (Monomer 1)",
-    "C": "HIV Protease (Monomer 2)"
+SYSTEM_GRO_IGNORE = {
+    "npt",
+    "nvt",
+    "em",
+    "complex",
+    "newbox",
+    "solv",
+    "solv_ions",
+    "protein_processed",
+    "final_trajectory",
+    "binding_pocket_only",
+    "md_0_1",
+    "ions",
 }
 
 
-
-
-# ---- LOAD THE UNIVERSE ----
-print("🔄 Loading trajectory...")
-try:
-    u = mda.Universe(TOPOLOGY_FILE, TRAJECTORY_FILE)
-    protein = u.select_atoms("protein")
-    ligand = u.select_atoms(f"resname {LIGAND_NAME}")
-    print(f"✅ Loaded system with {len(u.atoms)} atoms and {u.trajectory.n_frames} frames.")
-except Exception as e:
-    print(f"❌ Error loading trajectory: {e}")
-    exit()
-
-
-
-
-# Define chain cutoffs manually
-CHAIN_A_START = 71  # Adjust based on system
-CHAIN_B_START = 1   # First reset after A
-CHAIN_B_END = 99    # Define where Chain B ends
-CHAIN_C_START = CHAIN_B_END + 1  # Chain C starts right after B ends
-
-def assign_chain(residue_id):
-    """Assigns a chain label based on residue numbering logic."""
-    if residue_id >= CHAIN_A_START:  # First chain
-        return "A"
-    elif residue_id >= CHAIN_B_START and residue_id <= CHAIN_B_END:  # Second chain
-        return "B"
-    else:  # Third chain starts after Chain B ends
-        return "C"
-
-def mda_to_rdkit(mda_ligand):
-    """Convert an MDAnalysis ligand selection to an RDKit molecule"""
-    pdb_block = mda_ligand.write("PDB")
-
-    if pdb_block is None:
-        raise ValueError("PDB block is None. MDAnalysis failed to write ligand PDB.")
-    
-    if not pdb_block.strip():
-        raise ValueError("Generated PDB block is empty. Check ligand selection.")
-
-    print("Generated PDB Block (first 500 chars):\n", pdb_block[:500])
-
-    mol = Chem.MolFromPDBBlock(pdb_block)
-    if mol is None:
-        raise ValueError("RDKit failed to parse the PDB block.")
-    
-    if mol.GetNumConformers() == 0:
-        AllChem.EmbedMolecule(mol, useRandomCoords=True)  # Ensure 3D coordinates
-    
-    return mol
-
-
-
-# ---- RMSD ANALYSIS ----
-print("🔄 Running RMSD analysis...")
-try:
-    rmsd_analysis = rms.RMSD(u, select="protein", ref_frame=0)
-    rmsd_analysis.run()
-    print("✅ RMSD analysis completed.")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(rmsd_analysis.results.rmsd[:, 0], rmsd_analysis.results.rmsd[:, 2], label="Protein RMSD")
-    plt.xlabel("Time (Frames)")
-    plt.ylabel("RMSD (Å)")
-    plt.title("RMSD Over Time")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR, "rmsd_plot.png"))
-    plt.close()
-except Exception as e:
-    print(f"❌ Error in RMSD analysis: {e}")
-
-
-print("🔄 Running RMSF analysis (Optimized)...")
-try:
-    rmsf_analysis = RMSF(protein).run()
-    rmsf_values = rmsf_analysis.results.rmsf
-    print("✅ RMSF analysis completed.")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(protein.resids, rmsf_values, label="Protein RMSF")
-    plt.xlabel("Residue")
-    plt.ylabel("RMSF (Å)")
-    plt.title("Residue Flexibility (RMSF)")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR,"rmsf_plot.png"))
-    plt.close()
-except Exception as e:
-    print(f"❌ Error in RMSF analysis: {e}")
-
-
-    print("✅ RMSF analysis completed.")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(protein.resids, rmsf_values, label="Protein RMSF")
-    plt.xlabel("Residue")
-    plt.ylabel("RMSF (Å)")
-    plt.title("Residue Flexibility (RMSF)")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR,"rmsf_plot.png"))
-    plt.close()
-except Exception as e:
-    print(f"❌ Error in RMSF analysis: {e}")
-
-# ---- RADIUS OF GYRATION ----
-print("🔄 Running Radius of Gyration analysis...")
-try:
-    rg_values = []
-    for ts in u.trajectory:
-        rg_values.append(protein.radius_of_gyration())
-
-    print("✅ Radius of Gyration analysis completed.")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(rg_values, label="Radius of Gyration")
-    plt.xlabel("Time (frames)")
-    plt.ylabel("Radius of Gyration (Å)")
-    plt.title("Protein Compactness Over Time")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR,"rg_plot.png"))
-    plt.close()
-except Exception as e:
-    print(f"❌ Error in Radius of Gyration analysis: {e}")
-
-# ---- HYDROGEN BOND ANALYSIS ----
-print("🔄 Running Hydrogen Bond analysis (Geometric Method)...")
-try:
-    hbond_analysis = HydrogenBondAnalysis(u, 'protein', 'protein')
-    hbond_analysis.run()
-
-    print("✅ Hydrogen Bond analysis completed.")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(hbond_analysis.results.times, hbond_analysis.results.count_by_time(), label="H-Bonds")
-    plt.xlabel("Time (ps)")
-    plt.ylabel("Number of Hydrogen Bonds")
-    plt.title("Hydrogen Bonds Over Time (Geometric)")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR, "hbonds_plot.png"))
-    plt.close()
-except Exception as e:
-    print(f"❌ Error in Hydrogen Bond analysis: {e}")
-
-
-print("🔄 Computing Intramolecular Hydrogen Bonds (intraHB)...")
-
-try:
-    hbond_analysis = HydrogenBondAnalysis(u, 'resname PTC', 'resname PTC')  # Self H-bonds
-    hbond_analysis.run()
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(hbond_analysis.results.times, hbond_analysis.results.count_by_time(), label="Ligand intraHB", color="orange")
-    plt.xlabel("Time (ps)")
-    plt.ylabel("Number of H-Bonds")
-    plt.title("Intramolecular Hydrogen Bonds Over Time")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR, "ligand_intraHB_plot.png"))
-    plt.close()
-
-    print("✅ Ligand intraHB analysis completed.")
-except Exception as e:
-    print(f"❌ Error in Ligand intraHB analysis: {e}")
-
-
-# ---- LIGAND-PROTEIN INTERACTIONS ----
-print(f"🔄 Running Ligand ({LIGAND_NAME})-Protein interaction analysis...")
-try:
-    contact_counts = []
-    for ts in u.trajectory:
-        distances_matrix = distances.distance_array(ligand.positions, protein.positions)
-        contacts = np.sum(distances_matrix < DISTANCE_CUTOFF)  # Contacts within 4Å
-        contact_counts.append(contacts)
-
-    print("✅ Ligand-Protein interaction analysis completed.")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(contact_counts, label=f"Ligand ({LIGAND_NAME})-Protein Contacts")
-    plt.xlabel("Time (frames)")
-    plt.ylabel("Number of Contacts")
-    plt.title(f"Ligand ({LIGAND_NAME}) Contacts with Protein Over Time")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR,"ligand_contacts_plot.png"))
-    plt.close()
-except Exception as e:
-    print(f"❌ Error in Ligand-Protein interaction analysis: {e}")
-
-
-
-print(f"🔄 Generating Contact Map for Ligand ({LIGAND_NAME})-Protein Interactions...")
-
-try:
-    interaction_data = []
-
-    for ts in u.trajectory:
-        frame = ts.frame
-        distances_matrix = distances.distance_array(ligand.positions, protein.positions)
-
-        for residue in protein.residues:
-            if np.any(distances_matrix[:, residue.atoms.indices] < DISTANCE_CUTOFF):
-                residue_label = f"{residue.resname} {residue.resid}"
-                interaction_data.append([frame, residue_label])
-
-    # Convert to DataFrame
-    interaction_df = pd.DataFrame(interaction_data, columns=["Frame", "Residue"])
-
-    # Create a pivot table (Residue vs. Time)
-    pivot_table = interaction_df.pivot_table(index="Residue", columns="Frame", aggfunc="size", fill_value=0)
-
-    # Plot heatmap with improved visibility
-    plt.figure(figsize=(12, 6))
-    sns.heatmap(pivot_table, cmap="coolwarm", cbar=True, annot=False)
-    plt.xlabel("Time (Frame)")
-    plt.ylabel("Residue")
-    plt.title(f"Ligand ({LIGAND_NAME})-Protein Interaction Map")
-    plt.xticks(rotation=45)
-    plt.yticks(rotation=0)
-    plt.savefig(os.path.join(OUTPUT_DIR, "ligand_contact_map_with_residues.png"))
-    plt.close()
-
-    print("✅ Contact Map saved as ligand_contact_map_with_residues.png")
-except Exception as e:
-    print(f"❌ Error in Contact Map generation: {e}")
-
-
-
-
-
-
-print("🔄 Running Ligand-Protein Contact Count analysis...")
-
-try:
-    u = mda.Universe("npt.gro", "md_0_1.xtc")
-    protein = u.select_atoms("protein")
-    ligand = u.select_atoms("resname PTC")  # Change 'PTC' to your ligand name
-    DISTANCE_CUTOFF = 4.0  # Contact threshold in Å
-
-    contact_counts = []
-
-    for ts in u.trajectory[::25]:  # Process every 25th frame
-        distances_matrix = distances.distance_array(ligand.positions, protein.positions)
-        contacts = np.sum(distances_matrix < DISTANCE_CUTOFF)
-        contact_counts.append(contacts)
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(contact_counts, label="Ligand-Protein Contacts")
-    plt.xlabel("Time (frames)")
-    plt.ylabel("Number of Contacts")
-    plt.title("Ligand-Protein Contacts Over Time")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR, "ligand_contacts_plot_v2.png"))
-    plt.close()
-
-    print("✅ Ligand-Protein Contact Count analysis completed.")
-except Exception as e:
-    print(f"❌ Error in Contact Count analysis: {e}")
-
-
-print(f"🔄 Generating Ligand-Protein Interaction Network with Residues...")
-
-try:
-    G = nx.Graph()
-
-    for ts in u.trajectory:
-        frame = ts.frame
-        distances_matrix = distances.distance_array(ligand.positions, protein.positions)
-
-        for residue in protein.residues:
-            if np.any(distances_matrix[:, residue.atoms.indices] < DISTANCE_CUTOFF):
-                residue_label = f"{residue.resname} {residue.resid}"
-                G.add_edge(LIGAND_NAME, residue_label)  # Connect ligand to interacting residue
-
-    # Plot network with labels
-    plt.figure(figsize=(10, 8))
-    pos = nx.spring_layout(G, seed=42)
-    nx.draw(G, pos, with_labels=True, node_color="lightblue", edge_color="gray", node_size=1200, font_size=10)
-
-    # Add edge labels for residue interactions
-    # edge_labels = {(LIGAND_NAME, res): res for res in G.nodes if res != LIGAND_NAME}
-    # nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8, font_color="black")
-
-    plt.title(f"Ligand-Protein Interaction Network ({LIGAND_NAME})")
-    plt.savefig(os.path.join(OUTPUT_DIR, "ligand_interaction_network_with_residues.png"))
-    plt.close()
-
-    print("✅ Interaction Network saved as ligand_interaction_network_with_residues.png")
-except Exception as e:
-    print(f"❌ Error in Interaction Network generation: {e}")
-
-
-print("🔄 Running Ligand RMSD analysis...")
-try:
-    ligand_rmsd = rms.RMSD(u, select=f"resname {LIGAND_NAME}", ref_frame=0)
-    ligand_rmsd.run()
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(ligand_rmsd.results.rmsd[:, 0], ligand_rmsd.results.rmsd[:, 2], label="Ligand RMSD")
-    plt.xlabel("Time (Frames)")
-    plt.ylabel("RMSD (Å)")
-    plt.title(f"Ligand ({LIGAND_NAME}) RMSD Over Time")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR,"ligand_rmsd_plot.png"))
-    plt.close()
-
-    print("✅ Ligand RMSD analysis completed.")
-except Exception as e:
-    print(f"❌ Error in Ligand RMSD analysis: {e}")
-
-
-
-
-print("🔄 Running Ligand RMSF analysis...")
-
-try:
-    ligand_rmsf_analysis = RMSF(ligand).run()
-    ligand_rmsf_values = ligand_rmsf_analysis.results.rmsf
-
-    # Convert NaN values to zero
-    ligand_rmsf_values = np.nan_to_num(ligand_rmsf_values, nan=0.0)
-
-    # Ensure correct indexing
-    atom_indices = np.arange(len(ligand_rmsf_values))
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(atom_indices, ligand_rmsf_values, label="Ligand RMSF", marker='o', linestyle='-', color='b')
-
-    plt.xlabel("Ligand Atom Index")
-    plt.ylabel("RMSF (Å)")
-    plt.title(f"Ligand ({LIGAND_NAME}) RMSF Per Atom")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR, "ligand_rmsf_plot_fixed.png"))
-    plt.close()
-
-    print("✅ Ligand RMSF analysis completed.")
-except Exception as e:
-    print(f"❌ Error in Ligand RMSF analysis: {e}")
-
-
-print("🔄 Computing Ligand Radius of Gyration (rGyr)...")
-
-try:
-    rg_values = []
-    times = []
-
-    for ts in u.trajectory:
-        rg_values.append(ligand.radius_of_gyration())
-        times.append(u.trajectory.time)
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(times, rg_values, label="Ligand Radius of Gyration", color="purple")
-    plt.xlabel("Time (ps)")
-    plt.ylabel("rGyr (Å)")
-    plt.title("Ligand Radius of Gyration Over Time")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR, "ligand_rGyr_plot.png"))
-    plt.close()
-
-    print("✅ Ligand rGyr analysis completed.")
-except Exception as e:
-    print(f"❌ Error in Ligand rGyr analysis: {e}")
-
-
-
-
-
-print("🔄 Running Hydrophobic vs. Hydrophilic Interaction analysis...")
-try:
-    # Ensure ligand name is clean
-    LIGAND_NAME = LIGAND_NAME.strip()
-    print(f"Using ligand name: {LIGAND_NAME}")
-
-    # Define hydrophobic and hydrophilic selections
-    hydrophobic_selection = protein.select_atoms(
-        "(resname PHE or resname LEU or resname ILE or resname VAL or resname MET or resname TRP or resname TYR or resname ALA)"
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Analyze a PROTAC ternary-complex trajectory using atomIndex.txt-defined ligase/target roles."
     )
-    hydrophilic_selection = protein.select_atoms(
-        "(resname ASP or resname GLU or resname ASN or resname GLN or resname SER or resname THR or resname HIS or resname ARG or resname LYS)"
+    parser.add_argument(
+        "-l",
+        "--ligand",
+        default=None,
+        help="Ligand / PROTAC residue name. Optional when auto-detection is confident.",
     )
-
-    # Properly formatted select argument for Contacts
-    ligand_selection = f"resname '{LIGAND_NAME}'"
-    print(f"Selection query: {ligand_selection}")
-
-    hydrophobic = Contacts(u, select=ligand_selection, refgroup=hydrophobic_selection, radius=4.0)
-    hydrophilic = Contacts(u, select=ligand_selection, refgroup=hydrophilic_selection, radius=4.0)
-
-    hydrophobic.run()
-    hydrophilic.run()
-
-    # Plot results
-    plt.figure(figsize=(8, 5))
-    plt.plot(hydrophobic.results.times, hydrophobic.results.timeseries, label="Hydrophobic Contacts", color="orange")
-    plt.plot(hydrophilic.results.times, hydrophilic.results.timeseries, label="Hydrophilic Contacts", color="blue")
-    plt.xlabel("Time (ps)")
-    plt.ylabel("Number of Contacts")
-    plt.title("Hydrophobic vs. Hydrophilic Interactions Over Time")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR, "hydrophobic_vs_hydrophilic.png"))
-    plt.close()
-
-    print("✅ Hydrophobic vs. Hydrophilic Interaction analysis completed.")
-
-except Exception as e:
-    print(f"❌ Error in Hydrophobic vs. Hydrophilic analysis: {e}")
-
-
-
-
-
-
-
-#### UPDATE THIS SCRIPT TO USE OUR NEW RESIDUE ADJUSTMENT TO ENSURE THAT WE CAPTURE OUR DIMERS####
-
-
-print(f"🔄 Generating Ligand-Protein Interaction Network with Chain Information...")
-
-try:
-    G = nx.Graph()
-
-    for ts in u.trajectory:
-        frame = ts.frame
-        distances_matrix = distances.distance_array(ligand.positions, protein.positions)
-
-        for residue in protein.residues:
-            if np.any(distances_matrix[:, residue.atoms.indices] < DISTANCE_CUTOFF):
-                chain_id = assign_chain(residue.resid)
-                residue_label = f"{chain_id}:{residue.resname} {residue.resid}"  # e.g., "A:ARG 45"
-
-                G.add_edge(LIGAND_NAME, residue_label)  # Connect ligand to interacting residue
-
-    # Plot network with chain-separated labels
-    plt.figure(figsize=(10, 8))
-    pos = nx.spring_layout(G, seed=42)
-    nx.draw(G, pos, with_labels=True, node_color="lightblue", edge_color="gray", node_size=1200, font_size=10)
-
-    # Add edge labels with chains
-    # edge_labels = {(LIGAND_NAME, res): res for res in G.nodes if res != LIGAND_NAME}
-    # nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, font_size=8, font_color="black")
-
-    plt.title(f"Ligand-Protein Interaction Network ({LIGAND_NAME}) with Chain IDs")
-    plt.savefig(os.path.join(OUTPUT_DIR, "ligand_interaction_network_with_chains.png"))
-    plt.close()
-
-    print("✅ Interaction Network saved as ligand_interaction_network_with_chains.png")
-except Exception as e:
-    print(f"❌ Error in Interaction Network generation: {e}")
+    parser.add_argument(
+        "--topo",
+        default="npt.gro",
+        help="Topology/coordinate file for MDAnalysis (default: npt.gro).",
+    )
+    parser.add_argument(
+        "--traj",
+        default="md_0_1.xtc",
+        help="Trajectory file for MDAnalysis (default: md_0_1.xtc).",
+    )
+    parser.add_argument(
+        "--pdb-reference",
+        default=None,
+        help="Optional reference PDB. Defaults to Complex.pdb when present.",
+    )
+    parser.add_argument(
+        "--atomindex",
+        default="atomIndex.txt",
+        help="atomIndex file with ordered protein atom ranges (default: atomIndex.txt).",
+    )
+    parser.add_argument(
+        "--outdir",
+        default="Analysis_Results/PROTAC",
+        help="Output directory root (default: Analysis_Results/PROTAC).",
+    )
+    parser.add_argument(
+        "--distance-cutoff",
+        type=float,
+        default=4.0,
+        help="Protein-ligand contact cutoff in angstroms (default: 4.0).",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Disable interactive prompts and fail clearly when detection is ambiguous.",
+    )
+    parser.add_argument(
+        "--start-frame",
+        type=int,
+        default=None,
+        help="First frame index to analyze for trajectory-scan analyses.",
+    )
+    parser.add_argument(
+        "--end-frame",
+        type=int,
+        default=None,
+        help="Last frame index (exclusive) to analyze for trajectory-scan analyses.",
+    )
+    parser.add_argument(
+        "--frame-step",
+        type=int,
+        default=1,
+        help="Frame stride for expensive analyses (default: 1).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate inputs, run ligand preflight, write QC, and exit without full analysis.",
+    )
+    return parser.parse_args()
 
 
+def default_pdb_reference() -> Optional[str]:
+    candidate = Path("Complex.pdb")
+    return str(candidate) if candidate.exists() else None
 
 
-
-# Load trajectory
-u = mda.Universe("npt.gro", "md_0_1.xtc")  
-protein = u.select_atoms("protein and name CA")  # Use Cα atoms
-
-# Convert trajectory to NumPy array
-positions = np.array([protein.positions for ts in u.trajectory])
-positions -= np.mean(positions, axis=0)  # Centering
-
-# Apply PCA
-pca = PCA(n_components=2)
-pca_coords = pca.fit_transform(positions.reshape(len(positions), -1))
-
-# Plot PCA projection
-plt.figure(figsize=(7, 5))
-plt.scatter(pca_coords[:, 0], pca_coords[:, 1], c=range(len(pca_coords)), cmap='viridis')
-plt.xlabel("PC1")
-plt.ylabel("PC2")
-plt.title("PCA of Protein Motions")
-plt.colorbar(label="Frame")
-plt.savefig(os.path.join(OUTPUT_DIR, "pca_protein_motion.png"))
-plt.show()
+def ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
-
-# print("🔄 Generating Normalized Protein-Ligand Interaction Chart...")
-
-# # ---- CLASSIFY INTERACTIONS ----
-# interaction_data = []
-
-# for ts in u.trajectory:
-#     frame = ts.frame
-#     distances_matrix = mda.analysis.distances.distance_array(ligand.positions, protein.positions)
-
-#     for residue in protein.residues:
-#         if np.any(distances_matrix[:, residue.atoms.indices] < DISTANCE_CUTOFF):
-#             # Classify interaction type (Schrödinger-style)
-#             if residue.resname in ["PHE", "LEU", "ILE", "VAL", "MET", "TRP", "TYR", "ALA"]:  # Hydrophobic
-#                 interaction_type = "Hydrophobic"
-#             elif residue.resname in ["ASP", "GLU", "ARG", "LYS", "HIS"]:  # Ionic
-#                 interaction_type = "Ionic"
-#             elif residue.resname in ["SER", "THR", "ASN", "GLN"]:  # H-bonds
-#                 interaction_type = "H-bonds"
-#             else:
-#                 interaction_type = "Water bridges"
-
-#             interaction_data.append([frame, residue.resid, residue.resname, interaction_type])
-
-# # Convert to DataFrame
-# interaction_df = pd.DataFrame(interaction_data, columns=["Frame", "Residue", "ResidueName", "InteractionType"])
-
-# # Aggregate interaction counts
-# interaction_counts = interaction_df.groupby(["Residue", "ResidueName", "InteractionType"]).size().unstack(fill_value=0)
-
-# # ---- NORMALIZE THE COUNTS ----
-# # Normalize interactions to range 0-1 per residue
-# interaction_fractions = interaction_counts.div(interaction_counts.sum(axis=1), axis=0).fillna(0)
-
-# # ---- PLOT STACKED BAR CHART ----
-# plt.figure(figsize=(14, 6))
-
-# # Create stacked bar chart with normalized values
-# interaction_fractions.plot(
-#     kind="bar",
-#     stacked=True,
-#     colormap="Set2",
-#     width=0.8,
-#     figsize=(14, 6)
-# )
-
-# plt.xlabel("Residue")
-# plt.ylabel("Interactions Fraction (0-1)")
-# plt.title("Normalized Protein-Ligand Interactions")
-# plt.legend(title="Interaction Type", bbox_to_anchor=(1.05, 1), loc="upper left")
-# plt.xticks(rotation=45, ha="right")
-# plt.tight_layout()
-
-# # Save the figure
-# plt.savefig(os.path.join(OUTPUT_DIR, "protein_ligand_interactions_normalized.png"))
-# plt.close()
-
-# print("✅ Protein-Ligand Interaction Graph saved as protein_ligand_interactions_normalized.png")
-
-
-############## generate geometric datasets USING ONLY THE BINDING POCKET ATOMS PREVIOUSLY EXTRACTED AS THE INPUT
-
-
-# ---- CONFIGURATION ----
-INPUT_PDB = "binding_pocket_only.pdb"
-INPUT_XTC = "binding_pocket_only.xtc"
-LIGAND_RESNAME = "PTC"
-
-# ---- FRAME CONTROL ----
-START_FRAME = 0       # Set starting frame (None = first frame)
-END_FRAME = None      # Set ending frame (None = last frame)
-FRAME_STEP = 50       # Process every Nth frame
-
-# Ensure output directory exists
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# ---- FUNCTION TO INFER ELEMENT TYPE ----
-def infer_element(atom_name):
-    match = re.match(r"([A-Za-z]+)", atom_name)
-    if match:
-        element = match.group(1).upper()
-        if element in ["C", "O", "N", "H", "S", "P"]:
-            return element
+def normalize_candidate_code(value: str) -> Optional[str]:
+    cleaned = re.sub(r"[^A-Za-z0-9]", "", value.strip())
+    if 2 <= len(cleaned) <= 5:
+        return cleaned.upper()
     return None
 
-# ---- FUNCTION TO CALCULATE ANGLE ----
-def calculate_angle(a, b, c):
-    ba = a - b
-    bc = c - b
-    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
-    return np.degrees(np.arccos(np.clip(cosine_angle, -1.0, 1.0)))
 
-# ---- LOADING THE TRAJECTORY ----
-print("🔄 Loading Binding Pocket trajectory...")
-u = mda.Universe(INPUT_PDB, INPUT_XTC)
+def role_name_for_target(index: int) -> str:
+    letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if index < len(letters):
+        return f"Target_{letters[index]}"
+    return f"Target_{index + 1}"
 
-# Define selections
-ligand = u.select_atoms(f"resname {LIGAND_RESNAME}")
-protein = u.select_atoms("protein")
-waters = u.select_atoms("resname HOH")
 
-# Determine frame range
-total_frames = len(u.trajectory)
-start_frame = START_FRAME if START_FRAME is not None else 0
-end_frame = END_FRAME if END_FRAME is not None else total_frames
+def parse_atomindex_entries(atomindex_path: str) -> List[dict]:
+    path = Path(atomindex_path)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"atomIndex file not found: {path}. "
+            "This script requires atomIndex.txt from the current preparation workflow."
+        )
 
-print(f"✅ Loaded {len(protein.residues)} protein residues and {len(ligand.atoms)} ligand atoms.")
-print(f"🔍 Processing frames {start_frame} to {end_frame} with step size {FRAME_STEP}")
+    entries: List[dict] = []
+    invalid_lines: List[str] = []
 
-# ---- CLASSIFY INTERACTIONS ----
-interaction_data = []
-frame_count = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, raw in enumerate(handle, start=1):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
 
-for ts in u.trajectory[start_frame:end_frame:FRAME_STEP]:
-    frame = ts.frame
-    frame_count += 1
-    print(f"📍 Processing Frame {frame}...")
+            content = stripped.split("#", 1)[0].strip()
+            if not content:
+                continue
 
-    distances_matrix = distances.distance_array(ligand.positions, protein.positions)
+            match = re.match(r"^(.*?)\s+(\d+)\s*-\s*(\d+)$", content)
+            if not match:
+                invalid_lines.append(f"line {line_number}: {raw.rstrip()}")
+                continue
+
+            name = match.group(1).strip()
+            start_1based = int(match.group(2))
+            end_1based = int(match.group(3))
+
+            if not name or start_1based <= 0 or end_1based < start_1based:
+                invalid_lines.append(f"line {line_number}: {raw.rstrip()}")
+                continue
+
+            entries.append(
+                {
+                    "name": name,
+                    "start_1based": start_1based,
+                    "end_1based": end_1based,
+                    "start0": start_1based - 1,
+                    "end0": end_1based - 1,
+                }
+            )
+
+    if invalid_lines:
+        joined = "\n".join(invalid_lines[:10])
+        raise ValueError(
+            "Failed to parse atomIndex.txt. Expected lines like 'Name 1-1975'.\n"
+            f"Unparsable entries:\n{joined}"
+        )
+
+    if not entries:
+        raise ValueError(
+            f"No atom ranges were parsed from {path}. "
+            "Please regenerate atomIndex.txt with the current workflow."
+        )
+
+    return entries
+
+
+def assign_protac_roles(entries: Sequence[dict]) -> List[dict]:
+    assigned: List[dict] = []
+    for index, entry in enumerate(entries):
+        role = "Ligase" if index == 0 else role_name_for_target(index - 1)
+        new_entry = dict(entry)
+        new_entry["role"] = role
+        assigned.append(new_entry)
+    return assigned
+
+
+def atomgroup_for_entry(universe: mda.Universe, entry: dict) -> mda.AtomGroup:
+    start0 = int(entry["start0"])
+    end0 = int(entry["end0"])
+    if start0 < 0 or end0 >= universe.atoms.n_atoms:
+        raise ValueError(
+            f"atomIndex range {entry['name']} {entry['start_1based']}-{entry['end_1based']} "
+            f"falls outside topology atom count ({universe.atoms.n_atoms})."
+        )
+    return universe.atoms[start0 : end0 + 1]
+
+
+def overlap_count(indices: np.ndarray, start0: int, end0: int) -> int:
+    return int(np.count_nonzero((indices >= start0) & (indices <= end0)))
+
+
+def residue_role_for_residue(residue: mda.core.groups.Residue, entries: Sequence[dict]) -> Tuple[Optional[str], Optional[str]]:
+    indices = residue.atoms.indices
+    best_role = None
+    best_name = None
+    best_overlap = 0
+
+    for entry in entries:
+        count = overlap_count(indices, int(entry["start0"]), int(entry["end0"]))
+        if count > best_overlap:
+            best_overlap = count
+            best_role = entry["role"]
+            best_name = entry["name"]
+
+    return best_role, best_name
+
+
+def residue_label(residue: mda.core.groups.Residue, role: str) -> str:
+    return f"{role}:{residue.resname}{residue.resid}"
+
+
+def select_ligand(universe: mda.Universe, ligand_code: str) -> mda.AtomGroup:
+    code = ligand_code.strip().upper()
+    indices: List[int] = []
+    for residue in universe.residues:
+        if residue.resname.strip().upper() == code:
+            indices.extend(residue.atoms.indices.tolist())
+
+    if not indices:
+        return universe.atoms[np.array([], dtype=int)]
+
+    unique_indices = np.array(sorted(set(indices)), dtype=int)
+    return universe.atoms[unique_indices]
+
+
+def validate_protac_inputs(universe: mda.Universe, ligand: mda.AtomGroup, entries: Sequence[dict]) -> None:
+    if universe.atoms.n_atoms == 0:
+        raise ValueError("Loaded universe has zero atoms.")
+
+    if not entries:
+        raise ValueError("No atomIndex entries were provided.")
+
+    for entry in entries:
+        atomgroup_for_entry(universe, entry)
+
+    if ligand.n_atoms == 0:
+        raise ValueError("Selected ligand / PROTAC has zero atoms in the loaded topology.")
+
+
+def parse_topol_top(topol_path: Path) -> dict:
+    result = {
+        "include_candidates": set(),
+        "molecule_candidates": set(),
+        "include_lines": [],
+    }
+    if not topol_path.exists():
+        return result
+
+    in_molecules = False
+    with topol_path.open("r", encoding="utf-8") as handle:
+        for raw in handle:
+            line = raw.split(";", 1)[0].strip()
+            if not line:
+                continue
+
+            if line.lower().startswith("#include"):
+                match = re.search(r'"([^"]+)"', raw)
+                if match:
+                    include_name = os.path.basename(match.group(1))
+                    stem = Path(include_name).stem
+                    normalized = normalize_candidate_code(stem)
+                    lower_stem = stem.lower()
+                    result["include_lines"].append(include_name)
+
+                    if include_name.lower().endswith((".itp", ".prm")) and normalized:
+                        if lower_stem not in TOPOLOGY_IGNORE_STEMS and not lower_stem.startswith("posre"):
+                            result["include_candidates"].add(normalized)
+                continue
+
+            if line.startswith("["):
+                in_molecules = line.lower().startswith("[ molecules ]")
+                continue
+
+            if in_molecules:
+                tokens = line.split()
+                if len(tokens) >= 2:
+                    molname = tokens[0]
+                    normalized = normalize_candidate_code(molname)
+                    if normalized and normalized not in RESNAME_EXCLUDE:
+                        result["molecule_candidates"].add(normalized)
+
+    return result
+
+
+def discover_ligand_files(run_dir: Path) -> Dict[str, dict]:
+    candidates: Dict[str, dict] = {}
+
+    def get_candidate(code: str) -> dict:
+        if code not in candidates:
+            candidates[code] = {
+                "score": 0,
+                "sources": [],
+                "files": {key: None for key in FILE_KEYS},
+                "warnings": [],
+                "errors": [],
+                "residue_atom_count": 0,
+                "residue_count": 0,
+            }
+        return candidates[code]
+
+    for path in run_dir.iterdir():
+        if not path.is_file():
+            continue
+
+        name_lower = path.name.lower()
+        entry_code: Optional[str] = None
+        file_key: Optional[str] = None
+
+        if name_lower.endswith(".cgenff.mol2"):
+            entry_code = normalize_candidate_code(path.name[: -len(".cgenff.mol2")])
+            file_key = "mol2"
+        elif name_lower.endswith(".str"):
+            entry_code = normalize_candidate_code(path.stem)
+            file_key = "str"
+        elif name_lower.endswith(".itp"):
+            if name_lower.startswith("posre_"):
+                entry_code = normalize_candidate_code(path.stem[6:])
+                file_key = "posre"
+            else:
+                entry_code = normalize_candidate_code(path.stem)
+                file_key = "itp"
+        elif name_lower.endswith(".prm"):
+            entry_code = normalize_candidate_code(path.stem)
+            file_key = "prm"
+        elif name_lower.endswith(".ndx"):
+            if name_lower.startswith("index_"):
+                entry_code = normalize_candidate_code(path.stem[6:])
+                file_key = "index"
+        elif name_lower.endswith("_ini.pdb"):
+            entry_code = normalize_candidate_code(path.name[: -len("_ini.pdb")])
+            file_key = "ini_pdb"
+        elif name_lower.endswith("_pose_match.pdb"):
+            entry_code = normalize_candidate_code(path.name[: -len("_pose_match.pdb")])
+            file_key = "pose_match_pdb"
+        elif name_lower.endswith("_from_pdb.pdb"):
+            entry_code = normalize_candidate_code(path.name[: -len("_from_pdb.pdb")])
+            file_key = "from_pdb_pdb"
+        elif name_lower.endswith("_pose_h.pdb"):
+            entry_code = normalize_candidate_code(path.name[: -len("_pose_h.pdb")])
+            file_key = "pose_h_pdb"
+        elif name_lower.endswith(".gro"):
+            if path.stem.lower() not in SYSTEM_GRO_IGNORE:
+                entry_code = normalize_candidate_code(path.stem)
+                file_key = "gro"
+
+        if entry_code and file_key:
+            get_candidate(entry_code)["files"][file_key] = str(path.resolve())
+
+    for code, data in candidates.items():
+        files = data["files"]
+        if all(files[key] for key in ["mol2", "str", "itp", "prm", "ini_pdb", "pose_match_pdb", "gro"]):
+            data["score"] += 4
+            data["sources"].append("cgenff_file_set")
+        if files["gro"]:
+            data["score"] += 2
+            data["sources"].append("gro_residue")
+        if files["ini_pdb"] or files["pose_match_pdb"] or files["from_pdb_pdb"] or files["pose_h_pdb"]:
+            data["score"] += 2
+            data["sources"].append("cgenff_file_set")
+        if files["posre"] or files["index"]:
+            data["score"] += 1
+            data["sources"].append("index_ndx")
+
+    return candidates
+
+
+def scan_structure_for_ligands(
+    topo_path: Optional[str],
+    traj_path: Optional[str],
+) -> Tuple[Dict[str, dict], List[str], Optional[str]]:
+    residue_info: Dict[str, dict] = {}
+    warnings: List[str] = []
+    source_label: Optional[str] = None
+
+    if not topo_path or not Path(topo_path).exists():
+        return residue_info, warnings, source_label
+
+    try:
+        if traj_path and Path(traj_path).exists():
+            universe = mda.Universe(topo_path, traj_path)
+            source_label = "trajectory_residue"
+        else:
+            universe = mda.Universe(topo_path)
+            source_label = "gro_residue"
+    except Exception as exc:
+        warnings.append(f"Could not inspect topology/trajectory for ligand residues: {exc}")
+        return residue_info, warnings, source_label
+
+    counts = defaultdict(lambda: {"atoms": 0, "residues": 0})
+    for residue in universe.residues:
+        resname = residue.resname.strip().upper()
+        if resname in RESNAME_EXCLUDE:
+            continue
+        normalized = normalize_candidate_code(resname)
+        if not normalized:
+            continue
+        counts[normalized]["atoms"] += residue.atoms.n_atoms
+        counts[normalized]["residues"] += 1
+
+    for code, info in counts.items():
+        residue_info[code] = {
+            "score": 2,
+            "sources": [source_label] if source_label else [],
+            "residue_atom_count": info["atoms"],
+            "residue_count": info["residues"],
+        }
+
+    if len(residue_info) > 1:
+        ranked = sorted(
+            residue_info.items(),
+            key=lambda item: (-item[1]["residue_atom_count"], item[0]),
+        )
+        summary = ", ".join(
+            f"{code}({data['residue_count']} res / {data['residue_atom_count']} atoms)"
+            for code, data in ranked
+        )
+        warnings.append(f"Multiple ligand-like residues detected in structure: {summary}")
+
+    return residue_info, warnings, source_label
+
+
+def merge_candidate_evidence(base: Dict[str, dict], evidence: Dict[str, dict]) -> Dict[str, dict]:
+    merged = {key: value for key, value in base.items()}
+    for code, data in evidence.items():
+        if code not in merged:
+            merged[code] = {
+                "score": 0,
+                "sources": [],
+                "files": {key: None for key in FILE_KEYS},
+                "warnings": [],
+                "errors": [],
+                "residue_atom_count": 0,
+                "residue_count": 0,
+            }
+        merged[code]["score"] += data.get("score", 0)
+        merged[code]["sources"].extend(data.get("sources", []))
+        merged[code]["residue_atom_count"] = max(
+            merged[code]["residue_atom_count"], data.get("residue_atom_count", 0)
+        )
+        merged[code]["residue_count"] = max(
+            merged[code]["residue_count"], data.get("residue_count", 0)
+        )
+        for key, value in data.get("files", {}).items():
+            if value and not merged[code]["files"].get(key):
+                merged[code]["files"][key] = value
+        merged[code]["warnings"].extend(data.get("warnings", []))
+        merged[code]["errors"].extend(data.get("errors", []))
+    return merged
+
+
+def source_string(sources: Sequence[str]) -> str:
+    ordered = []
+    for source in [
+        "cli",
+        "cgenff_file_set",
+        "topol_top",
+        "gro_residue",
+        "trajectory_residue",
+        "index_ndx",
+        "manual",
+    ]:
+        if source in sources and source not in ordered:
+            ordered.append(source)
+    for source in sources:
+        if source not in ordered:
+            ordered.append(source)
+    return "|".join(ordered)
+
+
+def score_confidence(best_score: int, lead: int, has_cli: bool) -> str:
+    if has_cli or best_score >= 9 or (best_score >= 7 and lead >= 2):
+        return "high"
+    if best_score >= 5 and lead >= 1:
+        return "medium"
+    return "low"
+
+
+def prompt_user_for_ligand(candidates: Sequence[Tuple[str, dict]]) -> str:
+    print("\nLigand auto-detection is ambiguous. Candidate summary:")
+    for index, (code, data) in enumerate(candidates, start=1):
+        print(
+            f"  {index}. {code} | score={data['score']} | "
+            f"residues={data.get('residue_count', 0)} | atoms={data.get('residue_atom_count', 0)} | "
+            f"sources={source_string(data.get('sources', [])) or 'manual'}"
+        )
+
+    while True:
+        choice = input("Select a ligand by number or type a residue name: ").strip()
+        if choice.isdigit():
+            number = int(choice)
+            if 1 <= number <= len(candidates):
+                return candidates[number - 1][0]
+        normalized = normalize_candidate_code(choice)
+        if normalized:
+            return normalized
+        print("Please enter a valid choice.")
+
+
+def detect_protac_ligand_setup(
+    run_dir: str = ".",
+    topo_path: Optional[str] = None,
+    traj_path: Optional[str] = None,
+    cli_ligand: Optional[str] = None,
+    headless: bool = False,
+) -> dict:
+    run_path = Path(run_dir).resolve()
+    candidates = discover_ligand_files(run_path)
+
+    topol_info = parse_topol_top(run_path / "topol.top")
+    for code in topol_info["include_candidates"]:
+        if code not in candidates:
+            candidates[code] = {
+                "score": 0,
+                "sources": [],
+                "files": {key: None for key in FILE_KEYS},
+                "warnings": [],
+                "errors": [],
+                "residue_atom_count": 0,
+                "residue_count": 0,
+            }
+        candidates[code]["score"] += 3
+        candidates[code]["sources"].append("topol_top")
+
+    for code in topol_info["molecule_candidates"]:
+        if code not in candidates:
+            candidates[code] = {
+                "score": 0,
+                "sources": [],
+                "files": {key: None for key in FILE_KEYS},
+                "warnings": [],
+                "errors": [],
+                "residue_atom_count": 0,
+                "residue_count": 0,
+            }
+        candidates[code]["score"] += 3
+        candidates[code]["sources"].append("topol_top")
+
+    structure_evidence, warnings, structure_source = scan_structure_for_ligands(topo_path, traj_path)
+    candidates = merge_candidate_evidence(candidates, structure_evidence)
+
+    cli_code = normalize_candidate_code(cli_ligand) if cli_ligand else None
+    if cli_code:
+        if cli_code not in candidates:
+            candidates[cli_code] = {
+                "score": 0,
+                "sources": [],
+                "files": {key: None for key in FILE_KEYS},
+                "warnings": [],
+                "errors": [],
+                "residue_atom_count": 0,
+                "residue_count": 0,
+            }
+        candidates[cli_code]["score"] += 5
+        candidates[cli_code]["sources"].append("cli")
+
+    ranked = sorted(
+        candidates.items(),
+        key=lambda item: (
+            -item[1]["score"],
+            -item[1].get("residue_atom_count", 0),
+            -item[1].get("residue_count", 0),
+            item[0],
+        ),
+    )
+
+    selected_code: Optional[str] = cli_code
+    errors: List[str] = []
+
+    if not selected_code:
+        if not ranked:
+            if not headless:
+                manual = input("Ligand could not be auto-detected. Enter ligand residue name: ").strip()
+                selected_code = normalize_candidate_code(manual)
+                if selected_code:
+                    candidates[selected_code] = {
+                        "score": 0,
+                        "sources": ["manual"],
+                        "files": {key: None for key in FILE_KEYS},
+                        "warnings": [],
+                        "errors": [],
+                        "residue_atom_count": 0,
+                        "residue_count": 0,
+                    }
+                else:
+                    errors.append("No valid ligand residue name was provided.")
+            else:
+                errors.append(
+                    "Could not auto-detect a PROTAC ligand from the current directory. "
+                    "Pass --ligand <RESNAME> in headless mode."
+                )
+        else:
+            best_code, best_data = ranked[0]
+            lead = best_data["score"] - ranked[1][1]["score"] if len(ranked) > 1 else best_data["score"]
+            if len(ranked) > 1 and best_data["score"] == ranked[1][1]["score"]:
+                if headless:
+                    summary = "; ".join(
+                        f"{code}: score={data['score']} sources={source_string(data['sources']) or 'manual'}"
+                        for code, data in ranked[:5]
+                    )
+                    errors.append(
+                        "Ligand detection is ambiguous in headless mode. "
+                        f"Top candidates: {summary}. Pass --ligand explicitly."
+                    )
+                else:
+                    selected_code = prompt_user_for_ligand(ranked[:5])
+                    candidates[selected_code]["sources"].append("manual")
+            elif best_data["score"] < 3:
+                if headless:
+                    errors.append(
+                        "Ligand auto-detection confidence is too low for headless mode. "
+                        "Pass --ligand explicitly."
+                    )
+                else:
+                    selected_code = prompt_user_for_ligand(ranked[:5])
+                    candidates[selected_code]["sources"].append("manual")
+            else:
+                selected_code = best_code
+
+    selected = candidates.get(selected_code, None) if selected_code else None
+
+    if selected_code and selected is None:
+        selected = {
+            "score": 0,
+            "sources": ["manual"],
+            "files": {key: None for key in FILE_KEYS},
+            "warnings": [],
+            "errors": [],
+            "residue_atom_count": 0,
+            "residue_count": 0,
+        }
+
+    selected_files = {key: None for key in FILE_KEYS}
+    confidence = "low"
+    source = "manual" if selected_code else ""
+
+    if selected:
+        selected_files.update(selected["files"])
+        best_score = selected.get("score", 0)
+        second_score = ranked[1][1]["score"] if len(ranked) > 1 and ranked[0][0] == selected_code else ranked[0][1]["score"] if ranked and ranked[0][0] != selected_code else 0
+        lead = best_score - second_score if ranked else best_score
+        confidence = score_confidence(best_score, lead, bool(cli_code))
+        source = source_string(selected.get("sources", []))
+
+    selected_warnings = list(warnings)
+    if selected:
+        selected_warnings.extend(selected.get("warnings", []))
+
+    residue_candidates = {
+        code: data for code, data in structure_evidence.items() if data.get("residue_atom_count", 0) > 0
+    }
+
+    if selected_code and residue_candidates and selected_code not in residue_candidates:
+        residue_summary = ", ".join(
+            f"{code}({data['residue_atom_count']} atoms)"
+            for code, data in sorted(residue_candidates.items())
+        )
+        selected_warnings.append(
+            f"Selected ligand code {selected_code} was not observed as a residue in the loaded structure. "
+            f"Detected non-protein residues: {residue_summary}"
+        )
+
+    if selected_code and (run_path / "topol.top").exists():
+        include_match = selected_files.get("itp") or selected_files.get("prm")
+        if not include_match and selected_code not in topol_info["include_candidates"]:
+            selected_warnings.append(
+                f"topol.top did not show a clear include for ligand code {selected_code}."
+            )
+
+    if cli_code and structure_source and cli_code not in residue_candidates:
+        errors.append(
+            f"--ligand {cli_code} was provided, but that residue name was not found in the loaded topology/trajectory."
+        )
+
+    if selected_code and len(residue_candidates) > 1:
+        other_codes = [code for code in residue_candidates if code != selected_code]
+        if other_codes:
+            selected_warnings.append(
+                f"Additional ligand-like residues were detected: {', '.join(sorted(other_codes))}"
+            )
+
+    return {
+        "ligand_code": selected_code,
+        "confidence": confidence,
+        "source": source,
+        "files": selected_files,
+        "warnings": selected_warnings,
+        "errors": errors,
+        "topology_residue_atoms": selected.get("residue_atom_count", 0) if selected else 0,
+        "topology_residue_count": selected.get("residue_count", 0) if selected else 0,
+        "candidate_scores": [
+            {
+                "ligand_code": code,
+                "score": data["score"],
+                "sources": source_string(data.get("sources", [])),
+                "residue_atom_count": data.get("residue_atom_count", 0),
+                "residue_count": data.get("residue_count", 0),
+            }
+            for code, data in ranked
+        ],
+    }
+
+
+def write_ligand_preflight_reports(ligand_setup: dict, qc_dir: Path) -> Tuple[Path, Path]:
+    ensure_dir(qc_dir)
+    json_path = qc_dir / "protac_ligand_preflight.json"
+    txt_path = qc_dir / "protac_ligand_preflight.txt"
+
+    json_path.write_text(json.dumps(ligand_setup, indent=2), encoding="utf-8")
+
+    lines = [
+        "PROTAC ligand preflight",
+        f"Ligand selected: {ligand_setup.get('ligand_code') or 'None'}",
+        f"Confidence: {ligand_setup.get('confidence', 'unknown')}",
+        f"Source: {ligand_setup.get('source', '') or 'manual'}",
+        "Found files:",
+    ]
+    for key in FILE_KEYS:
+        value = ligand_setup.get("files", {}).get(key)
+        marker = "✓" if value else "-"
+        lines.append(f"  {marker} {key}: {value or 'missing'}")
+
+    lines.append(
+        f"Topology residue atoms: {ligand_setup.get('topology_residue_atoms', 0)}"
+    )
+    lines.append(
+        f"Topology residue count: {ligand_setup.get('topology_residue_count', 0)}"
+    )
+
+    warnings = ligand_setup.get("warnings", [])
+    errors = ligand_setup.get("errors", [])
+    lines.append("Warnings:")
+    if warnings:
+        lines.extend([f"  - {warning}" for warning in warnings])
+    else:
+        lines.append("  none")
+    lines.append("Errors:")
+    if errors:
+        lines.extend([f"  - {error}" for error in errors])
+    else:
+        lines.append("  none")
+
+    txt_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return json_path, txt_path
+
+
+def print_preflight_block(ligand_setup: dict) -> None:
+    source_display = (ligand_setup.get("source") or "manual").replace("|", " + ")
+    print("\n" + "=" * 72)
+    print("🧬 PROTAC ligand preflight")
+    print(f"Ligand selected: {ligand_setup.get('ligand_code') or 'None'}")
+    print(f"Confidence: {ligand_setup.get('confidence', 'unknown')}")
+    print(f"Source: {source_display}")
+    print("Found files:")
+    for key in FILE_KEYS:
+        value = ligand_setup.get("files", {}).get(key)
+        if value:
+            print(f"  ✓ {Path(value).name}")
+    if not any(ligand_setup.get("files", {}).values()):
+        print("  none")
+    print(f"Topology residue atoms: {ligand_setup.get('topology_residue_atoms', 0)}")
+    warnings = ligand_setup.get("warnings", [])
+    if warnings:
+        print("Warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+    else:
+        print("Warnings: none")
+    print("=" * 72)
+
+
+def resolve_frame_window(
+    n_frames: int,
+    start_frame: Optional[int],
+    end_frame: Optional[int],
+    frame_step: int,
+) -> Tuple[int, int, int, List[int]]:
+    start = 0 if start_frame is None else max(0, start_frame)
+    end = n_frames if end_frame is None else min(n_frames, end_frame)
+    step = max(1, frame_step)
+    if start >= end:
+        raise ValueError(
+            f"Invalid frame window: start={start}, end={end}, total_frames={n_frames}"
+        )
+    frame_indices = list(range(start, end, step))
+    return start, end, step, frame_indices
+
+
+def superpose_positions(mobile: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    mobile_centered = mobile - mobile.mean(axis=0)
+    reference_centered = reference - reference.mean(axis=0)
+
+    if len(mobile) < 3:
+        return mobile_centered
+
+    rotation, _ = align.rotation_matrix(mobile_centered, reference_centered)
+    return np.dot(mobile_centered, rotation)
+
+
+def gather_aligned_positions(
+    universe: mda.Universe,
+    atomgroup: mda.AtomGroup,
+    frame_indices: Sequence[int],
+) -> np.ndarray:
+    if atomgroup.n_atoms == 0:
+        return np.empty((0, 0, 3))
+
+    universe.trajectory[frame_indices[0]]
+    reference = atomgroup.positions.copy()
+    aligned_frames = []
+
+    for frame in frame_indices:
+        universe.trajectory[frame]
+        aligned_frames.append(superpose_positions(atomgroup.positions.copy(), reference))
+
+    return np.asarray(aligned_frames)
+
+
+def rmsd_from_aligned_positions(aligned_positions: np.ndarray) -> np.ndarray:
+    if aligned_positions.size == 0:
+        return np.array([])
+    reference = aligned_positions[0]
+    diffs = aligned_positions - reference
+    return np.sqrt(np.mean(np.sum(diffs * diffs, axis=2), axis=1))
+
+
+def rmsf_from_aligned_positions(aligned_positions: np.ndarray) -> np.ndarray:
+    if aligned_positions.size == 0:
+        return np.array([])
+    mean_positions = aligned_positions.mean(axis=0)
+    diffs = aligned_positions - mean_positions
+    return np.sqrt(np.mean(np.sum(diffs * diffs, axis=2), axis=0))
+
+
+def atom_rmsf_to_residue_rmsf(atomgroup: mda.AtomGroup, atom_rmsf: np.ndarray) -> pd.DataFrame:
+    rows = []
+    cursor = 0
+    for residue in atomgroup.residues:
+        count = residue.atoms.n_atoms
+        residue_values = atom_rmsf[cursor : cursor + count]
+        cursor += count
+        rows.append(
+            {
+                "ResidueName": residue.resname,
+                "ResidueID": residue.resid,
+                "ResidueRMSF": float(np.mean(residue_values)) if len(residue_values) else np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def classify_interaction_type(residue: mda.core.groups.Residue, min_distance: float) -> str:
+    resname = residue.resname.strip().upper()
+    labels: List[str] = []
+
+    if resname in HYDROPHOBIC_RESIDUES and min_distance <= 4.5:
+        labels.append("Hydrophobic")
+    if resname in AROMATIC_RESIDUES and min_distance <= 4.8:
+        labels.append("Aromatic")
+    if resname in POSITIVE_RESIDUES | NEGATIVE_RESIDUES and min_distance <= 4.0:
+        labels.append("Ionic")
+    if resname in POLAR_RESIDUES | POSITIVE_RESIDUES | NEGATIVE_RESIDUES and min_distance <= 3.5:
+        labels.append("Hydrophilic")
+
+    if not labels:
+        return "Contact"
+    return ";".join(labels)
+
+
+def build_protein_residue_records(
+    universe: mda.Universe,
+    protein: mda.AtomGroup,
+    entries: Sequence[dict],
+) -> List[dict]:
+    local_lookup = {global_index: local_index for local_index, global_index in enumerate(protein.indices)}
+    records: List[dict] = []
 
     for residue in protein.residues:
-        min_dist = np.min(distances_matrix[:, residue.atoms.indices])
-        interactions = []  # Allow multiple interactions per residue
-
-        # ---- HYDROGEN BONDS ----
-        for donor in residue.atoms:
-            donor_element = infer_element(donor.name)
-            if donor_element in ["O", "N"]:
-                for acceptor in ligand.atoms:
-                    acceptor_element = infer_element(acceptor.name)
-                    if acceptor_element in ["O", "N"]:
-                        dist = np.linalg.norm(donor.position - acceptor.position)
-                        if dist <= 2.5:
-                            donor_angle = calculate_angle(donor.position, acceptor.position, acceptor.position + np.array([0, 0, 1]))
-                            acceptor_angle = calculate_angle(acceptor.position, donor.position, donor.position + np.array([0, 0, 1]))
-                            if donor_angle >= 120 and acceptor_angle >= 90:
-                                subtype = "Backbone Donor" if "N" in donor.name else "Side-chain Donor"
-                                interactions.append(f"H-bonds ({subtype})")
-
-        # ---- HYDROPHOBIC INTERACTIONS ----
-        if min_dist <= 3.6:
-            if residue.resname in ["PHE", "TYR", "TRP"]:
-                interactions.append("Hydrophobic (π-π)")
-            elif residue.resname in ["ARG", "LYS", "HIS"] and any(infer_element(a.name) == "C" for a in ligand.atoms):
-                if min_dist <= 4.5:
-                    interactions.append("Hydrophobic (π-Cation)")
-            elif residue.resname in ["LEU", "ILE", "VAL", "MET", "ALA"]:
-                interactions.append("Hydrophobic (General)")
-
-        # ---- IONIC INTERACTIONS ----
-        if min_dist <= 3.7:
-            if residue.resname in ["ASP", "GLU"] and any(infer_element(a.name) == "N" for a in ligand.atoms):
-                interactions.append("Ionic (Negative)")
-            elif residue.resname in ["ARG", "LYS", "HIS"] and any(infer_element(a.name) == "O" for a in ligand.atoms):
-                interactions.append("Ionic (Positive)")
-
-        # ---- WATER BRIDGES ----
-        if len(waters) > 0:
-            for water in waters.residues:
-                water_atoms = water.atoms
-                water_dist_ligand = distances.distance_array(ligand.positions, water_atoms.positions)
-                water_dist_protein = distances.distance_array(residue.atoms.positions, water_atoms.positions)
-
-                if np.any(water_dist_ligand < 2.8) and np.any(water_dist_protein < 2.8):
-                    interactions.append("Water Bridges")
-                    break
-
-        if interactions:
-            for interaction in interactions:
-                interaction_data.append([frame, residue.resid, residue.resname, interaction])
-
-print(f"🔍 Finished processing {frame_count} frames.")
-
-# ---- CONVERT TO DATAFRAME ----
-if interaction_data:
-    print(f"✅ Processed {len(interaction_data)} interactions. Converting to DataFrame...")
-    interaction_df = pd.DataFrame(interaction_data, columns=["Frame", "Residue", "ResidueName", "InteractionType"])
-
-    # Compute interaction counts per residue
-    interaction_counts = interaction_df.groupby(["Residue", "ResidueName", "InteractionType"]).size().unstack(fill_value=0)
-
-    # Normalize each interaction type individually (0-1 range)
-    interaction_fractions = interaction_counts.div(frame_count).fillna(0).clip(upper=1)
-
-
-
-
-    # ---- PLOT STACKED BAR CHART ----
-    print("📊 Generating visualization...")
-    plt.figure(figsize=(14, 6))
-    interaction_fractions.plot(
-        kind="bar",
-        stacked=True,
-        colormap="Set2",
-        width=0.8,
-        figsize=(14, 6)
-    )
-
-    plt.xlabel("Residue")
-    plt.ylabel("Interaction Persistence (0-4 scale)")
-    plt.title(f"Stacked Protein-Ligand Interactions with Water Bridges (Frames {start_frame}-{end_frame}, Step {FRAME_STEP})")
-    plt.legend(title="Interaction Type", bbox_to_anchor=(1.05, 1), loc="upper left")
-    plt.xticks(rotation=45, ha="right")
-    plt.ylim(0, 4)
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR, "protein_ligand_interactions_geomtry.png"))
-    plt.show()
-else:
-    print("❌ No interactions detected! Check trajectory, selection criteria, or cutoff distances.")
-
-
-
-######PLOTLY TRAJECTORY ANALSYSIS GRPAHS######
-print("🔄 Initializing trajectory analysis for perfect_ligand_interaction_map_scaled")
-
-################################
-# Store contacts across trajectory
-contact_frames = []
-residue_contacts = {}
-
-for ts in u.trajectory:
-    contacts = []
-    for res in protein.residues:
-        res_atoms = res.atoms
-        distances = mda.lib.distances.distance_array(ligand.positions, res_atoms.positions)
-
-        if np.any(distances < CUTOFF):
-            res_id = f"{res.resname}{res.resid}"
-            contacts.append(res_id)
-
-            if res_id not in residue_contacts:
-                residue_contacts[res_id] = 0
-            residue_contacts[res_id] += 1
-
-    contact_frames.append(contacts)
-print(f"✅ Collected contacts across {len(u.trajectory)} frames.")
-
-# Compute contact frequencies
-total_frames = len(u.trajectory)
-contact_frequencies = {res: (count / total_frames) * 100 for res, count in residue_contacts.items()}
-print(f"✅ Computed contact frequencies for {len(contact_frequencies)} residues.")
-
-# Remove artifacts: Filter out residues with <1% interaction frequency
-filtered_contacts = {res: freq for res, freq in contact_frequencies.items() if freq >= 1}
-print(f"✅ Filtered out low-frequency contacts, keeping {len(filtered_contacts)} residues.")
-
-# Residue color coding based on type
-residue_colors = {
-    "HIS": "blue", "ARG": "blue", "LYS": "blue",
-    "ASP": "red", "GLU": "red",
-    "SER": "green", "THR": "green", "ASN": "green", "GLN": "green",
-    "CYS": "yellow", "SEC": "yellow",
-    "GLY": "gray", "PRO": "gray",
-    "ALA": "orange", "VAL": "orange", "ILE": "orange", "LEU": "orange", "MET": "orange",
-    "PHE": "purple", "TYR": "purple", "TRP": "purple"
-}
-
-def get_residue_color(resname):
-    return residue_colors.get(resname[:3], "black")
-
-# Generate Matplotlib Graph with Correct Proportional Scaling
-def generate_matplotlib_graph():
-    G = nx.Graph()
-    
-    # Add edges
-    for residue, freq in filtered_contacts.items():
-        G.add_edge("PTC", residue, weight=freq)
-
-    # **Ensure PTC is at the Center**
-    pos = nx.spring_layout(G, seed=42, k=50, iterations=900)
-    pos["PTC"] = np.array([0, 0])  
-
-    # **Spread Out Nodes More**
-    for node in pos:
-        if node != "PTC":
-            pos[node] *= 14  # Push nodes further away
-
-    plt.figure(figsize=(18, 18))  # Increase figure size
-    nx.draw_networkx_edges(G, pos, alpha=0.4, width=1, edge_color="gray")
-
-    node_sizes, node_colors, labels = [], [], {}
-
-    # **Find Min/Max Frequencies to Normalize Sizes**
-    min_freq = min(filtered_contacts.values())
-    max_freq = max(filtered_contacts.values())
-
-    # **Find the Maximum Residue Node Size**
-    max_residue_size = 0
-
-    for node in G.nodes():
-        if node != "PTC":
-            resname = ''.join(filter(str.isalpha, node))
-            freq = filtered_contacts.get(node, 0)
-            
-            # Normalize size between 800 and 3000
-            node_size = 800 + (freq - min_freq) / (max_freq - min_freq) * 2200  
-            max_residue_size = max(max_residue_size, node_size)
-
-    # **PTC Node should be 3x the Largest Residue Node**
-    ptc_size = int(3 * max_residue_size)
-
-    for node in G.nodes():
-        if node == "PTC":
-            node_sizes.append(ptc_size)  # Largest node
-            node_colors.append("pink")
-        else:
-            resname = ''.join(filter(str.isalpha, node))
-            freq = filtered_contacts.get(node, 0)
-            
-            # Normalize size between 800 and 3000
-            node_size = 800 + (freq - min_freq) / (max_freq - min_freq) * 2200  
-            
-            node_colors.append(get_residue_color(resname))
-            node_sizes.append(node_size)  
-
-        labels[node] = f"{node}\n({filtered_contacts.get(node, 0):.1f}%)"
-
-    nx.draw_networkx_nodes(G, pos, node_size=node_sizes, node_color=node_colors, edgecolors="black")
-
-    # **Labels Inside Nodes**
-    for node, (x, y) in pos.items():
-        plt.text(x, y, labels[node], fontsize=14, ha='center', va='center',
-                 bbox=dict(facecolor="white", alpha=0.7, edgecolor='black', boxstyle="circle"))
-
-    plt.title("Ligand-Protein Interaction Map (PTC) - Optimized Layout", fontsize=24)
-    plt.axis("off")
-
-    # Add legend
-    legend_labels = {
-        "Positively Charged (His, Arg, Lys)": "blue",
-        "Negatively Charged (Asp, Glu)": "red",
-        "Polar (Ser, Thr, Asn, Gln)": "green",
-        "Sulfur-Containing (Cys, Sec)": "yellow",
-        "Special (Gly, Pro)": "gray",
-        "Hydrophobic (Ala, Val, Ile, Leu, Met)": "orange",
-        "Aromatic (Phe, Tyr, Trp)": "purple"
-    }
-    handles = [plt.Line2D([0], [0], marker='o', color='w', markersize=12, markerfacecolor=color, label=label)
-               for label, color in legend_labels.items()]
-    plt.legend(handles=handles, loc='lower left', fontsize=14, title="Residue Types")
-
-    return plt
-
-# Generate Plotly Graph (Interactive HTML with Proper PTC Sizing)
-def generate_plotly_graph():
-    G = nx.Graph()
-    
-    for residue, freq in filtered_contacts.items():
-        G.add_edge("PTC", residue, weight=freq)
-
-    pos = nx.spring_layout(G, seed=42, k=40, iterations=800)
-    pos["PTC"] = np.array([0, 0])  
-
-    for node in pos:
-        if node != "PTC":
-            pos[node] *= 12  # Push nodes outward
-
-    edge_trace = go.Scatter(
-        x=[], y=[], line=dict(width=1, color='#888'), hoverinfo='none', mode='lines'
-    )
-
-    for edge in G.edges():
-        x0, y0 = pos[edge[0]]
-        x1, y1 = pos[edge[1]]
-        edge_trace.x += (x0, x1, None)
-        edge_trace.y += (y0, y1, None)
-
-    node_trace = go.Scatter(
-        x=[], y=[], text=[], mode='markers+text',
-        marker=dict(size=[], color=[], opacity=0.9, line=dict(width=1, color='black')),
-        textposition="middle center"
-    )
-
-    node_colors, node_sizes, node_texts, x_values, y_values = [], [], [], [], []
-
-    for node in G.nodes():
-        x, y = pos[node]
-        x_values.append(x)
-        y_values.append(y)
-
-        if node == "PTC":
-            node_colors.append("pink")
-            node_sizes.append(int(2 * max(node_sizes, default=100)))  # Ensure PTC is 2x larger
-        else:
-            resname = ''.join(filter(str.isalpha, node))
-            freq = min(filtered_contacts.get(node, 0), 200)
-            node_colors.append(get_residue_color(resname))
-            node_sizes.append(80 + (freq / 1.5))  # Make residue nodes larger
-
-        node_texts.append(f"{node}\n({filtered_contacts.get(node, 0):.1f}%)")
-
-    node_trace.x, node_trace.y, node_trace.text = x_values, y_values, node_texts
-    node_trace.marker["color"], node_trace.marker["size"] = node_colors, node_sizes
-
-    fig = go.Figure(data=[edge_trace, node_trace])
-    fig.update_layout(showlegend=False, hovermode='closest', margin=dict(b=0, l=0, r=0, t=0),
-                      title="Ligand-Protein Interaction Map (PTC) - Interactive", font=dict(size=16))
-
-    return fig# Generate Matplotlib & Plotly Figures
-
-plt_graph = generate_matplotlib_graph()
-plt_graph.savefig(os.path.join(OUTPUT_DIR, "perfect_ligand_interaction_map_scaled.png"), dpi=300, bbox_inches="tight")
-plt_graph.savefig(os.path.join(OUTPUT_DIR, "perfect_ligand_interaction_map_scaled.svg"), format="svg", bbox_inches="tight")
-
-
-# ✅ Generate Plotly Interactive HTML
-plotly_fig = generate_plotly_graph()  # Correctly use Plotly function
-plotly_fig.write_html("perfect_ligand_interaction_map_scaled.html")  # Now this works!
-
-print("✅ Analysis complete! Check the generated plots.")
-
-
-
-
-
-# print("✅ MDAnalysis complete! Check the generated plots.")
-
-
-
-
-
-
-
-# #################################################################
-# #################################################################
-# ############## Calpha Analysis of Warheads#######################
-# #################################################################
-# #################################################################
-
-
-
-
-
-def compute_rmsf_whole_protein(topology, trajectory, pdb_reference, ligand_name, distance_cutoff, save_plot=True):
-    """
-    Compute RMSF for the whole protein complex while handling multiple chains.
-    Uses PDB reference to correct chain numbering and highlights ligand-binding residues.
-    Ensures each chain has a distinct X-axis range.
-    """
-    print("🔄 Running RMSF analysis (Optimized for multiple chains)...")
-
-    try:
-        # Load topology and trajectory
-        u = mda.Universe(topology, trajectory)
-
-        # Load PDB reference to get correct chain-resolved numbering
-        u_pdb = mda.Universe(pdb_reference)
-
-        # Select Cα atoms only (avoiding ligand and extra atoms)
-        protein = u.select_atoms("protein and name CA")
-
-        # Compute RMSF
-        from MDAnalysis.analysis.rms import RMSF
-        rmsf_analysis = RMSF(protein).run()
-        rmsf_values = rmsf_analysis.results.rmsf
-
-        # Extract residue numbers and chain identifiers
-        protein_residues = u_pdb.select_atoms("protein").residues  # Only protein residues
-        original_resids = protein_residues.resids
-        chain_ids = protein_residues.segids
-
-        print(f"🔍 Residue count after ligand exclusion: {len(original_resids)} residues")
-
-        # Ensure residue count matches RMSF count
-        if len(original_resids) != len(rmsf_values):
-            print(f"⚠️ Warning: Residue count ({len(original_resids)}) does not match RMSF values ({len(rmsf_values)})")
-            min_length = min(len(original_resids), len(rmsf_values))
-            original_resids = original_resids[:min_length]
-            rmsf_values = rmsf_values[:min_length]
-
-        # Assign unique X-axis positions for each chain
-        corrected_resids, corrected_chain_ids, chain_start_positions = adjust_chain_residue_numbers(original_resids, chain_ids)
-
-        # Identify ligand-binding residues
-        binding_residues = find_binding_site_residues(u_pdb, ligand_name, distance_cutoff)
-
-        # --- PLOTTING ---
-        plt.figure(figsize=(10, 5))
-
-        # ✅ **Plot full RMSF curve first (light gray for background reference)**
-        plt.plot(corrected_resids, rmsf_values, color="lightgray", alpha=0.5, label="Full RMSF Reference")
-
-        # Assign unique colors to each chain
-        unique_chains = np.unique(corrected_chain_ids)
-        for i, chain in enumerate(unique_chains):
-            chain_mask = (corrected_chain_ids == chain)
-            chain_resids = corrected_resids[chain_mask]
-            chain_rmsf = rmsf_values[chain_mask]
-
-            if len(chain_resids) > 0:
-                color = CHAIN_COLORS[i % len(CHAIN_COLORS)]  # Cycle through colors
-                chain_label = CHAIN_LABELS.get(chain, f"Chain {chain}")  # Use custom label if available
-                plt.plot(chain_resids, chain_rmsf, label=chain_label, color=color)
-                plt.scatter(chain_resids, chain_rmsf, color=color, s=10)
-
-        # ✅ **Ensure ligand-binding residues are plotted correctly per chain**
-        for chain, residues in binding_residues.items():
-            if chain in chain_start_positions:  # Make sure the chain exists in our corrected numbering
-                for br in residues:
-                    if br in original_resids:
-                        # Find correct X position for the binding residue
-                        br_x_position = chain_start_positions[chain] + (br - np.min(original_resids[chain_ids == chain]))
-                        rmsf_value = rmsf_values[np.where(corrected_resids == br_x_position)][0]
-
-                        plt.vlines(x=br_x_position, ymin=0, ymax=rmsf_value, color="green", linestyle="--", alpha=0.7, linewidth=1.5)
-
-        plt.xlabel("Residue Number (Separated by Chain)")
-        plt.ylabel("RMSF (Å)")
-        plt.title("Residue Flexibility (RMSF) - Whole Protein (Cα Atoms)")
-        plt.legend()
-
-        if save_plot:
-            output_path = os.path.join(OUTPUT_DIR, "rmsf_whole_protein_separated.png")
-            plt.savefig(output_path)
-            plt.close()
-            print(f"📊 RMSF plot saved as {output_path}")
-
-        print("✅ RMSF analysis completed.")
-        return corrected_resids, rmsf_values
-
-    except Exception as e:
-        print(f"❌ Error in RMSF analysis: {e}")
-        return None, None
-
-
-def adjust_chain_residue_numbers(resids, chain_ids):
-    """
-    Adjust residue numbering to create a continuous sequence across multiple chains.
-    Ensures that dimer chains (e.g., Chain B and Chain C) are kept separate.
-    """
-    unique_chains = np.unique(np.array(chain_ids, dtype=str))  # Convert chain IDs to string type
-    corrected_resids = []
-    corrected_chain_ids = []
-    chain_start_positions = {}  # Track where each chain starts
-
-    offset = 0  # Offset to ensure continuous numbering
-
-    for chain in unique_chains:
-        # Select residues belonging to this specific chain
-        chain_mask = np.array(chain_ids, dtype=str) == chain  # Ensure comparison is done as strings
-        chain_resids = np.array(resids)[chain_mask]  # Apply mask
-
-        if len(chain_resids) == 0:
+        role, protein_name = residue_role_for_residue(residue, entries)
+        if not role:
             continue
-
-        min_resid = np.min(chain_resids)
-
-        # Store where this chain starts in corrected numbering
-        chain_start_positions[chain] = offset  
-
-        # Apply offset and preserve correct numbering
-        corrected_resids.extend(chain_resids - min_resid + offset)
-        corrected_chain_ids.extend([chain] * len(chain_resids))
-
-        # Offset for the next unique chain
-        offset += len(chain_resids)
-
-    return np.array(corrected_resids, dtype=int), np.array(corrected_chain_ids, dtype=str), chain_start_positions
-
-
-def find_binding_site_residues(pdb_universe, ligand_name, distance_cutoff):
-    """
-    Identify protein residues within 'distance_cutoff' Å of ligand atoms,
-    while tracking chain IDs for differentiation.
-    """
-    binding_residues = {}  # Dictionary to store residues as {chain: [resid1, resid2, ...]}
-    ligand = pdb_universe.select_atoms(f"resname {ligand_name}")
-
-    for residue in pdb_universe.select_atoms("protein and name CA").residues:
-        chain_id = residue.segid  # Get chain ID
-        for atom in residue.atoms:
-            distances = np.linalg.norm(atom.position - ligand.atoms.positions, axis=1)
-            if np.any(distances < distance_cutoff):  # If any atom is within cutoff
-                if chain_id not in binding_residues:
-                    binding_residues[chain_id] = []
-                binding_residues[chain_id].append(residue.resid)  # Store residue under the correct chain
-
-    return binding_residues
-
-compute_rmsf_whole_protein(TOPOLOGY_FILE, TRAJECTORY_FILE, PDB_REFERENCE, LIGAND_NAME, DISTANCE_CUTOFF)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#################################################################
-#################################################################
-#################################################################
-########Calpha Warhead and ligase Comparisons and Data Gen#######
-#################################################################
-#################################################################
-#################################################################
-
-
-
-
-
-
-
-# ---- INPUT FILES ----
-TOPOLOGY_LIGASE = "ligase_ligand.gro"
-TOPOLOGY_WARHEAD = "warhead_ligand.gro"
-LIGASE_LIGAND_TRAJ = "ligase_ligand.xtc"
-WARHEAD_LIGAND_TRAJ = "warhead_ligand.xtc"
-
-LIGAND_NAME = "PTC"  # Adjust to match ligand name in the structure
-DISTANCE_CUTOFF = 4.0  # Ligand-Protein interaction cutoff (Å)
-
-
-def adjust_residue_numbers(resids):
-    """
-    Adjust residue numbers when a dimer structure is detected.
-    This ensures that monomer 2 continues sequentially instead of resetting.
-    """
-    adjusted_resids = []
-    offset = 0  # Offset to add when numbering resets
-
-    for i, resid in enumerate(resids):
-        if i > 0 and resid < resids[i - 1]:  # Detect residue reset
-            offset = resids[i - 1]  # Set offset to the last residue before reset
-        
-        adjusted_resids.append(resid + offset)
-
-    return np.array(adjusted_resids), offset  # Return adjusted numbers and offset
-
-def find_binding_site_residues(topology, trajectory):
-    """
-    Identifies protein residues that interact with the ligand within the distance cutoff.
-    Adjusts for dimer numbering.
-    Returns a list of corrected residue IDs involved in ligand interactions.
-    """
-    print(f"🔎 Identifying ligand-binding residues in {topology}...")
-
-    try:
-        u = mda.Universe(topology, trajectory)
-
-        # Select protein Cα atoms and ligand atoms
-        calpha = u.select_atoms("protein and name CA")
-        ligand = u.select_atoms(f"resname {LIGAND_NAME}")
-
-        binding_residues = set()
-
-        # Iterate through trajectory to find binding residues
-        for ts in u.trajectory:
-            distances = mda.lib.distances.distance_array(calpha.positions, ligand.positions)
-            interacting_residues = np.where(distances < DISTANCE_CUTOFF)[0]
-            binding_residues.update(calpha.resids[interacting_residues])
-
-        # Adjust numbering if a dimer is detected
-        corrected_resids, offset = adjust_residue_numbers(list(binding_residues))
-        print(f"✅ Found {len(corrected_resids)} ligand-contacting residues.")
-
-        return corrected_resids.tolist()
-
-    except Exception as e:
-        print(f"❌ Error identifying binding site residues: {e}")
-        return []
-
-def compute_rmsf(topology, trajectory, label, color, save_individual=True):
-    """
-    Compute Cα RMSF for a given topology and trajectory.
-    Detects dimer residue numbering resets, and marks ligand-contact residues.
-    Saves individual graphs if required.
-    """
-    print(f"🔄 Running Cα RMSF analysis for {label}...")
-
-    try:
-        # Load the universe
-        u = mda.Universe(topology, trajectory)
-
-        # Select Cα atoms
-        calpha = u.select_atoms("protein and name CA")
-
-        # Compute RMSF
-        rmsf_analysis = RMSF(calpha).run()
-        rmsf_values = rmsf_analysis.results.rmsf
-
-        # Adjust residue numbering if a reset is detected
-        corrected_resids, offset = adjust_residue_numbers(calpha.resids)
-
-        # Identify ligand-binding residues
-        binding_residues = find_binding_site_residues(topology, trajectory)
-
-        # Create a new figure for this individual protein
-        if save_individual:
-            plt.figure(figsize=(8, 5))
-            plt.plot(corrected_resids, rmsf_values, label=f"{label} Cα RMSF", color=color)
-
-            # Ensure vertical bars do not exceed the RMSF peak values
-            for br in binding_residues:
-                if br in corrected_resids:
-                    rmsf_value = rmsf_values[np.where(corrected_resids == br)][0]
-                    plt.vlines(x=br, ymin=0, ymax=rmsf_value, color="green", linestyle="--", alpha=0.6)
-
-            plt.xlabel("Residue Number")
-            plt.ylabel("RMSF (Å)")
-            plt.title(f"{label} Cα RMSF Over Time")
-            plt.legend()
-
-            # Save individual plot
-            individual_path = os.path.join(OUTPUT_DIR, f"calpha_RMSF_{label.lower()}.png")
-            plt.savefig(individual_path)
-            plt.close()
-            print(f"📊 {label} plot saved as {individual_path}")
-
-        print(f"✅ Completed Cα RMSF analysis for {label}.")
-        return corrected_resids, rmsf_values, binding_residues
-
-    except Exception as e:
-        print(f"❌ Error in Cα RMSF analysis for {label}: {e}")
-        return None, None, []
-
-# Create combined figure
-plt.figure(figsize=(8, 5))
-
-# Compute RMSF for both ligase and warhead (saving individual plots)
-resids_ligase, rmsf_ligase, binding_ligase = compute_rmsf(TOPOLOGY_LIGASE, LIGASE_LIGAND_TRAJ, "Ligase", "blue", save_individual=True)
-resids_warhead, rmsf_warhead, binding_warhead = compute_rmsf(TOPOLOGY_WARHEAD, WARHEAD_LIGAND_TRAJ, "Warhead", "red", save_individual=True)
-
-# Add both datasets to combined plot
-plt.plot(resids_ligase, rmsf_ligase, label="Ligase Cα RMSF", color="blue")
-plt.plot(resids_warhead, rmsf_warhead, label="Warhead Cα RMSF", color="red")
-
-# Ensure vertical bars do not exceed RMSF peak values
-all_resids = np.concatenate([resids_ligase, resids_warhead])
-all_rmsf_values = np.concatenate([rmsf_ligase, rmsf_warhead])
-
-for br in binding_ligase + binding_warhead:
-    if br in all_resids:
-        rmsf_value = all_rmsf_values[np.where(all_resids == br)][0]
-        plt.vlines(x=br, ymin=0, ymax=rmsf_value, color="green", linestyle="--", alpha=0.6)
-
-# Final plot settings
-plt.xlabel("Residue Number")
-plt.ylabel("RMSF (Å)")
-plt.title("Cα RMSF Over Time (Ligase & Warhead)")
-plt.legend()
-
-# Save combined plot
-combined_path = os.path.join(OUTPUT_DIR, "calpha_RMSF_combined.png")
-plt.savefig(combined_path)
-plt.close()
-
-print(f"📊 Combined plot saved as {combined_path}")
-
-
-#################################################################
-#################################################################
-#################################################################
-#################################################################
-####################LIGASE and WARHEAD Q VALUE ANALYSIS##########
-#################################################################
-#################################################################
-#################################################################
-#################################################################
-# ---- SETUP OUTPUT DIRECTORIES ----
-OUTPUT_DIR = "Analysis_Graphs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# ---- INPUT FILES ----
-TOPOLOGY_LIGASE = "ligase_ligand.gro"
-TOPOLOGY_WARHEAD = "warhead_ligand.gro"
-LIGASE_LIGAND_TRAJ = "ligase_ligand.xtc"
-WARHEAD_LIGAND_TRAJ = "warhead_ligand.xtc"
-LIGAND_NAME = "PTC"
-DISTANCE_CUTOFF = 4.0  # Ligand-Protein interaction cutoff (Å)
-CONTACT_CUTOFF = 0.5  # Q(X) contact cutoff (nm)
-NUM_CLUSTERS = 3  # Number of clusters for Q(X)
-
-# ---- FUNCTION TO COMPUTE LIGAND-PROTEIN CONTACTS ----
-def compute_ligand_contacts(topology, trajectory, output_name):
-    """Computes ligand-protein contacts over time with consistent colors."""
-    print(f"🔄 Computing ligand-protein contacts for {output_name}...")
-
-    # Assign colors explicitly
-    color_map = {
-        "Ligase_Ligand": "blue",
-        "Warhead_Ligand": "red"
-    }
-    color = color_map.get(output_name, "black")  # Default to black if not found
-
-    u = mda.Universe(topology, trajectory)
-    protein = u.select_atoms("protein")
-    ligand = u.select_atoms(f"resname {LIGAND_NAME}")
-
-    if len(ligand) == 0:
-        raise ValueError(f"❌ No ligand atoms found with resname {LIGAND_NAME}! Check the structure file.")
-
-    contact_counts = []
-    for ts in u.trajectory:
-        distances = np.linalg.norm(ligand.positions[:, None, :] - protein.positions[None, :, :], axis=-1)
-        contact_count = np.sum(distances < DISTANCE_CUTOFF)
-        contact_counts.append(contact_count)
-
-    np.savetxt(os.path.join(OUTPUT_DIR, f"{output_name}_contacts.csv"), contact_counts, delimiter=",")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(contact_counts, label=f"{output_name} Contacts", color=color)
-    plt.xlabel("Frame")
-    plt.ylabel("Number of Contacts")
-    plt.title(f"Ligand-Protein Contacts Over Time: {output_name}")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR, f"{output_name}_contacts.png"))
-    plt.close()
-
-    print(f"✅ Saved {output_name} contacts plot: {output_name}_contacts.png")
-
-    return np.array(contact_counts)
-
-
-# ---- FUNCTION TO COMPUTE Q(X) VALUES ----
-def compute_q_values(traj, native_contacts, native):
-    """Computes Q(X) native contact fraction."""
-    if len(native_contacts) == 0:
-        return np.zeros(len(traj))
-    
-    r_traj = md.compute_distances(traj, native_contacts)
-    r_native = md.compute_distances(native, native_contacts)[0]
-    return np.mean(1.0 / (1 + np.exp(50 * (r_traj - 1.8 * r_native))), axis=1)
-
-# ---- FUNCTION TO COMPARE CONTACTS WITH Q(X) ----
-def overlay_contacts_qx(ligase_contacts, warhead_contacts, q_ligase, q_warhead):
-    """Plots ligand contacts and Q(X) values on the same graph."""
-    print("📊 Overlaying Ligand Contacts and Q(X)...")
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(ligase_contacts, label="Ligase Contacts", color="blue")
-    plt.plot(q_ligase * max(ligase_contacts), label="Ligase Q(X)", linestyle="dashed", color="blue")
-    plt.plot(warhead_contacts, label="Warhead Contacts", color="red")
-    plt.plot(q_warhead * max(warhead_contacts), label="Warhead Q(X)", linestyle="dashed", color="red")
-    plt.xlabel("Frame")
-    plt.ylabel("Contacts & Q(X) (Scaled)")
-    plt.title("Ligand Contacts vs. Q(X) Over Time")
-    plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR, "contacts_vs_qx.png"))
-    plt.close()
-
-    print("✅ Saved Ligand Contacts vs. Q(X) comparison plot.")
-
-# ---- FUNCTION TO CLUSTER LIGAND CONFORMATIONS BASED ON Q(X) ----
-def cluster_ligand_qx(q_ligase, q_warhead):
-    """Clusters ligand conformations into high-Q(X) and low-Q(X) states."""
-    print("🔄 Clustering ligand conformations based on Q(X)...")
-
-    q_matrix = np.vstack([q_ligase, q_warhead]).T
-    linkage_matrix = linkage(q_matrix, method="ward")
-    cluster_labels = fcluster(linkage_matrix, NUM_CLUSTERS, criterion='maxclust')
-
-    plt.figure(figsize=(8, 5))
-    for cluster in range(1, NUM_CLUSTERS + 1):
-        cluster_indices = np.where(cluster_labels == cluster)[0]
-        plt.scatter(cluster_indices, q_ligase[cluster_indices], label=f"Cluster {cluster}")
-
-    plt.xlabel("Time (frames)")
-    plt.ylabel("Fraction of Native Contacts (Q)")
-    plt.legend()
-    plt.title("Q(X) Clustering")
-    plt.savefig(os.path.join(OUTPUT_DIR, "qx_clustering.png"))
-    plt.close()
-
-    print("✅ Clustering analysis completed.")
-
-# ---- RUN CONTACT ANALYSIS ----
-ligase_contacts = compute_ligand_contacts(TOPOLOGY_LIGASE, LIGASE_LIGAND_TRAJ, "Ligase_Ligand")
-warhead_contacts = compute_ligand_contacts(TOPOLOGY_WARHEAD, WARHEAD_LIGAND_TRAJ, "Warhead_Ligand")
-
-# ---- COMPUTE Q(X) ----
-print("🔄 Computing Q(X) values...")
-
-traj_ligase = md.load(LIGASE_LIGAND_TRAJ, top=TOPOLOGY_LIGASE)
-traj_warhead = md.load(WARHEAD_LIGAND_TRAJ, top=TOPOLOGY_WARHEAD)
-native = md.load(TOPOLOGY_LIGASE)
-
-ligase_contacts_pairs = traj_ligase.topology.select_pairs(f"resname {LIGAND_NAME}", "protein")
-warhead_contacts_pairs = traj_warhead.topology.select_pairs(f"resname {LIGAND_NAME}", "protein")
-
-q_ligase = compute_q_values(traj_ligase, ligase_contacts_pairs, native)
-q_warhead = compute_q_values(traj_warhead, warhead_contacts_pairs, native)
-
-np.savetxt(os.path.join(OUTPUT_DIR, "q_ligase.txt"), q_ligase)
-np.savetxt(os.path.join(OUTPUT_DIR, "q_warhead.txt"), q_warhead)
-print("✅ Q(X) values computed.")
-
-# ---- OVERLAY CONTACTS WITH Q(X) ----
-overlay_contacts_qx(ligase_contacts, warhead_contacts, q_ligase, q_warhead)
-
-# ---- CLUSTER LIGAND STATES BASED ON Q(X) ----
-cluster_ligand_qx(q_ligase, q_warhead)
-
-
-
-
-
-
-
-
-
-
-# --- INPUT FILES ---
-TOPOLOGY_LIGASE = "ligase_ligand.gro"
-TOPOLOGY_WARHEAD = "warhead_ligand.gro"
-LIGASE_LIGAND_TRAJ = "ligase_ligand.xtc"
-WARHEAD_LIGAND_TRAJ = "warhead_ligand.xtc"
-
-# --- OUTPUT DIRECTORY ---
-OUTPUT_DIR = "Analysis_Graphs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Function to adjust residue numbering for dimers
-def adjust_residue_numbers(resids):
-    adjusted_resids = []
-    offset = 0  # Offset to add when numbering resets
-
-    for i, resid in enumerate(resids):
-        if i > 0 and resid < resids[i - 1]:  # Detect residue reset
-            offset = resids[i - 1]  # Set offset to the last residue before reset
-        
-        adjusted_resids.append(resid + offset)
-
-    return np.array(adjusted_resids)
-
-# Function to analyze secondary structure
-def analyze_secondary_structure(topology_file, trajectory_file):
-    print(f"Processing: {trajectory_file}")
-    
-    # Load trajectory
-    traj = md.load(trajectory_file, top=topology_file)
-
-    # Compute secondary structure per frame
-    dssp_results = compute_dssp(traj)
-
-    # DSSP mapping
-    sse_mapping = {
-        'H': 'Helix', 'G': 'Helix', 'I': 'Helix',
-        'E': 'Strand', 'B': 'Strand',
-        'T': 'Turn', 'S': 'Turn',
-        '-': 'Coil'
-    }
-
-    # Map DSSP results to SSE types
-    categorized_sse = np.vectorize(sse_mapping.get)(dssp_results)
-
-    # Count occurrences for each residue
-    residue_sse_counts = [Counter(categorized_sse[:, i]) for i in range(traj.n_residues)]
-
-    # Compute fraction of time spent in each SSE
-    residue_sse_fractions = [
-        {key: count / traj.n_frames for key, count in counts.items()} for counts in residue_sse_counts
+        local_indices = np.array(
+            [local_lookup[index] for index in residue.atoms.indices if index in local_lookup],
+            dtype=int,
+        )
+        if local_indices.size == 0:
+            continue
+        records.append(
+            {
+                "residue": residue,
+                "role": role,
+                "protein_name": protein_name,
+                "residue_label": residue_label(residue, role),
+                "protein_local_indices": local_indices,
+            }
+        )
+    return records
+
+
+def write_system_roles(entries: Sequence[dict], qc_dir: Path) -> Path:
+    rows = []
+    for entry in entries:
+        rows.append(
+            {
+                "Name": entry["name"],
+                "Role": entry["role"],
+                "Start_1based": entry["start_1based"],
+                "End_1based": entry["end_1based"],
+                "Start0": entry["start0"],
+                "End0": entry["end0"],
+            }
+        )
+    path = qc_dir / "protac_system_roles.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return path
+
+
+def write_ligand_detection_summary(ligand: mda.AtomGroup, ligand_code: str, qc_dir: Path) -> Path:
+    lines = [
+        f"Ligand resname: {ligand_code}",
+        f"Atom count: {ligand.n_atoms}",
+        f"Residue count: {ligand.residues.n_residues}",
     ]
-
-    # Extract SSE fractions
-    helix_fractions = [fractions.get("Helix", 0) * 100 for fractions in residue_sse_fractions]
-    strand_fractions = [fractions.get("Strand", 0) * 100 for fractions in residue_sse_fractions]
-    turn_fractions = [fractions.get("Turn", 0) * 100 for fractions in residue_sse_fractions]
-    coil_fractions = [fractions.get("Coil", 0) * 100 for fractions in residue_sse_fractions]
-
-    # Compute total SSE fraction over time
-    total_sse_fraction = np.mean((categorized_sse == "Helix") | (categorized_sse == "Strand"), axis=1) * 100
-
-    return helix_fractions, strand_fractions, turn_fractions, coil_fractions, total_sse_fraction, categorized_sse, traj
-
-# Run analysis for both Ligase and Warhead trajectories
-ligase_helix, ligase_strand, ligase_turn, ligase_coil, ligase_total_sse, ligase_sse, ligase_traj = analyze_secondary_structure(TOPOLOGY_LIGASE, LIGASE_LIGAND_TRAJ)
-warhead_helix, warhead_strand, warhead_turn, warhead_coil, warhead_total_sse, warhead_sse, warhead_traj = analyze_secondary_structure(TOPOLOGY_WARHEAD, WARHEAD_LIGAND_TRAJ)
-
-# Adjust residue numbers for dimers
-ligase_residue_indices = np.arange(len(ligase_helix))
-warhead_residue_indices = np.arange(len(warhead_helix))
-
-adjusted_ligase_residues = adjust_residue_numbers(ligase_residue_indices)
-adjusted_warhead_residues = adjust_residue_numbers(warhead_residue_indices)
-
-# --- PLOT 1: % SSE BY RESIDUE INDEX FOR LIGASE ---
-plt.figure(figsize=(12, 6))
-plt.fill_between(adjusted_ligase_residues, ligase_helix, color='red', alpha=0.6, label="Helix")
-plt.fill_between(adjusted_ligase_residues, ligase_strand, color='blue', alpha=0.6, label="Strand")
-plt.fill_between(adjusted_ligase_residues, ligase_turn, color='green', alpha=0.6, label="Turn")
-plt.fill_between(adjusted_ligase_residues, ligase_coil, color='gray', alpha=0.6, label="Coil")
-
-plt.xlabel("Residue Index")
-plt.ylabel("Res. % SSE")
-plt.title("Protein Secondary Structure - Ligase")
-plt.legend()
-plt.grid()
-plt.savefig(os.path.join(OUTPUT_DIR, "sse_ligase.png"), dpi=300)
-plt.show()
-
-# --- PLOT 2: % SSE BY RESIDUE INDEX FOR WARHEAD ---
-plt.figure(figsize=(12, 6))
-plt.fill_between(adjusted_warhead_residues, warhead_helix, color='red', alpha=0.6, label="Helix")
-plt.fill_between(adjusted_warhead_residues, warhead_strand, color='blue', alpha=0.6, label="Strand")
-plt.fill_between(adjusted_warhead_residues, warhead_turn, color='green', alpha=0.6, label="Turn")
-plt.fill_between(adjusted_warhead_residues, warhead_coil, color='gray', alpha=0.6, label="Coil")
-
-plt.xlabel("Residue Index")
-plt.ylabel("Res. % SSE")
-plt.title("Protein Secondary Structure - Warhead")
-plt.legend()
-plt.grid()
-plt.savefig(os.path.join(OUTPUT_DIR, "sse_warhead.png"), dpi=300)
-plt.show()
-
-# --- PLOT 3: SSE OVER TIME (Total SSE for Ligase & Warhead) ---
-plt.figure(figsize=(12, 4))
-plt.plot(ligase_traj.time, ligase_total_sse, label="Ligase SSE %", color="blue")
-plt.plot(warhead_traj.time, warhead_total_sse, label="Warhead SSE %", color="red")
-
-plt.xlabel("Time (nsec)")
-plt.ylabel("% SSE")
-plt.title("Protein Secondary Structure Over Time")
-plt.legend()
-plt.grid()
-plt.savefig(os.path.join(OUTPUT_DIR, "sse_over_time.png"), dpi=300)
-plt.show()
-
-# --- PLOT 4: Ligase SSE Assignment Over Time ---
-plt.figure(figsize=(12, 6))
-plt.imshow(ligase_sse.T == "Helix", aspect='auto', interpolation='nearest', cmap="Reds", origin='lower')
-plt.imshow(ligase_sse.T == "Strand", aspect='auto', interpolation='nearest', cmap="Blues", origin='lower', alpha=0.7)
-plt.xlabel("Time (nsec)")
-plt.ylabel("Residue Index")
-plt.title("Ligase SSE Assignment Over Time")
-plt.savefig(os.path.join(OUTPUT_DIR, "ligase_sse_time.png"), dpi=300)
-plt.show()
-
-# --- PLOT 5: Warhead SSE Assignment Over Time ---
-plt.figure(figsize=(12, 6))
-plt.imshow(warhead_sse.T == "Helix", aspect='auto', interpolation='nearest', cmap="Reds", origin='lower')
-plt.imshow(warhead_sse.T == "Strand", aspect='auto', interpolation='nearest', cmap="Blues", origin='lower', alpha=0.7)
-plt.xlabel("Time (nsec)")
-plt.ylabel("Residue Index")
-plt.title("Warhead SSE Assignment Over Time")
-plt.savefig(os.path.join(OUTPUT_DIR, "warhead_sse_time.png"), dpi=300)
-plt.show()
-
-# --- PLOT 6: SSE Over Time (Ligase) ---
-plt.figure(figsize=(12, 4))
-plt.plot(ligase_traj.time, ligase_total_sse, label="Ligase SSE %", color="blue")
-plt.xlabel("Time (nsec)")
-plt.ylabel("% SSE")
-plt.title("Protein Secondary Structure Over Time - Ligase")
-plt.legend()
-plt.grid()
-plt.savefig(os.path.join(OUTPUT_DIR, "sse_over_time_ligase.png"), dpi=300)
-plt.show()
-
-# --- PLOT 7: SSE Over Time (Warhead) ---
-plt.figure(figsize=(12, 4))
-plt.plot(warhead_traj.time, warhead_total_sse, label="Warhead SSE %", color="red")
-plt.xlabel("Time (nsec)")
-plt.ylabel("% SSE")
-plt.title("Protein Secondary Structure Over Time - Warhead")
-plt.legend()
-plt.grid()
-plt.savefig(os.path.join(OUTPUT_DIR, "sse_over_time_warhead.png"), dpi=300)
-plt.show()
+    path = qc_dir / "protac_ligand_detection.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
 
 
+def print_startup_summary(
+    ligand_code: str,
+    entries: Sequence[dict],
+    topo_path: str,
+    traj_path: str,
+    frame_count: int,
+) -> None:
+    ligase = entries[0]
+    targets = entries[1:]
+    target_display = ", ".join(
+        f"{entry['role']}={entry['name']}({entry['start_1based']}-{entry['end_1based']})"
+        for entry in targets
+    )
+    if not target_display:
+        target_display = "none"
+
+    print("\nStartup summary")
+    print(f"Ligand: {ligand_code}")
+    print(
+        f"Ligase: {ligase['name']} ({ligase['start_1based']}-{ligase['end_1based']})"
+    )
+    print(f"Targets: {target_display}")
+    print(f"Topology: {topo_path}")
+    print(f"Trajectory: {traj_path}")
+    print(f"Frames: {frame_count}")
 
 
-
-################################################################################################################################
-##################   LIGAND GRAPH GENERATION SPECIFICALLY AROUND LIGAND TRAJECTORY IN THE PRESENCE OF WARHEAD & LIGASE##########
-################################################################################################################################
-################################################################################################################################
-################################################################################
+def role_color(role: str) -> str:
+    if role == "Ligase":
+        return "#1f77b4"
+    return "#d62728" if role == "Target_A" else "#2ca02c"
 
 
+def plot_series(
+    x: Sequence[float],
+    y_series: Dict[str, Sequence[float]],
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    output_path: Path,
+) -> None:
+    plt.figure(figsize=(9, 5))
+    for label, values in y_series.items():
+        plt.plot(x, values, label=label, linewidth=2)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
 
 
-# === Configuration ===
-BOUND_LIGAND_XTC = "ligand.xtc"  # Bound ligand trajectory
-REFERENCE_GRO = "ligand.pdb"  # Reference structure
-OUTPUT_DIR = "Analysis_Graphs"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+def run_rmsd_and_rmsf(
+    universe: mda.Universe,
+    protein: mda.AtomGroup,
+    ligand: mda.AtomGroup,
+    entries: Sequence[dict],
+    frame_indices: Sequence[int],
+    rms_dir: Path,
+) -> None:
+    ensure_dir(rms_dir)
+    rows_rmsd = []
+    rows_rmsf = []
+    times = []
+    for frame in frame_indices:
+        universe.trajectory[frame]
+        times.append(float(universe.trajectory.time))
 
-# === Step 1: Extract Ligand Snapshots ===
-def extract_ligand_snapshots(trajectory):
-    """Extracts ligand snapshots from a trajectory and saves them as PDB files."""
-    print(f"🔄 Extracting ligand snapshots from {trajectory}...")
+    protein_ca = protein.select_atoms("name CA")
+    if protein_ca.n_atoms == 0:
+        protein_ca = protein
 
-    output_path = os.path.join(OUTPUT_DIR, "bound")
-    os.makedirs(output_path, exist_ok=True)
+    protein_positions = gather_aligned_positions(universe, protein_ca, frame_indices)
+    protein_rmsd = rmsd_from_aligned_positions(protein_positions)
+    protein_atom_rmsf = rmsf_from_aligned_positions(protein_positions)
+    protein_residue_rmsf = atom_rmsf_to_residue_rmsf(protein_ca, protein_atom_rmsf)
+    protein_residue_rmsf["Role"] = "All_Protein"
+    protein_residue_rmsf["ProteinName"] = "All_Protein"
+    rows_rmsf.append(protein_residue_rmsf)
 
-    u = mda.Universe(REFERENCE_GRO, trajectory)
-    ligand = u.select_atoms("resname PTC")  # Adjust ligand resname
+    for frame, time_ps, value in zip(frame_indices, times, protein_rmsd):
+        rows_rmsd.append(
+            {
+                "Frame": frame,
+                "Time_ps": time_ps,
+                "Role": "All_Protein",
+                "ProteinName": "All_Protein",
+                "RMSD": float(value),
+            }
+        )
 
-    if len(ligand) == 0:
-        raise ValueError(f"❌ No ligand atoms found in {trajectory}! Check resname.")
+    entry_rmsd_series = {"All_Protein": protein_rmsd}
 
-    for i, ts in enumerate(u.trajectory):
-        pdb_filename = os.path.join(output_path, f"ligand_frame_{i:04d}.pdb")
-        ligand.write(pdb_filename)
-
-    print(f"✅ Extracted {i+1} ligand snapshots to {output_path}/")
-    return output_path
-
-# === Step 2: Convert PDB to MOL2 Using Open Babel ===
-def convert_pdb_to_mol2(pdb_dir):
-    """Converts PDB files to MOL2 format using Open Babel."""
-    print(f"🔄 Converting PDB snapshots to MOL2 format in {pdb_dir}...")
-
-    pdb_files = sorted(glob.glob(os.path.join(pdb_dir, "ligand_frame_*.pdb")))
-    if not pdb_files:
-        raise ValueError(f"❌ No PDB snapshots found in {pdb_dir}!")
-
-    for pdb_file in pdb_files:
-        mol2_file = pdb_file.replace(".pdb", ".mol2")
-        obConversion = openbabel.OBConversion()
-        obConversion.SetInAndOutFormats("pdb", "mol2")
-
-        mol = openbabel.OBMol()
-        obConversion.ReadFile(mol, pdb_file)
-        obConversion.WriteFile(mol, mol2_file)
-
-    print(f"✅ Converted all PDB files to MOL2 format in {pdb_dir}.")
-
-# === Step 3: Compute Torsion Angles ===
-def compute_torsion_angles(mol2_dir):
-    """Computes torsion angles from MOL2 files using RDKit."""
-    print(f"🔄 Computing torsion angles from MOL2 files in {mol2_dir}...")
-
-    mol2_files = sorted(glob.glob(os.path.join(mol2_dir, "ligand_frame_*.mol2")))
-    torsion_data = []
-
-    if not mol2_files:
-        raise ValueError(f"❌ No MOL2 files found in {mol2_dir}!")
-
-    for mol2_file in mol2_files:
-        mol = Chem.MolFromMol2File(mol2_file, removeHs=False)
-
-        if mol is None:
-            print(f"⚠️ Skipping {mol2_file}, RDKit failed to parse it.")
+    for entry in entries:
+        entry_group = atomgroup_for_entry(universe, entry).select_atoms("protein and name CA")
+        if entry_group.n_atoms == 0:
+            entry_group = atomgroup_for_entry(universe, entry).select_atoms("protein")
+        if entry_group.n_atoms == 0:
             continue
 
-        conf = mol.GetConformer()
-        torsions = [list(tup) for tup in mol.GetSubstructMatches(
-            Chem.MolFromSmarts("[!R]~[!R]~[!R]~[!R]")
-        )]
+        entry_positions = gather_aligned_positions(universe, entry_group, frame_indices)
+        entry_rmsd = rmsd_from_aligned_positions(entry_positions)
+        entry_rmsf = rmsf_from_aligned_positions(entry_positions)
+        entry_residue_rmsf = atom_rmsf_to_residue_rmsf(entry_group, entry_rmsf)
+        entry_residue_rmsf["Role"] = entry["role"]
+        entry_residue_rmsf["ProteinName"] = entry["name"]
+        rows_rmsf.append(entry_residue_rmsf)
+        entry_rmsd_series[entry["role"]] = entry_rmsd
 
-        frame_torsions = []
-        for (a, b, c, d) in torsions:
-            angle = rdMolTransforms.GetDihedralDeg(conf, a, b, c, d)
-            frame_torsions.append(angle)
+        for frame, time_ps, value in zip(frame_indices, times, entry_rmsd):
+            rows_rmsd.append(
+                {
+                    "Frame": frame,
+                    "Time_ps": time_ps,
+                    "Role": entry["role"],
+                    "ProteinName": entry["name"],
+                    "RMSD": float(value),
+                }
+            )
 
-        torsion_data.append(frame_torsions)
+    ligand_positions = gather_aligned_positions(universe, ligand, frame_indices)
+    ligand_rmsd = rmsd_from_aligned_positions(ligand_positions)
+    ligand_rmsf = rmsf_from_aligned_positions(ligand_positions)
+    ligand_df = pd.DataFrame(
+        {
+            "AtomIndex": np.arange(ligand.n_atoms),
+            "AtomName": ligand.names,
+            "RMSF": ligand_rmsf,
+        }
+    )
+    ligand_df.to_csv(rms_dir / "ligand_rmsf.csv", index=False)
 
-    torsion_data = np.array(torsion_data)
-    np.savetxt(os.path.join(mol2_dir, "torsion_angles.csv"), torsion_data, delimiter=",")
+    ligand_rmsd_df = pd.DataFrame(
+        {
+            "Frame": frame_indices,
+            "Time_ps": times,
+            "Role": "Ligand",
+            "ProteinName": "Ligand",
+            "RMSD": ligand_rmsd,
+        }
+    )
+    ligand_rmsd_df.to_csv(rms_dir / "ligand_rmsd.csv", index=False)
 
-    print(f"✅ Computed torsion angles for {len(torsion_data)} frames.")
-    return torsion_data
+    rmsd_df = pd.DataFrame(rows_rmsd)
+    rmsf_df = pd.concat(rows_rmsf, ignore_index=True)
+    rmsd_df.to_csv(rms_dir / "protein_rmsd_by_role.csv", index=False)
+    rmsf_df.to_csv(rms_dir / "protein_rmsf_by_role.csv", index=False)
 
-# === Step 4: Perform PCA on Torsion Angles ===
-def perform_pca(torsion_data):
-    """Performs PCA on torsion angles to identify dominant motion."""
-    print("🔄 Performing PCA on torsion angles...")
+    plot_series(
+        frame_indices,
+        entry_rmsd_series,
+        xlabel="Frame",
+        ylabel="RMSD (Å)",
+        title="Protein RMSD by PROTAC Role",
+        output_path=rms_dir / "protein_rmsd_by_role.png",
+    )
 
-    pca = PCA(n_components=2)
-    reduced_data = pca.fit_transform(torsion_data)
-
-    plt.figure(figsize=(8, 6))
-    plt.scatter(reduced_data[:, 0], reduced_data[:, 1], alpha=0.5, color="blue")
-    plt.xlabel("PC1")
-    plt.ylabel("PC2")
-    plt.title("PCA of Ligand Torsion Angles")
-    plt.savefig(os.path.join(OUTPUT_DIR, "torsion_pca.png"))
+    plt.figure(figsize=(9, 5))
+    for role, subset in rmsf_df.groupby("Role"):
+        plt.plot(subset["ResidueID"], subset["ResidueRMSF"], label=role, linewidth=1.6)
+    plt.xlabel("Residue ID")
+    plt.ylabel("RMSF (Å)")
+    plt.title("Protein RMSF by PROTAC Role")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(rms_dir / "protein_rmsf_by_role.png", dpi=300)
     plt.close()
 
-    print(f"✅ PCA plot saved as torsion_pca.png")
-    return reduced_data
-
-# === Step 5: Perform RMSD Clustering ===
-def cluster_conformations(torsion_data):
-    """Clusters ligand conformations based on RMSD-like torsion similarity."""
-    print("🔄 Performing RMSD-based clustering on torsion angles...")
-
-    # Hierarchical clustering
-    linkage_matrix = linkage(torsion_data, method="ward")
-    num_clusters = 3  # Adjust as needed
-    cluster_labels = fcluster(linkage_matrix, num_clusters, criterion="maxclust")
-
-    plt.figure(figsize=(8, 6))
-    sns.scatterplot(x=torsion_data[:, 0], y=torsion_data[:, 1], hue=cluster_labels, palette="viridis")
-    plt.xlabel("Torsion 1 (°)")
-    plt.ylabel("Torsion 2 (°)")
-    plt.title("Ligand Conformation Clusters")
-    plt.legend(title="Cluster")
-    plt.savefig(os.path.join(OUTPUT_DIR, "torsion_clusters.png"))
+    plt.figure(figsize=(9, 5))
+    plt.plot(frame_indices, ligand_rmsd, color="#9467bd", linewidth=2)
+    plt.xlabel("Frame")
+    plt.ylabel("RMSD (Å)")
+    plt.title("Ligand RMSD")
+    plt.tight_layout()
+    plt.savefig(rms_dir / "ligand_rmsd.png", dpi=300)
     plt.close()
 
-    print(f"✅ Clustering plot saved as torsion_clusters.png")
+    plt.figure(figsize=(9, 5))
+    plt.plot(np.arange(ligand.n_atoms), ligand_rmsf, color="#9467bd", linewidth=1.8)
+    plt.xlabel("Ligand atom index")
+    plt.ylabel("RMSF (Å)")
+    plt.title("Ligand RMSF")
+    plt.tight_layout()
+    plt.savefig(rms_dir / "ligand_rmsf.png", dpi=300)
+    plt.close()
 
-    return cluster_labels
+
+def run_radius_of_gyration(
+    universe: mda.Universe,
+    protein: mda.AtomGroup,
+    entries: Sequence[dict],
+    frame_indices: Sequence[int],
+    rms_dir: Path,
+) -> None:
+    rows = []
+    for frame in frame_indices:
+        universe.trajectory[frame]
+        rows.append(
+            {
+                "Frame": frame,
+                "Time_ps": float(universe.trajectory.time),
+                "Role": "All_Protein",
+                "ProteinName": "All_Protein",
+                "RadiusOfGyration": float(protein.radius_of_gyration()),
+            }
+        )
+        for entry in entries:
+            entry_group = atomgroup_for_entry(universe, entry).select_atoms("protein")
+            if entry_group.n_atoms == 0:
+                continue
+            rows.append(
+                {
+                    "Frame": frame,
+                    "Time_ps": float(universe.trajectory.time),
+                    "Role": entry["role"],
+                    "ProteinName": entry["name"],
+                    "RadiusOfGyration": float(entry_group.radius_of_gyration()),
+                }
+            )
+
+    df = pd.DataFrame(rows)
+    df.to_csv(rms_dir / "radius_of_gyration_by_role.csv", index=False)
+
+    plt.figure(figsize=(9, 5))
+    for role, subset in df.groupby("Role"):
+        plt.plot(subset["Frame"], subset["RadiusOfGyration"], label=role, linewidth=1.8)
+    plt.xlabel("Frame")
+    plt.ylabel("Radius of gyration (Å)")
+    plt.title("Protein compactness by PROTAC role")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(rms_dir / "radius_of_gyration_by_role.png", dpi=300)
+    plt.close()
 
 
-def plot_torsion_vs_time(torsion_data):
-    """Plots torsion angles as a function of time."""
-    print(f"📊 Plotting torsion angles over time...")
+def run_contact_analysis(
+    universe: mda.Universe,
+    protein: mda.AtomGroup,
+    ligand: mda.AtomGroup,
+    ligand_code: str,
+    residue_records: Sequence[dict],
+    entries: Sequence[dict],
+    frame_indices: Sequence[int],
+    distance_cutoff: float,
+    contacts_dir: Path,
+    networks_dir: Path,
+    geometry_dir: Path,
+    qc_dir: Path,
+) -> None:
+    ensure_dir(contacts_dir)
+    ensure_dir(networks_dir)
+    ensure_dir(geometry_dir)
+
+    role_groups = {}
+    target_indices = []
+    protein_local_lookup = {atom_index: local_index for local_index, atom_index in enumerate(protein.indices)}
+    for entry in entries:
+        group = atomgroup_for_entry(universe, entry).select_atoms("protein")
+        if group.n_atoms == 0:
+            continue
+        role_groups[entry["role"]] = {
+            "protein_name": entry["name"],
+            "local_indices": np.array(
+                [protein_local_lookup[atom_index] for atom_index in group.indices if atom_index in protein_local_lookup],
+                dtype=int,
+            ),
+        }
+        if entry["role"].startswith("Target_"):
+            target_indices.extend(group.indices.tolist())
+
+    if target_indices:
+        target_local = np.array(
+            [protein_local_lookup[atom_index] for atom_index in sorted(set(target_indices)) if atom_index in protein_local_lookup],
+            dtype=int,
+        )
+        role_groups["Target_Combined"] = {
+            "protein_name": "Target_Combined",
+            "local_indices": target_local,
+        }
+
+    role_groups["All_Protein"] = {
+        "protein_name": "All_Protein",
+        "local_indices": np.arange(protein.n_atoms, dtype=int),
+    }
+
+    detail_rows = []
+    role_timeseries_rows = []
+    per_role_frame_contact_counts = defaultdict(list)
+
+    for frame in frame_indices:
+        universe.trajectory[frame]
+        dist_matrix = distance_array(ligand.positions, protein.positions)
+
+        for role, group_info in role_groups.items():
+            local_indices = group_info["local_indices"]
+            if local_indices.size == 0:
+                continue
+            submatrix = dist_matrix[:, local_indices]
+            min_distance = float(np.min(submatrix))
+            contact_atom_pairs = int(np.count_nonzero(submatrix <= distance_cutoff))
+
+            if role in {"All_Protein", "Target_Combined"}:
+                residue_count = 0
+                for record in residue_records:
+                    if role == "Target_Combined" and not record["role"].startswith("Target_"):
+                        continue
+                    res_min = float(np.min(dist_matrix[:, record["protein_local_indices"]]))
+                    if res_min <= distance_cutoff:
+                        residue_count += 1
+            else:
+                residue_count = 0
+                for record in residue_records:
+                    if record["role"] != role:
+                        continue
+                    res_min = float(np.min(dist_matrix[:, record["protein_local_indices"]]))
+                    if res_min <= distance_cutoff:
+                        residue_count += 1
+
+            role_timeseries_rows.append(
+                {
+                    "Frame": frame,
+                    "Time_ps": float(universe.trajectory.time),
+                    "Role": role,
+                    "ProteinName": group_info["protein_name"],
+                    "ResidueName": "",
+                    "ResidueID": "",
+                    "ResidueLabel": "",
+                    "InteractionType": "Contact",
+                    "MinDistance": min_distance,
+                    "ContactResidues": residue_count,
+                    "ContactAtomPairs": contact_atom_pairs,
+                }
+            )
+            per_role_frame_contact_counts[role].append(int(contact_atom_pairs > 0))
+
+        for record in residue_records:
+            residue = record["residue"]
+            min_distance = float(np.min(dist_matrix[:, record["protein_local_indices"]]))
+            if min_distance > distance_cutoff:
+                continue
+            interaction_type = classify_interaction_type(residue, min_distance)
+            detail_rows.append(
+                {
+                    "Frame": frame,
+                    "Time_ps": float(universe.trajectory.time),
+                    "Role": record["role"],
+                    "ProteinName": record["protein_name"],
+                    "ResidueName": residue.resname,
+                    "ResidueID": residue.resid,
+                    "ResidueLabel": record["residue_label"],
+                    "InteractionType": interaction_type,
+                    "MinDistance": min_distance,
+                    "ContactFraction": np.nan,
+                    "ContactPercent": np.nan,
+                }
+            )
+
+    detail_df = pd.DataFrame(detail_rows)
+    timeseries_df = pd.DataFrame(role_timeseries_rows)
+    detail_path = contacts_dir / "ligand_contacts_detailed.csv"
+    timeseries_path = contacts_dir / "ligand_contacts_by_role_timeseries.csv"
+    detail_df.to_csv(detail_path, index=False)
+    timeseries_df.to_csv(timeseries_path, index=False)
+
+    if detail_df.empty:
+        raise ValueError(
+            "No ligand-protein contacts were detected. "
+            "Check the ligand residue name or distance cutoff."
+        )
+
+    residue_summary = (
+        detail_df.groupby(
+            ["Role", "ProteinName", "ResidueName", "ResidueID", "ResidueLabel", "InteractionType"],
+            dropna=False,
+        )
+        .agg(ContactFrames=("Frame", "nunique"), MinDistance=("MinDistance", "min"))
+        .reset_index()
+    )
+    total_frames = len(frame_indices)
+    residue_summary["ContactFraction"] = residue_summary["ContactFrames"] / total_frames
+    residue_summary["ContactPercent"] = residue_summary["ContactFraction"] * 100.0
+    residue_summary.to_csv(contacts_dir / "ligand_contact_residue_summary.csv", index=False)
+
+    role_summary_rows = []
+    for role, values in per_role_frame_contact_counts.items():
+        frames_with_contact = int(np.sum(values))
+        fraction = frames_with_contact / total_frames if total_frames else 0.0
+        role_subset = timeseries_df[timeseries_df["Role"] == role]
+        role_summary_rows.append(
+            {
+                "Role": role,
+                "FramesWithContact": frames_with_contact,
+                "ContactFraction": fraction,
+                "ContactPercent": fraction * 100.0,
+                "MeanContactResidues": float(role_subset["ContactResidues"].mean()) if not role_subset.empty else 0.0,
+                "MeanMinDistance": float(role_subset["MinDistance"].mean()) if not role_subset.empty else math.nan,
+            }
+        )
+
+    role_summary_df = pd.DataFrame(role_summary_rows)
+    role_summary_df.to_csv(qc_dir / "protac_contact_summary.csv", index=False)
 
     plt.figure(figsize=(10, 5))
-    for i in range(torsion_data.shape[1]):  # Iterate over torsions
-        plt.plot(range(len(torsion_data)), torsion_data[:, i], label=f"Torsion {i+1}")
-
+    for role, subset in timeseries_df.groupby("Role"):
+        plt.plot(subset["Frame"], subset["ContactResidues"], label=role, linewidth=1.8)
     plt.xlabel("Frame")
-    plt.ylabel("Torsion Angle (°)")
-    plt.title("Ligand Torsion Angles Over Time")
+    plt.ylabel("Residues contacting ligand")
+    plt.title(f"{ligand_code} contacts over time by PROTAC role")
     plt.legend()
-    plt.savefig(os.path.join(OUTPUT_DIR, "torsion_vs_time.png"))
+    plt.tight_layout()
+    plt.savefig(contacts_dir / "ligand_contacts_over_time_by_role.png", dpi=300)
     plt.close()
 
-    print(f"✅ Saved torsion vs. time plot: torsion_vs_time.png")
+    heatmap_df = (
+        detail_df.assign(ContactValue=1)
+        .pivot_table(
+            index="ResidueLabel",
+            columns="Frame",
+            values="ContactValue",
+            aggfunc="max",
+            fill_value=0,
+        )
+        .sort_index()
+    )
+    plt.figure(figsize=(12, max(5, len(heatmap_df) * 0.2)))
+    sns.heatmap(heatmap_df, cmap="mako", cbar=True)
+    plt.xlabel("Frame")
+    plt.ylabel("Residue")
+    plt.title(f"{ligand_code} contact map by residue and frame")
+    plt.tight_layout()
+    plt.savefig(contacts_dir / "ligand_contact_map.png", dpi=300)
+    plt.close()
+
+    interaction_summary = (
+        detail_df.groupby(["Role", "InteractionType"])
+        .size()
+        .reset_index(name="Count")
+    )
+    interaction_summary.to_csv(geometry_dir / "ligand_interaction_type_summary.csv", index=False)
+
+    interaction_plot = (
+        interaction_summary.pivot_table(
+            index="Role",
+            columns="InteractionType",
+            values="Count",
+            fill_value=0,
+        )
+        .sort_index()
+    )
+    interaction_plot = interaction_plot.div(interaction_plot.sum(axis=1), axis=0).fillna(0.0)
+    interaction_plot.to_csv(geometry_dir / "ligand_interaction_type_fraction_by_role.csv")
+    interaction_plot.plot(kind="bar", stacked=True, figsize=(10, 5), colormap="tab20")
+    plt.ylabel("Fraction of residue-contact events")
+    plt.title(f"{ligand_code} interaction type composition by PROTAC role")
+    plt.tight_layout()
+    plt.savefig(geometry_dir / "ligand_interaction_type_fraction_by_role.png", dpi=300)
+    plt.close()
+
+    network_df = (
+        detail_df.groupby(
+            ["Role", "ProteinName", "ResidueName", "ResidueID", "ResidueLabel"],
+            dropna=False,
+        )
+        .agg(
+            ContactFrames=("Frame", "nunique"),
+            MinDistance=("MinDistance", "min"),
+            InteractionType=("InteractionType", lambda values: ";".join(sorted(set(values)))),
+        )
+        .reset_index()
+    )
+    network_df["ContactFraction"] = network_df["ContactFrames"] / total_frames
+    network_df["ContactPercent"] = network_df["ContactFraction"] * 100.0
+    network_df["EdgeWeight"] = network_df["ContactPercent"]
+    network_df.to_csv(networks_dir / "ligand_interaction_network_edges.csv", index=False)
+
+    graph = nx.Graph()
+    ligand_node = ligand_code
+    graph.add_node(ligand_node, role="Ligand")
+
+    for _, row in network_df.iterrows():
+        node = row["ResidueLabel"]
+        graph.add_node(node, role=row["Role"])
+        graph.add_edge(
+            ligand_node,
+            node,
+            weight=float(row["ContactPercent"]),
+            interaction=row["InteractionType"],
+        )
+
+    positions = nx.spring_layout(graph, seed=42, weight="weight")
+    positions[ligand_node] = np.array([0.0, 0.0])
+
+    plt.figure(figsize=(12, 10))
+    edge_widths = [max(1.0, graph[u][v]["weight"] / 10.0) for u, v in graph.edges()]
+    node_colors = [
+        "#9467bd" if node == ligand_node else role_color(graph.nodes[node].get("role", "Target_A"))
+        for node in graph.nodes()
+    ]
+    node_sizes = [
+        2500 if node == ligand_node else 300 + 20 * graph.degree(node)
+        for node in graph.nodes()
+    ]
+    nx.draw_networkx_edges(graph, positions, alpha=0.5, width=edge_widths, edge_color="#999999")
+    nx.draw_networkx_nodes(graph, positions, node_color=node_colors, node_size=node_sizes, edgecolors="black")
+    nx.draw_networkx_labels(graph, positions, font_size=8)
+    plt.title(f"{ligand_code} interaction network by PROTAC role")
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(networks_dir / "ligand_interaction_network.png", dpi=300)
+    plt.close()
 
 
-# === Run the Full Workflow ===
+def run_pca(
+    universe: mda.Universe,
+    protein: mda.AtomGroup,
+    frame_indices: Sequence[int],
+    qc_dir: Path,
+) -> None:
+    protein_ca = protein.select_atoms("name CA")
+    if protein_ca.n_atoms == 0:
+        protein_ca = protein
+
+    aligned_positions = gather_aligned_positions(universe, protein_ca, frame_indices)
+    if aligned_positions.size == 0:
+        return
+
+    matrix = aligned_positions.reshape(aligned_positions.shape[0], -1)
+    matrix = matrix - matrix.mean(axis=0)
+    _, _, vt = np.linalg.svd(matrix, full_matrices=False)
+    components = vt[:2].T
+    projected = np.dot(matrix, components)
+
+    pca_df = pd.DataFrame(
+        {
+            "Frame": frame_indices,
+            "PC1": projected[:, 0],
+            "PC2": projected[:, 1],
+        }
+    )
+    pca_df.to_csv(qc_dir / "protein_pca.csv", index=False)
+
+    plt.figure(figsize=(8, 6))
+    scatter = plt.scatter(projected[:, 0], projected[:, 1], c=frame_indices, cmap="viridis", s=30)
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.title("Protein PCA projection")
+    plt.colorbar(scatter, label="Frame")
+    plt.tight_layout()
+    plt.savefig(qc_dir / "protein_pca.png", dpi=300)
+    plt.close()
+
+
+def main() -> int:
+    args = parse_args()
+    args.pdb_reference = args.pdb_reference or default_pdb_reference()
+
+    outdir = ensure_dir(Path(args.outdir).resolve())
+    rms_dir = ensure_dir(outdir / "RMSD_RMSF")
+    contacts_dir = ensure_dir(outdir / "Contacts")
+    networks_dir = ensure_dir(outdir / "Networks")
+    geometry_dir = ensure_dir(outdir / "Geometry")
+    qc_dir = ensure_dir(outdir / "QC")
+    _ = geometry_dir
+
+    ligand_setup = detect_protac_ligand_setup(
+        run_dir=".",
+        topo_path=args.topo,
+        traj_path=args.traj,
+        cli_ligand=args.ligand,
+        headless=args.headless,
+    )
+    write_ligand_preflight_reports(ligand_setup, qc_dir)
+    print_preflight_block(ligand_setup)
+
+    if ligand_setup["errors"]:
+        for error in ligand_setup["errors"]:
+            print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+
+    if not ligand_setup["ligand_code"]:
+        print(
+            "ERROR: Ligand code could not be determined. Pass --ligand <RESNAME>.",
+            file=sys.stderr,
+        )
+        return 1
+
+    entries = assign_protac_roles(parse_atomindex_entries(args.atomindex))
+
+    try:
+        universe = mda.Universe(args.topo, args.traj)
+    except Exception as exc:
+        print(f"ERROR: Could not load topology/trajectory: {exc}", file=sys.stderr)
+        return 1
+
+    ligand = select_ligand(universe, ligand_setup["ligand_code"])
+    protein = universe.select_atoms("protein")
+
+    try:
+        validate_protac_inputs(universe, ligand, entries)
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    start, end, step, frame_indices = resolve_frame_window(
+        universe.trajectory.n_frames,
+        args.start_frame,
+        args.end_frame,
+        args.frame_step,
+    )
+    print_startup_summary(
+        ligand_setup["ligand_code"],
+        entries,
+        args.topo,
+        args.traj,
+        universe.trajectory.n_frames,
+    )
+    print(f"Analyzing frames {start}:{end}:{step} ({len(frame_indices)} sampled frames)")
+
+    write_system_roles(entries, qc_dir)
+    write_ligand_detection_summary(ligand, ligand_setup["ligand_code"], qc_dir)
+
+    if args.dry_run:
+        print("Dry-run complete. QC outputs were written; no full analysis was executed.")
+        return 0
+
+    residue_records = build_protein_residue_records(universe, protein, entries)
+    if not residue_records:
+        print(
+            "ERROR: No protein residues could be mapped onto atomIndex roles. "
+            "Check that atomIndex.txt matches the analyzed topology.",
+            file=sys.stderr,
+        )
+        return 1
+
+    run_rmsd_and_rmsf(universe, protein, ligand, entries, frame_indices, rms_dir)
+    run_radius_of_gyration(universe, protein, entries, frame_indices, rms_dir)
+    run_contact_analysis(
+        universe,
+        protein,
+        ligand,
+        ligand_setup["ligand_code"],
+        residue_records,
+        entries,
+        frame_indices,
+        args.distance_cutoff,
+        contacts_dir,
+        networks_dir,
+        geometry_dir,
+        qc_dir,
+    )
+    run_pca(universe, protein, frame_indices, qc_dir)
+
+    print(f"Analysis complete. Outputs written under {outdir}")
+    return 0
+
+
 if __name__ == "__main__":
-    bound_pdb_dir = extract_ligand_snapshots(BOUND_LIGAND_XTC)
-    convert_pdb_to_mol2(bound_pdb_dir)
-    bound_torsion_data = compute_torsion_angles(bound_pdb_dir)
-
-    # Perform PCA and clustering
-    pca_data = perform_pca(bound_torsion_data)
-    cluster_labels = cluster_conformations(bound_torsion_data)
-
-    print("🎉 Complete! Ligand clustering and PCA analysis done.")
-
-
-
-
-
-
-print("✅ Analysis complete! Check the generated plots.")
-
-################################################################################################
-################################################################################################
-################      P D F  G E N E R A T I O N   P I E C E   O F   S C R I P T $##############
-
-
-
-import os
-import glob
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
-from matplotlib import rcParams, font_manager as fm
-from PIL import Image, ImageDraw, ImageFont
-from io import BytesIO
-
-# Paths
-OUTPUT_DIR = os.path.join(os.getcwd(), "Analysis_Graphs")
-final_pdf_path = os.path.join(OUTPUT_DIR, "Final_Analysis_Report.pdf")
-notes_file_path = os.path.join(os.getcwd(), "4_GraphNotes.txt")
-font_path = os.path.join(os.getcwd(), "EBGaramond-VariableFont_wght.ttf")  # Optional
-
-# Load custom Garamond font if available
-if os.path.exists(font_path):
-    garamond_font = fm.FontProperties(fname=font_path)
-    rcParams["font.family"] = garamond_font.get_name()
-    print(f"✅ Using font: {garamond_font.get_name()}")
-else:
-    garamond_font = None
-    print("⚠️ Garamond font not found, using default font.")
-
-# Parse GraphNotes.txt
-def parse_graph_notes(file_path):
-    notes_dict = {}
-    current_image = None
-    current_description = []
-
-    with open(file_path, "r", encoding="utf-8") as file:
-        lines = file.readlines()
-
-    for line in lines:
-        line = line.strip()
-        if line.endswith(".png"):
-            if current_image:
-                notes_dict[current_image] = "\n".join(current_description).strip()
-            current_image = line  # Ensure correct filename mapping
-            current_description = []
-        elif current_image:
-            current_description.append(line)
-
-    if current_image:
-        notes_dict[current_image] = "\n".join(current_description).strip()
-
-    return notes_dict
-
-graph_notes = parse_graph_notes(notes_file_path)
-
-# Function to render text as an image with adaptive font sizing and preserving new lines
-def text_to_image(text, width=800, height=1000, max_font_size=24, min_font_size=10):
-    """Creates an image from text, adjusting font size while preserving line breaks."""
-    img = Image.new("RGB", (width, height), "white")
-    draw = ImageDraw.Draw(img)
-    font_size = max_font_size
-    
-    if garamond_font:
-        font = ImageFont.truetype(font_path, font_size)
-    else:
-        font = ImageFont.load_default()
-    
-    while font_size >= min_font_size:
-        if garamond_font:
-            font = ImageFont.truetype(font_path, font_size)
-        text_lines = text.split("\n")  # Preserve manual new lines
-        wrapped_lines = []
-        
-        for line in text_lines:
-            words = line.split()
-            current_line = ""
-            for word in words:
-                test_line = f"{current_line} {word}".strip()
-                text_width, _ = draw.textbbox((0, 0), test_line, font=font)[2:]
-                if text_width < width - 40:
-                    current_line = test_line
-                else:
-                    wrapped_lines.append(current_line)
-                    current_line = word
-            wrapped_lines.append(current_line)
-        
-        wrapped_text = "\n".join(wrapped_lines)
-        text_bbox = draw.textbbox((0, 0), wrapped_text, font=font)
-        text_height = text_bbox[3] - text_bbox[1]
-        
-        if text_height <= height * 0.9:
-            break
-        font_size -= 2  # Reduce font size and retry
-    
-    draw.multiline_text((20, 20), wrapped_text, fill="black", font=font, spacing=4)
-    return img
-
-# Read image descriptions
-graph_notes = parse_graph_notes(notes_file_path)
-image_files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "*.png")))
-
-if not image_files:
-    print("⚠️ No images found.")
-else:
-    with PdfPages(final_pdf_path) as pdf:
-        for image in image_files:
-            # Add image
-            fig, ax = plt.subplots(figsize=(8.5, 11))
-            img = plt.imread(image)
-            ax.imshow(img)
-            ax.axis("off")
-            pdf.savefig(fig)
-            plt.close(fig)
-
-            # Convert description to image with adaptive font size and wrapped text
-            image_filename = os.path.basename(image).strip()
-            description = graph_notes.get(image_filename, "No description available.")
-            text_img = text_to_image(description)
-
-            fig, ax = plt.subplots(figsize=(8.5, 11))
-            ax.imshow(text_img)
-            ax.axis("off")
-            pdf.savefig(fig)
-            plt.close(fig)
-
-print(f"✅ Final PDF report generated at {final_pdf_path}")
+    raise SystemExit(main())
