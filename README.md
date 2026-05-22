@@ -155,6 +155,8 @@ Core goals:
 - [Restarting / resuming production MD](#restart-production-md)
 - [Guided tutorial / walkthrough](#guided-tutorial)
 - [Example figurebook demo](#example-figurebook-demo)
+- [Standard vs MPI-compatible scripts](#standard-vs-mpi-compatible-scripts)
+- [Additional workflow documentation](#additional-workflow-documentation)
 - [tmux quick tips](#tmux-quick-tips)
 - [Troubleshooting](#troubleshooting)
 - [Best practices](#best-practices)
@@ -174,11 +176,20 @@ These links use explicit README anchors so the buttons and table of contents rem
 ```text
 PyMACs/
 ├── 1_AutomateGromacs.py
+├── 1_AutomateGromacs_MPI.py
 ├── 2_AutomateGromacs.py
+├── 2_AutomateGromacs_MPI.py
 ├── 3A_AutomateGromacs.py
+├── 3A_AutomateGromacs_MPI.py
+├── 3_PROTAC_Analysis.py
+├── 3_PROTAC_Analysis_MPI.py
 ├── 3B_NETWORX.py
 ├── 4PDF4MD.py
 ├── 4_MDfigs.txt
+├── docs/
+│   ├── OUTPUT_GALLERY.md
+│   ├── SOFTWARE_AND_CITATIONS.md
+│   └── USE_CASE_WALKTHROUGH.md
 ├── cgenff_charmm2gmx_py3_nx2.py
 ├── charmm36.ff/
 ├── charmm36_ljpme-jul2022.ff/
@@ -191,10 +202,12 @@ PyMACs/
 │   ├── CPD32_9G94.pdb
 │   └── MD_ANALYSIS_FIGUREBOOK.pdf
 ├── em.mdp
-├── ions.mdp
-├── md.mdp
-├── npt.mdp
-├── nvt.mdp
+├── MDPs/
+│   ├── em.mdp
+│   ├── ions.mdp
+│   ├── md.mdp
+│   ├── npt.mdp
+│   └── nvt.mdp
 ├── environment_cgenff.yml
 ├── environment_mdanalysis.yml
 ├── recreate_envs.sh
@@ -212,13 +225,39 @@ The repository may include additional helper scripts or files as the project evo
 - **OS:** Linux or WSL2 recommended  
   - macOS can be used for analysis-only workflows, but GROMACS installation and GPU support vary.
 - **GROMACS:** 2022+ recommended  
-  - Non-MPI binary expected by default.
-  - Must be callable as `gmx`.
-  - If your system uses `gmx_mpi`, adapt the script calls accordingly.
+  - Standard scripts expect a working `gmx` command in the active environment.
+  - MPI-compatible scripts support `gmx`, `gmx_mpi`, `gmx-mpi`, or an explicit executable path.
+  - MPI-compatible scripts accept `--gmx-bin`.
+  - `PYMACS_GMX_BIN` can be used as an environment-variable override.
+  - Auto-detection order in the MPI-compatible scripts is `gmx_mpi`, then `gmx-mpi`, then `gmx`.
 - **Python:** managed through conda environments.
 - **Conda / Mamba:** recommended for reproducibility.
 - **tmux:** optional but strongly recommended for long simulations.
 - **GPU:** optional but recommended for production MD.
+
+---
+
+<a id="standard-vs-mpi-compatible-scripts"></a>
+
+## 🔀 Standard vs MPI-compatible scripts
+
+PyMACS now ships both the original workstation-oriented scripts and MPI-compatible variants for systems where the GROMACS executable is not exposed as plain `gmx`.
+
+| Standard script | MPI-compatible script | Purpose |
+|---|---|---|
+| `1_AutomateGromacs.py` | `1_AutomateGromacs_MPI.py` | setup, `pdb2gmx`, box, solvation, ions, EM prep |
+| `2_AutomateGromacs.py` | `2_AutomateGromacs_MPI.py` | EM, NVT, NPT, production MD, checkpoint resume |
+| `3A_AutomateGromacs.py` | `3A_AutomateGromacs_MPI.py` | analysis, `trjconv` preprocessing, pocket/contact/RMSD/RMSF workflows |
+| `3_PROTAC_Analysis.py` | `3_PROTAC_Analysis_MPI.py` | PROTAC-specific trajectory analysis and optional GROMACS centering |
+
+Use the MPI-compatible scripts when:
+
+- you are on Triton or another HPC system where GROMACS is installed as `gmx_mpi` or `gmx-mpi`
+- you are running inside SLURM / MPI environments
+- your environment does not provide a `gmx` alias
+- you want explicit binary control through `--gmx-bin` or `PYMACS_GMX_BIN`
+
+The standard scripts remain appropriate for local workstations where `gmx` is already the expected executable name.
 
 ---
 
@@ -404,11 +443,11 @@ RUNS/SystemA_run03/
 
 ## 🚀 Quick start templates
 
-Below are two short templates for common use cases.
+Below are public-facing quick-start templates for both standard local runs and MPI/HPC deployments.
 
 ---
 
-### Template A — Run a new system end-to-end
+### Template A — Standard local workstation
 
 Recommended: do not run in the repository root. Create a per-system run folder.
 
@@ -427,10 +466,10 @@ cp ../../cgenff_charmm2gmx_py3_nx2.py .
 
 # Copy MDP templates
 cp ../../em.mdp .
-cp ../../ions.mdp .
-cp ../../nvt.mdp .
-cp ../../npt.mdp .
-cp ../../md.mdp .
+cp ../../MDPs/ions.mdp .
+cp ../../MDPs/nvt.mdp .
+cp ../../MDPs/npt.mdp .
+cp ../../MDPs/md.mdp .
 
 # Copy BOTH force fields so auto-fallback works
 cp -r ../../charmm36.ff .
@@ -464,7 +503,67 @@ python 4PDF4MD.py
 
 ---
 
-### Template B — Analysis-only
+### Template B — MPI / HPC run folder
+
+Use this when the cluster provides `gmx_mpi` or `gmx-mpi`, or when you want explicit GROMACS binary control.
+
+```bash
+mkdir -p RUNS/MySystem_MPI_01
+cd RUNS/MySystem_MPI_01
+
+# Copy MPI-compatible scripts
+cp ../../1_AutomateGromacs_MPI.py .
+cp ../../2_AutomateGromacs_MPI.py .
+cp ../../3A_AutomateGromacs_MPI.py .
+cp ../../3_PROTAC_Analysis_MPI.py .
+cp ../../3B_NETWORX.py .
+cp ../../4PDF4MD.py .
+cp ../../4_MDfigs.txt .
+cp ../../cgenff_charmm2gmx_py3_nx2.py .
+
+# Copy MDP templates
+cp ../../em.mdp .
+cp ../../MDPs/ions.mdp .
+cp ../../MDPs/nvt.mdp .
+cp ../../MDPs/npt.mdp .
+cp ../../MDPs/md.mdp .
+
+# Copy BOTH force fields so auto-fallback works
+cp -r ../../charmm36.ff .
+cp -r ../../charmm36_ljpme-jul2022.ff .
+
+# Copy your input structure
+cp /path/to/your/input.pdb .
+```
+
+Typical MPI/HPC usage:
+
+```bash
+export PYMACS_GMX_BIN=gmx_mpi
+
+conda activate cgenff
+python 1_AutomateGromacs_MPI.py --gmx-bin gmx_mpi
+
+conda activate mdanalysis
+python 2_AutomateGromacs_MPI.py --gmx-bin gmx_mpi --external-mpi --mpi-ranks 4 --mpi-launcher "mpirun -np 4"
+
+conda activate mdanalysis
+python 3A_AutomateGromacs_MPI.py --gmx-bin gmx_mpi
+```
+
+SLURM-style Step 2 example:
+
+```bash
+python 2_AutomateGromacs_MPI.py \
+  --gmx-bin gmx_mpi \
+  --external-mpi \
+  --mpi-ranks 4 \
+  --mpi-launcher "srun -n 4"
+```
+
+---
+
+### Template C — Analysis-only
 
 Use this when MD is already complete and only plots and PDF reporting are needed.
 
@@ -473,6 +572,42 @@ conda activate mdanalysis
 python 3A_AutomateGromacs.py
 python 4PDF4MD.py
 ```
+
+---
+
+### Standard local and MPI-compatible command examples
+
+Standard local workstation:
+
+```bash
+python 1_AutomateGromacs.py
+python 2_AutomateGromacs.py
+python 3A_AutomateGromacs.py
+```
+
+MPI / Triton-style:
+
+```bash
+export PYMACS_GMX_BIN=gmx_mpi
+
+python 1_AutomateGromacs_MPI.py --gmx-bin gmx_mpi
+python 2_AutomateGromacs_MPI.py --gmx-bin gmx_mpi --external-mpi --mpi-ranks 4 --mpi-launcher "mpirun -np 4"
+python 3A_AutomateGromacs_MPI.py --gmx-bin gmx_mpi
+```
+
+Step 2 MPI-specific notes:
+
+- `--external-mpi` omits thread-MPI `-ntmpi`
+- `--ntomp` still controls OpenMP threads
+- `--mpi-ranks` controls external MPI ranks
+- `--mpi-launcher` can be `mpirun -np N` or `srun -n N`
+- GPU fallback profiles are preserved
+
+Step 3A / PROTAC MPI-specific notes:
+
+- the analysis scripts do not run production `mdrun`
+- the MPI editions only need binary resolution for GROMACS utilities such as `trjconv` and `make_ndx`
+- `3_PROTAC_Analysis_MPI.py` can fall back to MDAnalysis behavior if GROMACS utility centering is unavailable
 
 ---
 
@@ -491,12 +626,15 @@ Script:
 Typical actions:
 
 - reads the input PDB
+- runs a novice-friendly PDB preflight check for coordinate formatting, residue names, chain IDs, and ligand ambiguity
 - detects protein chains
 - runs `pdb2gmx` for protein topology generation
 - detects non-water `HETATM` residues as ligand candidates
 - integrates ligand parameters using one of the supported CGenFF modes
 - solvates and ionizes the system
 - writes helper maps such as `atomIndex.txt`, workflow-dependent
+- supports configurable periodic box setup through `--box-type` and `--box-distance`
+- warns when LINK/CONECT records suggest a covalent ligand and keeps the default workflow focused on non-covalent ligands
 
 ---
 
@@ -516,6 +654,10 @@ Typical actions:
 - production MD
 - GPU-ready execution if available
 - thread tuning through environment variables and script prompts
+- supports custom MDP templates through `--mdp-dir`, `--em-mdp`, `--nvt-mdp`, `--npt-mdp`, and `--md-mdp`
+- supports user-supplied `index.ndx` files through `--index-file`
+- supports explicit resource controls through `--ntomp`, `--ntmpi`, `--gpu-id`, `--gpu-ids`, and `--no-gpu`
+- supports optional multi-stage equilibration through `--equilibration-plan`
 
 ---
 
@@ -640,9 +782,12 @@ Typical actions, workflow-dependent:
 
 - RMSD
 - RMSF
+- Rg (radius of gyration)
 - contacts
 - pocket extraction
 - additional structure and interaction analyses depending on installed tools
+- configurable binding-pocket extraction through `--pocket-cutoff`
+- configurable interaction reporting through `--contact_cutoff`, `--hbond-distance-cutoff`, and `--hbond-angle-cutoff`
 
 ---
 
@@ -672,6 +817,38 @@ Compiles analysis outputs into a PDF report ordered through:
 4_MDfigs.txt
 ```
 
+### 🔧 Common customization examples
+
+```bash
+# Step 1: change the box geometry and buffer distance
+python 1_AutomateGromacs.py --pdb complex.pdb --box-type dodecahedron --box-distance 1.0
+
+# Step 2: run with custom MDP templates and explicit resource controls
+python 2_AutomateGromacs.py \
+  --compute GPU \
+  --gpu-id 0 \
+  --ntomp 8 \
+  --ntmpi 1 \
+  --mdp-dir MDPs \
+  --nvt-mdp custom_nvt.mdp \
+  --npt-mdp custom_npt.mdp \
+  --md-mdp custom_md.mdp
+
+# Step 2: use a user-supplied index file and a custom multi-stage equilibration plan
+python 2_AutomateGromacs.py \
+  --index-file index.ndx \
+  --equilibration-plan docs/equilibration_plan_example.json
+
+# Step 3A: widen the ligand pocket or tune interaction reporting
+python 3A_AutomateGromacs.py \
+  --pocket-cutoff 6.0 \
+  --contact_cutoff 4.0 \
+  --hbond-distance-cutoff 3.5 \
+  --hbond-angle-cutoff 135
+```
+
+Advanced protocols such as simulated annealing, alternate integrators, or different thermostat/barostat choices are supported by editing the MDP templates or supplying your own files through these CLI options.
+
 ---
 
 <a id="guided-tutorial"></a>
@@ -699,10 +876,10 @@ cp ../../cgenff_charmm2gmx_py3_nx2.py .
 
 # Copy MDP templates
 cp ../../em.mdp .
-cp ../../ions.mdp .
-cp ../../nvt.mdp .
-cp ../../npt.mdp .
-cp ../../md.mdp .
+cp ../../MDPs/ions.mdp .
+cp ../../MDPs/nvt.mdp .
+cp ../../MDPs/npt.mdp .
+cp ../../MDPs/md.mdp .
 
 # Copy BOTH force fields so auto-fallback works
 cp -r ../../charmm36.ff .
@@ -844,10 +1021,10 @@ cp ../../4PDF4MD.py .
 cp ../../4_MDfigs.txt .
 cp ../../cgenff_charmm2gmx_py3_nx2.py .
 cp ../../em.mdp .
-cp ../../ions.mdp .
-cp ../../nvt.mdp .
-cp ../../md.mdp .
-cp ../../npt.mdp .
+cp ../../MDPs/ions.mdp .
+cp ../../MDPs/nvt.mdp .
+cp ../../MDPs/md.mdp .
+cp ../../MDPs/npt.mdp .
 
 # Copy BOTH force fields, required for auto-fallback demo
 cp -r ../../charmm36.ff .
@@ -888,6 +1065,20 @@ If the PDF is missing sections:
 
 ---
 
+<a id="additional-workflow-documentation"></a>
+
+## 📚 Additional workflow documentation
+
+Additional repository documents that complement the README:
+
+- [`docs/USE_CASE_WALKTHROUGH.md`](docs/USE_CASE_WALKTHROUGH.md) — step-by-step commands, expected inputs, and expected outputs based on the files currently present in this repository
+- [`docs/SOFTWARE_AND_CITATIONS.md`](docs/SOFTWARE_AND_CITATIONS.md) — software roles, script locations, and citation placeholders to verify
+- [`docs/OUTPUT_GALLERY.md`](docs/OUTPUT_GALLERY.md) — current example outputs plus expected analysis figure types and where they are generated
+
+These files complement the README with walkthroughs, output examples, and software-role summaries.
+
+---
+
 <a id="tmux-quick-tips"></a>
 
 ## 🧠 tmux quick tips
@@ -924,6 +1115,40 @@ If a run fails early:
 - ensure **CGenFF 4.6** is used when generating new `.str` / `.mol2` files
 - inspect `topol.top` for duplicated ligand includes
 - confirm `gmx` is available in the active environment
+
+MPI / GROMACS-binary troubleshooting:
+
+- if you see `gmx: command not found`, use the MPI-compatible scripts plus `--gmx-bin` or `PYMACS_GMX_BIN`
+- if `gmx_mpi` exists but `gmx` does not, prefer `1_AutomateGromacs_MPI.py`, `2_AutomateGromacs_MPI.py`, `3A_AutomateGromacs_MPI.py`, and `3_PROTAC_Analysis_MPI.py`
+- external MPI builds should not use `-ntmpi`; use `--external-mpi` in `2_AutomateGromacs_MPI.py`
+- `--ntomp` still controls OpenMP threading in the MPI-compatible Step 2 script
+- `--mpi-ranks` and `--mpi-launcher` control external rank layout for MPI builds
+- verify the selected binary with `<binary> --version`
+- the analysis MPI editions only require a usable GROMACS binary for helper utilities such as `trjconv` and `make_ndx`
+- `3_PROTAC_Analysis_MPI.py` can continue with MDAnalysis-based preprocessing when automatic GROMACS centering utilities are unavailable
+
+---
+
+## 🧬 Input structure notes
+
+- PyMACS expects standard PDB `ATOM` / `HETATM` coordinate records with parseable x/y/z columns.
+- Residue names must be present on atom records.
+- Chain IDs are recommended for chain-aware naming and atomIndex provenance; the script now warns if they are missing.
+- Ligand workflows work best when the ligand residue name is unique and provided explicitly with `--ligand` when multiple non-protein residues are present.
+- RNA and other nucleic-acid-containing systems can be prepared when CHARMM/GROMACS residue naming and topology generation are compatible, but these cases should still be validated by the user because the repository does not yet include a dedicated RNA example workflow.
+- The default ligand workflow is intended for non-covalent ligands. If `LINK` or ligand-related `CONECT` records suggest a covalent attachment, PyMACS now warns and asks the user to acknowledge that custom topology handling may be required.
+
+---
+
+## 📐 Interaction definitions used in analysis
+
+- Contacts: broad distance-based proximity events using the selected contact cutoff, configurable in `3A_AutomateGromacs.py` through `--contact_cutoff`.
+- Hydrogen bonds: reported separately from contacts because they represent a narrower donor/acceptor interaction class rather than generic proximity. The current Script 3A workflow exposes `--hbond-distance-cutoff` and documents `--hbond-angle-cutoff` so these assumptions are explicit in reviewer-facing reports.
+- Hydrophobic interactions: residue-chemistry-guided contacts for hydrophobic side chains within the relevant distance threshold used by the analysis script.
+- Ionic interactions: residue-chemistry-guided contacts involving charged side chains within the relevant distance threshold used by the analysis script.
+- Water-mediated interactions: optional in the newer PROTAC analysis workflow and only computed when the corresponding water-bridge analysis mode is enabled.
+
+These categories are intentionally separated in the reports because hydrogen bonding is a specific geometric or donor/acceptor interaction subset, while generic contacts are broader proximity measures that capture interface persistence even when strict hydrogen-bond criteria are not met.
 
 ---
 
