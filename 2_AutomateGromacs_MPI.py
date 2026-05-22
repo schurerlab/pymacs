@@ -136,8 +136,98 @@ import multiprocessing, os, subprocess, time
 import shutil
 import os
 import json
+import shlex
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+GMX_BIN = None
+
+
+def resolve_gmx_binary(requested="auto"):
+    explicit_requested = requested not in (None, "", "auto")
+    env_requested = os.environ.get("PYMACS_GMX_BIN")
+
+    if explicit_requested:
+        candidates = [requested]
+    elif env_requested:
+        candidates = [env_requested]
+    else:
+        candidates = ["gmx_mpi", "gmx-mpi", "gmx"]
+
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+
+    if explicit_requested:
+        raise FileNotFoundError(f"Requested GROMACS executable was not found: {requested}")
+    if env_requested:
+        raise FileNotFoundError(f"PYMACS_GMX_BIN is set but not callable: {env_requested}")
+    raise FileNotFoundError(
+        "No GROMACS executable found. Tried: gmx_mpi, gmx-mpi, gmx. "
+        "Use --gmx-bin or set PYMACS_GMX_BIN."
+    )
+
+
+def gmx_cmd(subcommand, args=""):
+    base = f"{shlex.quote(GMX_BIN)} {subcommand}"
+    return f"{base} {args}".strip()
+
+
+def is_external_mpi_binary(gmx_bin):
+    base = os.path.basename(gmx_bin)
+    return ("gmx_mpi" in base) or ("gmx-mpi" in base)
+
+
+def resolve_mpi_launcher(args):
+    if not getattr(args, "external_mpi", False):
+        return ""
+    if args.mpi_launcher.strip():
+        return args.mpi_launcher.strip()
+    if args.mpi_ranks > 1:
+        return f"mpirun -np {args.mpi_ranks}"
+    return ""
+
+
+def build_mdrun_base_cmd(deffnm, cpi=None, append=False, launcher=""):
+    cmd = gmx_cmd("mdrun", f"-v -deffnm {deffnm}")
+    if cpi:
+        cmd += f" -cpi {cpi}"
+    if append:
+        cmd += " -append"
+    if launcher:
+        cmd = f"{launcher} {cmd}"
+    return cmd
+
+
+def print_gmx_preflight(directory=None):
+    print(f"🧬 Using GROMACS executable: {GMX_BIN}")
+    try:
+        result = subprocess.run(
+            f"{shlex.quote(GMX_BIN)} --version",
+            shell=True,
+            text=True,
+            capture_output=True,
+            cwd=directory,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to execute '{GMX_BIN} --version': {exc}") from exc
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            f"GROMACS executable is not callable: {GMX_BIN}\n{stderr}"
+        )
+
+    version_line = next(
+        (line.strip() for line in result.stdout.splitlines() if line.strip()),
+        None,
+    )
+    if version_line:
+        print(f"🧪 GROMACS version: {version_line}")
+    if directory:
+        append_mdrun_log(directory, f"GROMACS executable: {GMX_BIN}")
+        if version_line:
+            append_mdrun_log(directory, f"GROMACS version: {version_line}")
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -146,6 +236,7 @@ def parse_args():
     )
     p.add_argument("--mode", choices=["ligand", "protein", "peptide", "protac"], required=False)
     p.add_argument("--ligand", type=str, help="3-letter ligand code (required for ligand or protac modes)")
+    p.add_argument("--gmx-bin", default="auto", help="GROMACS executable to use: auto, gmx, gmx_mpi, gmx-mpi, or an explicit path.")
     p.add_argument("--ns", type=float, default=None, help="Production length in nanoseconds (default 50)")
     p.add_argument("--gpu", "--gpu-id", dest="gpu", type=int, help="GPU ID to expose to GROMACS when running in GPU mode.")
     p.add_argument("--gpu-ids", type=str, default=None, help="Expert override for the exact gmx mdrun -gpu_id value (for example 0 or 01).")
@@ -154,6 +245,9 @@ def parse_args():
     p.add_argument("--threads", type=int, default=None, help="Legacy alias for OpenMP thread count (same role as --ntomp).")
     p.add_argument("--ntomp", type=int, default=None, help="Number of OpenMP threads for gmx mdrun.")
     p.add_argument("--ntmpi", type=int, default=1, help="Number of MPI ranks passed to gmx mdrun.")
+    p.add_argument("--mpi-ranks", type=int, default=1, help="Number of external MPI ranks for gmx_mpi mdrun.")
+    p.add_argument("--mpi-launcher", type=str, default="", help="Optional MPI launcher prefix, e.g. 'mpirun -np 4' or 'srun -n 4'. If omitted, mdrun is called directly.")
+    p.add_argument("--external-mpi", action="store_true", help="Treat GROMACS as an external-MPI build; omit -ntmpi from mdrun commands.")
     p.add_argument("--pinoffset", type=int, default=None, help="Starting CPU core index for thread pinning")
     p.add_argument("--index-file", type=str, default=None, help="Use a user-supplied GROMACS index file instead of auto-generating index.ndx.")
     p.add_argument("--mdp-dir", type=str, default="MDPs", help="Directory searched for MDP templates when local copies are not present.")
@@ -185,6 +279,16 @@ def parse_args():
         p.error("--ntomp must be a positive integer.")
     if args.ntmpi <= 0:
         p.error("--ntmpi must be a positive integer.")
+    if args.mpi_ranks <= 0:
+        p.error("--mpi-ranks must be a positive integer.")
+
+    global GMX_BIN
+    try:
+        GMX_BIN = resolve_gmx_binary(args.gmx_bin)
+    except FileNotFoundError as exc:
+        raise SystemExit(f"❌ {exc}")
+    if is_external_mpi_binary(GMX_BIN):
+        args.external_mpi = True
 
     # Interactive fallback only when not headless
     if not args.headless and not args.mode:
@@ -310,7 +414,7 @@ def system_has_virtual_sites(tpr_path: str) -> bool:
     """
     try:
         out = subprocess.check_output(
-            f"gmx dump -s {tpr_path} | grep -i virtual",
+            f"{gmx_cmd('dump', f'-s {tpr_path}')} | grep -i virtual",
             shell=True,
             text=True
         )
@@ -344,6 +448,7 @@ def run_mdrun_with_fallback(
     tpr_check=None,
     ntmpi=1,
     gpu_id_arg=None,
+    external_mpi=False,
 ):
     """
     Try best GPU profile first; if virtual sites exist, force CPU update.
@@ -379,12 +484,10 @@ def run_mdrun_with_fallback(
     if use_gpu and gpu_id is not None and gpu_id >= 0:
         for profile in profiles:
             gpu_selector = gpu_id_arg if gpu_id_arg else "0"
-            cmd = (
-                f"{base_cmd} "
-                f"-pin on -pinoffset {pin_offset} "
-                f"-ntmpi {ntmpi} -ntomp {threads} "
-                f"-gpu_id {gpu_selector} {profile['flags']}"
-            )
+            cmd = f"{base_cmd} -pin on -pinoffset {pin_offset} "
+            if not external_mpi:
+                cmd += f"-ntmpi {ntmpi} "
+            cmd += f"-ntomp {threads} -gpu_id {gpu_selector} {profile['flags']}"
 
             print(f"\n🚀 Trying {profile['name']} → {cmd}")
             append_mdrun_log(cwd, f"mdrun attempt ({profile['name']}): {cmd}")
@@ -402,11 +505,10 @@ def run_mdrun_with_fallback(
     # CPU fallback
     # --------------------
     print("\n🧯 Falling back to CPU-only execution")
-    cpu_cmd = (
-        f"{base_cmd} "
-        f"-pin on -pinoffset {pin_offset} "
-        f"-ntmpi {ntmpi} -ntomp {threads}"
-    )
+    cpu_cmd = f"{base_cmd} -pin on -pinoffset {pin_offset} "
+    if not external_mpi:
+        cpu_cmd += f"-ntmpi {ntmpi} "
+    cpu_cmd += f"-ntomp {threads}"
 
     append_mdrun_log(cwd, f"mdrun CPU fallback: {cpu_cmd}")
     rc = run_command_check_rc(cpu_cmd, cwd=cwd)
@@ -445,7 +547,7 @@ def read_tpr_nsteps_dt(tpr_path: str):
     Pull dt (ps) and nsteps from a TPR by streaming `gmx dump`,
     stopping as soon as we find both.
     """
-    cmd = f"gmx dump -s {tpr_path}"
+    cmd = gmx_cmd("dump", f"-s {tpr_path}")
     proc = subprocess.Popen(cmd, shell=True, text=True,
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
@@ -499,7 +601,7 @@ def extend_tpr_to_target_ns(directory: str, tpr_name: str, target_ns: float):
     print(f"🧩 Extending TPR: {current_ns:.3f} ns → {target_ns:.3f} ns (extend {extend_ns:.3f} ns)")
 
     run_command_cpu(
-        f"gmx convert-tpr -s {tpr_name} -extend {extend_ps:.3f} -o {os.path.basename(tmp_tpr)}",
+        gmx_cmd("convert-tpr", f"-s {tpr_name} -extend {extend_ps:.3f} -o {os.path.basename(tmp_tpr)}"),
         cwd=directory
     )
     shutil.move(tmp_tpr, tpr_path)
@@ -717,7 +819,12 @@ def maybe_resume_production_only(directory, args, gpu_id, pin_offset, threads, u
     if target_ns is not None:
         extend_tpr_to_target_ns(directory, f"{md_deffnm}.tpr", float(target_ns))
 
-    base_cmd = f"gmx mdrun -v -deffnm {md_deffnm} -cpi {os.path.basename(cpt_to_use)} -append"
+    base_cmd = build_mdrun_base_cmd(
+        md_deffnm,
+        cpi=os.path.basename(cpt_to_use),
+        append=True,
+        launcher=resolve_mpi_launcher(args),
+    )
 
     # Reuse your existing GPU→GPU-lite→CPU fallback runner
     run_mdrun_with_fallback(
@@ -730,6 +837,7 @@ def maybe_resume_production_only(directory, args, gpu_id, pin_offset, threads, u
         tpr_check=f"{md_deffnm}.tpr",
         ntmpi=ntmpi,
         gpu_id_arg=gpu_id_arg,
+        external_mpi=args.external_mpi,
     )
 
 
@@ -1128,25 +1236,26 @@ def maybe_use_custom_index(directory, args):
 
 def run_equilibration_stage(stage_name, mdp_path, start_gro, ref_gro, prev_cpt, directory,
                             pin_offset, available_threads, gpu_id, use_gpu, ntmpi, gpu_id_arg,
-                            coupling_group_str):
+                            coupling_group_str, external_mpi=False, mpi_launcher=""):
     local_name = f"{stage_name}.mdp"
     local_mdp = prepare_local_mdp_template(directory, mdp_path, local_name)
     standardize_mdp_groups(local_mdp, coupling_group_str)
     append_mdrun_log(directory, f"Equilibration stage {stage_name}: mdp={mdp_path} local={local_mdp}")
 
-    grompp_cmd = (
-        f"gmx grompp -f {local_name} -c {os.path.basename(start_gro)} "
-        f"-r {os.path.basename(ref_gro)} "
+    grompp_cmd = gmx_cmd(
+        "grompp",
+        f"-f {local_name} -c {os.path.basename(start_gro)} -r {os.path.basename(ref_gro)} ",
     )
     if prev_cpt and os.path.exists(prev_cpt):
         grompp_cmd += f"-t {os.path.basename(prev_cpt)} "
-    grompp_cmd += f"-p topol.top -n index.ndx -o {stage_name}.tpr -maxwarn 2"
+    grompp_cmd += "-p topol.top -n index.ndx "
+    grompp_cmd += f"-o {stage_name}.tpr -maxwarn 2"
 
     print(f"🧪 Running custom equilibration stage '{stage_name}'")
     append_mdrun_log(directory, f"grompp ({stage_name}): {grompp_cmd}")
     run_command_cpu(grompp_cmd, cwd=directory)
     run_mdrun_with_fallback(
-        base_cmd=f"gmx mdrun -v -deffnm {stage_name}",
+        base_cmd=build_mdrun_base_cmd(stage_name, launcher=mpi_launcher),
         cwd=directory,
         pin_offset=pin_offset,
         threads=available_threads,
@@ -1154,6 +1263,7 @@ def run_equilibration_stage(stage_name, mdp_path, start_gro, ref_gro, prev_cpt, 
         use_gpu=use_gpu,
         ntmpi=ntmpi,
         gpu_id_arg=gpu_id_arg,
+        external_mpi=external_mpi,
     )
     return os.path.join(directory, f"{stage_name}.gro"), os.path.join(directory, f"{stage_name}.cpt")
 
@@ -1169,10 +1279,12 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     # ##0##  INITIAL ENVIRONMENT + GPU SELECTION + NUMA-AWARE THREADING
     # ============================================================
     print("\n🧩 [STEP 0] Configuring environment and CPU/GPU threading ...")
+    print_gmx_preflight(directory)
 
     available_cores = multiprocessing.cpu_count()
     print(f"🧠 Detected {available_cores} total CPU cores on system.")
     gpu_id_arg = args.gpu_ids if getattr(args, "gpu_ids", None) else ("0" if gpu_id is not None and gpu_id >= 0 else None)
+    mpi_launcher = resolve_mpi_launcher(args)
 
     # --- Detect GPUs ---
     try:
@@ -1282,14 +1394,22 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     else:
         print("   • CPU-only mode active.")
     print(f"   • Using {available_threads} OpenMP thread(s), pin offset {pin_offset}")
-    print(f"   • Using {args.ntmpi} MPI rank(s)")
+    if args.external_mpi:
+        print(f"   • External MPI mode: yes")
+        print(f"   • MPI launcher: {mpi_launcher or 'direct'}")
+        print(f"   • External MPI ranks: {args.mpi_ranks}")
+    else:
+        print(f"   • Thread-MPI ranks (-ntmpi): {args.ntmpi}")
     print(f"   • CUDA_VISIBLE_DEVICES={gpu_id if gpu_id >= 0 else 'None'}")
     print(f"   • OMP_NUM_THREADS={available_threads}")
     if gpu_id_arg:
-        print(f"   • gmx mdrun -gpu_id {gpu_id_arg}")
+        print(f"   • {os.path.basename(GMX_BIN)} mdrun -gpu_id {gpu_id_arg}")
 
     append_mdrun_log(directory, f"Compute mode: {'GPU' if use_gpu else 'CPU'}")
-    append_mdrun_log(directory, f"Resources: ntmpi={args.ntmpi} ntomp={available_threads} pinoffset={pin_offset} gpu_id={gpu_id} gpu_id_arg={gpu_id_arg}")
+    append_mdrun_log(
+        directory,
+        f"Resources: external_mpi={args.external_mpi} mpi_launcher={mpi_launcher or 'direct'} mpi_ranks={args.mpi_ranks} ntmpi={args.ntmpi} ntomp={available_threads} pinoffset={pin_offset} gpu_id={gpu_id} gpu_id_arg={gpu_id_arg}",
+    )
 
 
 
@@ -1355,7 +1475,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     print("\n⚡ [STEP 3] Starting energy minimization ...")
 
     run_mdrun_with_fallback(
-        base_cmd="gmx mdrun -v -deffnm em",
+        base_cmd=build_mdrun_base_cmd("em", launcher=mpi_launcher),
         cwd=directory,
         pin_offset=pin_offset,
         threads=available_threads,
@@ -1363,6 +1483,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         use_gpu=use_gpu,
         ntmpi=args.ntmpi,
         gpu_id_arg=gpu_id_arg,
+        external_mpi=args.external_mpi,
     )
 
     print("✅ Energy minimization complete.\n")
@@ -1392,17 +1513,17 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
 
                 cmd1 = (
                     f"printf \"0 & ! a H*\\nq\\n\" | "
-                    f"gmx make_ndx -f {ligand_gro} -o {index_file}"
+                    f"{gmx_cmd('make_ndx', f'-f {ligand_gro} -o {index_file}')}"
                 )
 
                 cmd2 = (
                     f"printf \"0 & ! a H\\nq\\n\" | "
-                    f"gmx make_ndx -f {ligand_gro} -o {index_file}"
+                    f"{gmx_cmd('make_ndx', f'-f {ligand_gro} -o {index_file}')}"
                 )
 
                 cmd3 = (
                     f"printf \"0\\nq\\n\" | "
-                    f"gmx make_ndx -f {ligand_gro} -o {index_file}"
+                    f"{gmx_cmd('make_ndx', f'-f {ligand_gro} -o {index_file}')}"
                 )
 
                 print("🔹 Attempt 1: Removing hydrogens using wildcard H* ...")
@@ -1427,7 +1548,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
                 if index_file and os.path.exists(os.path.join(directory, index_file)):
                     print("🔧 Creating ligand position restraints (genrester)...")
                     run_command(
-                        f"echo '3' | gmx genrestr -f {ligand_gro} -n {index_file} "
+                        f"echo '3' | {gmx_cmd('genrestr', f'-f {ligand_gro} -n {index_file}')} "
                         f"-o {posre_file} -fc 1000 1000 1000",
                         cwd=directory
                     )
@@ -1527,7 +1648,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         print("🧬 Protein-only system → building default index.ndx")
 
         run_command(
-            "gmx make_ndx -f em.gro -o index.ndx",
+            gmx_cmd("make_ndx", "-f em.gro -o index.ndx"),
             cwd=directory,
             input_text="q\n"
         )
@@ -1552,7 +1673,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
             exit(1)
 
         run_command(
-            "gmx make_ndx -f em.gro -o index.ndx",
+            gmx_cmd("make_ndx", "-f em.gro -o index.ndx"),
             cwd=directory,
             input_text=(
                 "1 | 13\n"
@@ -1588,7 +1709,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         )
 
         run_command(
-            "gmx make_ndx -f em.gro -o index.ndx",
+            gmx_cmd("make_ndx", "-f em.gro -o index.ndx"),
             cwd=directory,
             input_text=ndx_input
         )
@@ -1708,17 +1829,20 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
                 ntmpi=args.ntmpi,
                 gpu_id_arg=gpu_id_arg,
                 coupling_group_str=coupling_group_str,
+                external_mpi=args.external_mpi,
+                mpi_launcher=mpi_launcher,
             )
         print("✅ Custom equilibration plan complete.\n")
     else:
         print("🌡️ [STEP 6] Starting NVT equilibration ...")
-        append_mdrun_log(directory, "grompp (nvt): gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -n index.ndx -o nvt.tpr -maxwarn 2")
+        nvt_grompp_cmd = gmx_cmd("grompp", "-f nvt.mdp -c em.gro -r em.gro -p topol.top -n index.ndx -o nvt.tpr -maxwarn 2")
+        append_mdrun_log(directory, f"grompp (nvt): {nvt_grompp_cmd}")
         run_command_cpu(
-            "gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -n index.ndx -o nvt.tpr -maxwarn 2",
+            nvt_grompp_cmd,
             cwd=directory
         )
         run_mdrun_with_fallback(
-            base_cmd="gmx mdrun -v -deffnm nvt",
+            base_cmd=build_mdrun_base_cmd("nvt", launcher=mpi_launcher),
             cwd=directory,
             pin_offset=pin_offset,
             threads=available_threads,
@@ -1726,17 +1850,19 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
             use_gpu=use_gpu,
             ntmpi=args.ntmpi,
             gpu_id_arg=gpu_id_arg,
+            external_mpi=args.external_mpi,
         )
         print("✅ NVT equilibration complete.\n")
 
         print("💧 [STEP 7] Starting NPT equilibration ...")
-        append_mdrun_log(directory, "grompp (npt): gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -n index.ndx -o npt.tpr -maxwarn 2")
+        npt_grompp_cmd = gmx_cmd("grompp", "-f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -n index.ndx -o npt.tpr -maxwarn 2")
+        append_mdrun_log(directory, f"grompp (npt): {npt_grompp_cmd}")
         run_command_cpu(
-            "gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -n index.ndx -o npt.tpr -maxwarn 2",
+            npt_grompp_cmd,
             cwd=directory
         )
         run_mdrun_with_fallback(
-            base_cmd="gmx mdrun -v -deffnm npt",
+            base_cmd=build_mdrun_base_cmd("npt", launcher=mpi_launcher),
             cwd=directory,
             pin_offset=pin_offset,
             threads=available_threads,
@@ -1744,6 +1870,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
             use_gpu=use_gpu,
             ntmpi=args.ntmpi,
             gpu_id_arg=gpu_id_arg,
+            external_mpi=args.external_mpi,
         )
         equilibration_start_gro = os.path.join(directory, "npt.gro")
         equilibration_cpt = os.path.join(directory, "npt.cpt")
@@ -1761,22 +1888,20 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
 
     # build / rebuild TPR if needed
     if not (os.path.exists(md_tpr) and os.path.exists(md_cpt)):
-        append_mdrun_log(
-            directory,
-            f"grompp (production): gmx grompp -f md.mdp -c {os.path.basename(equilibration_start_gro)} "
+        production_grompp_cmd = gmx_cmd(
+            "grompp",
+            f"-f md.mdp -c {os.path.basename(equilibration_start_gro)} "
             + (f"-t {os.path.basename(equilibration_cpt)} " if equilibration_cpt and os.path.exists(equilibration_cpt) else "")
-            + f"-p topol.top -n index.ndx -o {md_deffnm}.tpr -maxwarn 2"
+            + f"-p topol.top -n index.ndx -o {md_deffnm}.tpr -maxwarn 2",
         )
+        append_mdrun_log(directory, f"grompp (production): {production_grompp_cmd}")
         run_command_cpu(
-            f"gmx grompp -f md.mdp -c {os.path.basename(equilibration_start_gro)} "
-            + (f"-t {os.path.basename(equilibration_cpt)} " if equilibration_cpt and os.path.exists(equilibration_cpt) else "")
-            + "-p topol.top -n index.ndx "
-            f"-o {md_deffnm}.tpr -maxwarn 2",
+            production_grompp_cmd,
             cwd=directory
         )
 
     # base mdrun (resume if checkpoint exists)
-    base_cmd = f"gmx mdrun -v -deffnm {md_deffnm}"
+    base_cmd = build_mdrun_base_cmd(md_deffnm, launcher=mpi_launcher)
     if os.path.exists(md_cpt) and os.path.exists(md_tpr):
         print(f"♻️ Found checkpoint: {md_deffnm}.cpt → resuming with -cpi/-append")
         base_cmd += f" -cpi {md_deffnm}.cpt -append"
@@ -1792,6 +1917,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         tpr_check=f"{md_deffnm}.tpr",
         ntmpi=args.ntmpi,
         gpu_id_arg=gpu_id_arg,
+        external_mpi=args.external_mpi,
     )
 
     print("✅ Production MD complete.\n")

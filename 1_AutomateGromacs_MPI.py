@@ -147,6 +147,7 @@ import subprocess
 # Define number of threads for GROMACS execution
 import multiprocessing
 import shutil  # For file operations
+import shlex
 
 import re
 
@@ -156,6 +157,69 @@ import argparse
 
 VALID_BOX_TYPES = {"cubic", "dodecahedron", "octahedron"}
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+GMX_BIN = None
+
+
+def resolve_gmx_binary(requested="auto"):
+    explicit_requested = requested not in (None, "", "auto")
+    env_requested = os.environ.get("PYMACS_GMX_BIN")
+
+    if explicit_requested:
+        candidates = [requested]
+    elif env_requested:
+        candidates = [env_requested]
+    else:
+        candidates = ["gmx_mpi", "gmx-mpi", "gmx"]
+
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+
+    if explicit_requested:
+        raise FileNotFoundError(f"Requested GROMACS executable was not found: {requested}")
+    if env_requested:
+        raise FileNotFoundError(f"PYMACS_GMX_BIN is set but not callable: {env_requested}")
+    raise FileNotFoundError(
+        "No GROMACS executable found. Tried: gmx_mpi, gmx-mpi, gmx. "
+        "Use --gmx-bin or set PYMACS_GMX_BIN."
+    )
+
+
+def gmx_cmd(subcommand, args=""):
+    base = f"{shlex.quote(GMX_BIN)} {subcommand}"
+    return f"{base} {args}".strip()
+
+
+def print_gmx_preflight(directory=None):
+    print(f"🧬 Using GROMACS executable: {GMX_BIN}")
+    try:
+        result = subprocess.run(
+            f"{shlex.quote(GMX_BIN)} --version",
+            shell=True,
+            text=True,
+            capture_output=True,
+            cwd=directory,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to execute '{GMX_BIN} --version': {exc}") from exc
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(
+            f"GROMACS executable is not callable: {GMX_BIN}\n{stderr}"
+        )
+
+    version_line = next(
+        (line.strip() for line in result.stdout.splitlines() if line.strip()),
+        None,
+    )
+    if version_line:
+        print(f"🧪 GROMACS version: {version_line}")
+    if directory:
+        append_setup_log(directory, f"GROMACS executable: {GMX_BIN}")
+        if version_line:
+            append_setup_log(directory, f"GROMACS version: {version_line}")
 
 
 parser = argparse.ArgumentParser(
@@ -168,6 +232,11 @@ parser.add_argument("--chain-names", type=str, help="Comma-separated custom chai
 parser.add_argument("--chain-map", type=str, help="Explicit chainID:name pairs (e.g. A:Rap1B,B:Rap1GAP)")
 parser.add_argument("--ligand", "-l", type=str, help="Ligand residue code used for non-covalent ligand workflows.")
 parser.add_argument("--pdb", type=str, help="Input PDB filename (e.g., Model_2.pdb)")
+parser.add_argument(
+    "--gmx-bin",
+    default="auto",
+    help="GROMACS executable to use: auto, gmx, gmx_mpi, gmx-mpi, or an explicit path.",
+)
 parser.add_argument(
     "--box-type",
     choices=sorted(VALID_BOX_TYPES),
@@ -209,6 +278,11 @@ parser.add_argument(
 args = parser.parse_args()
 if args.box_distance <= 0:
     parser.error("--box-distance must be greater than 0.0 nm.")
+try:
+    GMX_BIN = resolve_gmx_binary(args.gmx_bin)
+    print_gmx_preflight()
+except (FileNotFoundError, RuntimeError) as exc:
+    raise SystemExit(f"❌ {exc}")
 
 # ============================================================
 # 🚀 Runtime Summary Banner
@@ -813,7 +887,11 @@ def automate_pdb2gmx(directory):
         input_selections.append("0")                    # End terminus: COO-
     input_text = "\n".join(input_selections) + "\n"
     print("\n✅ Auto-selecting force field and termini for pdb2gmx.")
-    return run_command(f"gmx pdb2gmx -f protein.pdb -o protein_processed.gro -p topol.top -ignh -water spc -ter", cwd=directory, input_text=input_text)
+    return run_command(
+        gmx_cmd("pdb2gmx", "-f protein.pdb -o protein_processed.gro -p topol.top -ignh -water spc -ter"),
+        cwd=directory,
+        input_text=input_text,
+    )
 
 def count_chains(protein_pdb):
     """Counts the number of unique chains in a PDB file."""
@@ -1932,7 +2010,7 @@ def build_water_index_with_gmx_select(directory):
     # select resnames commonly used for water:
     selection = 'resname SOL or resname WAT or resname HOH or resname TIP3 or resname TIP4 or resname TIP5'
     ok = run_command(
-        f'gmx select -s ions.tpr -f solv.gro -select "{selection}" -on {os.path.basename(ndx_path)}',
+        gmx_cmd("select", f'-s ions.tpr -f solv.gro -select "{selection}" -on {os.path.basename(ndx_path)}'),
         cwd=directory
     )
     if not ok:
@@ -1989,6 +2067,7 @@ def is_cgenff_ljpme_conflict(stderr):
 def process_directory(directory, pdb_filename, ligand_code):
     """Processes a directory for MD setup using a selected PDB file and ligand code."""
     print(f"\n🔄 Processing directory: {directory}")
+    print_gmx_preflight(directory)
     pdb_path = os.path.join(directory, pdb_filename)
     print(f"\n🔍 Checking for {pdb_filename} in the working directory...")
     if not os.path.exists(pdb_path):
@@ -2082,8 +2161,10 @@ def process_directory(directory, pdb_filename, ligand_code):
 
                 # Convert ParamChem PDB → GRO
                 if not run_command(
-                    f"gmx editconf -f {os.path.basename(ini_pdb_file)} "
-                    f"-o {os.path.basename(ligand_gro_file)}",
+                    gmx_cmd(
+                        "editconf",
+                        f"-f {os.path.basename(ini_pdb_file)} -o {os.path.basename(ligand_gro_file)}",
+                    ),
                     cwd=directory
                 ):
                     return False
@@ -2197,8 +2278,10 @@ def process_directory(directory, pdb_filename, ligand_code):
                 # 4e) Generate ligand .gro
                 # ------------------------------------------------------------
                 if not run_command(
-                    f"gmx editconf -f {os.path.basename(pose_final)} "
-                    f"-o {os.path.basename(ligand_gro_file)}",
+                    gmx_cmd(
+                        "editconf",
+                        f"-f {os.path.basename(pose_final)} -o {os.path.basename(ligand_gro_file)}",
+                    ),
                     cwd=directory
                 ):
                     return False
@@ -2244,7 +2327,7 @@ def process_directory(directory, pdb_filename, ligand_code):
     # Step 7: Define box
     # ------------------------------------------------------------
     if not run_command(
-        f"gmx editconf -f complex.gro -o newbox.gro -bt {args.box_type} -d {args.box_distance}",
+        gmx_cmd("editconf", f"-f complex.gro -o newbox.gro -bt {args.box_type} -d {args.box_distance}"),
         cwd=directory
     ):
         return False
@@ -2253,7 +2336,7 @@ def process_directory(directory, pdb_filename, ligand_code):
     # Step 8: Solvate
     # ------------------------------------------------------------
     if not run_command(
-        "gmx solvate -cp newbox.gro -cs spc216.gro -p topol.top -o solv.gro",
+        gmx_cmd("solvate", "-cp newbox.gro -cs spc216.gro -p topol.top -o solv.gro"),
         cwd=directory
     ):
         return False
@@ -2264,7 +2347,7 @@ def process_directory(directory, pdb_filename, ligand_code):
     print("⚙️ Step 9: Running grompp for ion preparation...")
 
     grompp_result = subprocess.run(
-        f"gmx grompp -f {os.path.basename(mdp_files['ions.mdp'])} -c solv.gro -p topol.top -o ions.tpr -maxwarn 2",
+        gmx_cmd("grompp", f"-f {os.path.basename(mdp_files['ions.mdp'])} -c solv.gro -p topol.top -o ions.tpr -maxwarn 2"),
         shell=True,
         cwd=directory,
         text=True,
@@ -2299,7 +2382,7 @@ def process_directory(directory, pdb_filename, ligand_code):
 
             print("🔁 Retrying grompp after reorder...")
             return run_command(
-                f"gmx grompp -f {os.path.basename(mdp_files['ions.mdp'])} -c solv.gro -p topol.top -o ions.tpr -maxwarn 2",
+                gmx_cmd("grompp", f"-f {os.path.basename(mdp_files['ions.mdp'])} -c solv.gro -p topol.top -o ions.tpr -maxwarn 2"),
                 cwd=directory
             )
 
@@ -2315,7 +2398,7 @@ def process_directory(directory, pdb_filename, ligand_code):
     # Step 10: Detect solvent group for genion
     # ------------------------------------------------------------
     make_ndx_result = subprocess.run(
-        "gmx make_ndx -f solv.gro",
+        gmx_cmd("make_ndx", "-f solv.gro"),
         shell=True,
         cwd=directory,
         text=True,
@@ -2347,8 +2430,10 @@ def process_directory(directory, pdb_filename, ligand_code):
     salt_m = os.environ.get("GMX_SALT_M", "0.15")
 
     if not run_command(
-        f"gmx genion -s ions.tpr -o solv_ions.gro -p topol.top "
-        f"-pname NA -nname CL -neutral -conc {salt_m} -seed 2025 {ndx_arg}",
+        gmx_cmd(
+            "genion",
+            f"-s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -neutral -conc {salt_m} -seed 2025 {ndx_arg}",
+        ),
         cwd=directory,
         input_text=f"{sol_group}\n"
     ):
@@ -2358,7 +2443,7 @@ def process_directory(directory, pdb_filename, ligand_code):
     # Final grompp (energy minimization)
     # ------------------------------------------------------------
     if not run_command(
-        f"gmx grompp -f {os.path.basename(mdp_files['em.mdp'])} -c solv_ions.gro -p topol.top -o em.tpr -maxwarn 2",
+        gmx_cmd("grompp", f"-f {os.path.basename(mdp_files['em.mdp'])} -c solv_ions.gro -p topol.top -o em.tpr -maxwarn 2"),
         cwd=directory
     ):
         return False

@@ -118,6 +118,7 @@ import sys
 import shutil
 import argparse
 import subprocess
+import shlex
 import re
 import numpy as np
 import pandas as pd
@@ -138,6 +139,59 @@ from concurrent.futures import ProcessPoolExecutor
 import mdtraj as md
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+
+GMX_BIN = None
+
+
+def resolve_gmx_binary(requested="auto"):
+    explicit_requested = requested not in (None, "", "auto")
+    env_requested = os.environ.get("PYMACS_GMX_BIN")
+
+    if explicit_requested:
+        candidates = [requested]
+    elif env_requested:
+        candidates = [env_requested]
+    else:
+        candidates = ["gmx_mpi", "gmx-mpi", "gmx"]
+
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+
+    if explicit_requested:
+        raise FileNotFoundError(f"Requested GROMACS executable was not found: {requested}")
+    if env_requested:
+        raise FileNotFoundError(f"PYMACS_GMX_BIN is set but not callable: {env_requested}")
+    raise FileNotFoundError(
+        "No GROMACS executable found. Tried: gmx_mpi, gmx-mpi, gmx. "
+        "Use --gmx-bin or set PYMACS_GMX_BIN."
+    )
+
+
+def gmx_cmd(subcommand, args=""):
+    base = f"{shlex.quote(GMX_BIN)} {subcommand}"
+    return f"{base} {args}".strip()
+
+
+def gmx_argv(subcommand, args=None):
+    return [GMX_BIN, subcommand] + list(args or [])
+
+
+def print_gmx_preflight():
+    print(f"🧬 Using GROMACS executable: {GMX_BIN}")
+    try:
+        result = subprocess.run([GMX_BIN, "--version"], text=True, capture_output=True)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to execute '{GMX_BIN} --version': {exc}") from exc
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"GROMACS executable is not callable: {GMX_BIN}\n{stderr}")
+
+    version_line = next((line.strip() for line in result.stdout.splitlines() if line.strip()), None)
+    if version_line:
+        print(f"🧪 GROMACS version: {version_line}")
 
 
 
@@ -257,6 +311,11 @@ parser.add_argument(
     action="store_true",
     help="Non-interactive mode; do not prompt for simulation type or optional ligand-only rendering settings."
 )
+parser.add_argument(
+    "--gmx-bin",
+    default="auto",
+    help="GROMACS executable to use: auto, gmx, gmx_mpi, gmx-mpi, or an explicit path.",
+)
 
 # ------------------ NETWORX-compatible flags ------------------
 parser.add_argument(
@@ -286,6 +345,11 @@ parser.add_argument(
 
 
 args = parser.parse_args()
+try:
+    GMX_BIN = resolve_gmx_binary(args.gmx_bin)
+    print_gmx_preflight()
+except (FileNotFoundError, RuntimeError) as exc:
+    raise SystemExit(f"❌ {exc}")
 
 
 
@@ -494,15 +558,24 @@ def select_simulation_type(args):
 
 
 def dispatch_to_protac_analysis():
-    protac_script = os.path.join(os.getcwd(), "3_PROTAC_Analysis.py")
-    if not os.path.exists(protac_script):
-        raise SystemExit("❌ PROTAC mode selected, but 3_PROTAC_Analysis.py was not found in the current directory.")
+    protac_script_mpi = os.path.join(os.getcwd(), "3_PROTAC_Analysis_MPI.py")
+    protac_script_legacy = os.path.join(os.getcwd(), "3_PROTAC_Analysis.py")
 
-    cmd = [sys.executable, protac_script]
+    if os.path.exists(protac_script_mpi):
+        protac_script = protac_script_mpi
+    elif os.path.exists(protac_script_legacy):
+        protac_script = protac_script_legacy
+        print("⚠️ 3_PROTAC_Analysis_MPI.py not found; falling back to 3_PROTAC_Analysis.py.", flush=True)
+    else:
+        raise SystemExit(
+            "❌ PROTAC mode selected, but neither 3_PROTAC_Analysis_MPI.py nor 3_PROTAC_Analysis.py was found in the current directory."
+        )
+
+    cmd = [sys.executable, protac_script, "--gmx-bin", GMX_BIN]
 
     if args.headless:
         cmd.extend(["--headless", "--frame-step", "10"])
-        print("\n🧬 PROTAC mode selected — headless handoff to 3_PROTAC_Analysis.py (standard sampling: --frame-step 10)", flush=True)
+        print(f"\n🧬 PROTAC mode selected — headless handoff to {os.path.basename(protac_script)} (standard sampling: --frame-step 10)", flush=True)
     else:
         print("\n🧬 PROTAC mode selected — choose analysis depth:", flush=True)
         print("  1. Quick test     (0:500:10)", flush=True)
@@ -967,15 +1040,23 @@ def ensure_analysis_group(protein_only=False, ligand_code=None):
         raise SystemExit("❌ [Protein] group not found in index.ndx.")
 
     print(f"⚠️ Group [{wanted_group}] not found — creating it now...")
-    proc = subprocess.run("gmx make_ndx -f md_0_1.tpr -o temp.ndx <<< 'q'",
-                          shell=True, capture_output=True, text=True)
+    proc = subprocess.run(
+        gmx_cmd("make_ndx", "-f md_0_1.tpr -o temp.ndx"),
+        shell=True,
+        capture_output=True,
+        text=True,
+        input="q\n",
+    )
     lig_num = None
     for line in proc.stdout.splitlines():
         if ligand_code and ligand_code in line:
             lig_num = line.strip().split()[0]
             break
     lig_num = lig_num or "13"
-    run_cmd(f"echo '1 | {lig_num}\nname 21 {wanted_group}\nq' | gmx make_ndx -f md_0_1.tpr -o index.ndx")
+    run_cmd(
+        f"echo '1 | {lig_num}\nname 21 {wanted_group}\nq' | "
+        f"{gmx_cmd('make_ndx', '-f md_0_1.tpr -o index.ndx')}"
+    )
     print(f"✅ Created [{wanted_group}] (1 | {lig_num}) in index.ndx.")
     return wanted_group
 
@@ -1117,13 +1198,13 @@ if not (file_exists("Final_Trajectory.xtc") and file_exists("Final_Trajectory.pd
 
     run_cmd(
         f"printf '{group}\n{group}\n' | "
-        f"gmx trjconv -s md_0_1.tpr -f md_0_1.xtc "
+        f"{gmx_cmd('trjconv', '-s md_0_1.tpr -f md_0_1.xtc')} "
         f"-o Final_Trajectory.xtc -n index.ndx -pbc mol -center"
     )
 
     run_cmd(
         f"printf '{group}\n' | "
-        f"gmx trjconv -s md_0_1.tpr -f Final_Trajectory.xtc "
+        f"{gmx_cmd('trjconv', '-s md_0_1.tpr -f Final_Trajectory.xtc')} "
         f"-o Final_Trajectory_RAW.pdb -n index.ndx -dump 0"
     )
 

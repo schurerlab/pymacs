@@ -1,0 +1,92 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# macOS / editor noise
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local environments
+.env
+.venv/
+venv/
+conda-meta/
+.mamba/
+*.log
+
+# PyMACS run folders and large/generated MD outputs
+RUNS/
+runs/
+run*/
+*_run*/
+Analysis_Results/
+NETWORX/
+RESIDUE_Contact_Distance/
+RESIDUE_Pies/
+
+# GROMACS generated outputs
+*.tpr
+*.xtc
+*.trr
+*.edr
+*.cpt
+*_prev.cpt
+*.xvg
+*.gro
+*.ndx
+*.top
+*.itp
+*.prm
+*.mol2
+*.str
+*.mdp
+mdout.mdp
+traj_comp.xtc
+Final_Trajectory.*
+binding_pocket_only.*
+rmsd*.csv
+rmsf*.csv
+*_RMSD.csv
+*_RMSF.csv
+
+# Generated figures / figurebooks from local runs
+*.png
+*.svg
+*.pdf
+!Example/**/*.pdf
+!images/**/*.png
+!images/**/*.svg
+
+# Manuscripts, reviewer notes, private notes
+PaperNotes/
+REVIEWER_RESPONSE_IMPLEMENTATION_LOG.md
+*.docx
+*.pptx
+*.xlsx
+*.pages
+*.key
+*.numbers
+
+# Fonts - do not commit font files
+*.ttf
+*.otf
+*.woff
+*.woff2
+
+# Local transfer / scratch files
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.bak
+*.tmp
+*.old
+Pasted text*.txt
