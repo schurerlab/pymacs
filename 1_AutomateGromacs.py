@@ -154,15 +154,62 @@ import re
 import argparse
 
 
-parser = argparse.ArgumentParser(description="Automate MD setup with optional chain naming and ligand support.")
+VALID_BOX_TYPES = {"cubic", "dodecahedron", "octahedron"}
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+parser = argparse.ArgumentParser(
+    description="Automate MD setup with optional chain naming, PDB preflight checks, and ligand support.",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+)
 
 parser.add_argument("--mode", choices=["ligand", "protein"], help="Skip interactive mode selection (headless mode).")
 parser.add_argument("--chain-names", type=str, help="Comma-separated custom chain names (e.g. Rap1B,Rap1GAP)")
 parser.add_argument("--chain-map", type=str, help="Explicit chainID:name pairs (e.g. A:Rap1B,B:Rap1GAP)")
-parser.add_argument("--ligand", "-l", type=str, help="Ligand 3-letter code (e.g., PTC). If omitted, runs in protein-only mode.")
+parser.add_argument("--ligand", "-l", type=str, help="Ligand residue code used for non-covalent ligand workflows.")
 parser.add_argument("--pdb", type=str, help="Input PDB filename (e.g., Model_2.pdb)")
+parser.add_argument(
+    "--box-type",
+    choices=sorted(VALID_BOX_TYPES),
+    default="cubic",
+    help="GROMACS box shape passed to gmx editconf -bt.",
+)
+parser.add_argument(
+    "--box-distance",
+    type=float,
+    default=1.0,
+    help="Distance in nm between the solute and the periodic box edge.",
+)
+parser.add_argument(
+    "--strict-pdb-validation",
+    action="store_true",
+    help="Escalate selected PDB preflight warnings into errors before setup starts.",
+)
+parser.add_argument(
+    "--allow-covalent-ligand",
+    action="store_true",
+    help="Allow ligand workflows to continue after LINK/CONECT records suggest a covalent attachment.",
+)
+parser.add_argument(
+    "--mdp-dir",
+    default="MDPs",
+    help="Directory searched for setup-stage MDP templates when local copies are not present.",
+)
+parser.add_argument(
+    "--ions-mdp",
+    default="ions.mdp",
+    help="Path or filename for the ion-preparation MDP template.",
+)
+parser.add_argument(
+    "--em-mdp",
+    default="em.mdp",
+    help="Path or filename for the energy-minimization MDP template used at the end of Step 1.",
+)
 
 args = parser.parse_args()
+if args.box_distance <= 0:
+    parser.error("--box-distance must be greater than 0.0 nm.")
+
 # ============================================================
 # 🚀 Runtime Summary Banner
 # ============================================================
@@ -190,6 +237,238 @@ if args.mode or args.ligand or args.chain_names or args.chain_map:
     # Optional: also log it to mdrun.log for traceability
     with open(os.path.join(os.getcwd(), "mdrun.log"), "a") as log:
         log.write(f"{banner}\n")
+
+
+def append_setup_log(directory, message):
+    log_path = os.path.join(directory, "mdrun.log")
+    with open(log_path, "a", encoding="utf-8") as handle:
+        handle.write(f"{message}\n")
+
+
+def resolve_existing_path(base_directory, candidate):
+    if not candidate:
+        return None
+    options = []
+    if os.path.isabs(candidate):
+        options.append(candidate)
+    else:
+        options.extend([
+            os.path.join(base_directory, candidate),
+            os.path.join(SCRIPT_DIR, candidate),
+        ])
+    for path in options:
+        if os.path.exists(path):
+            return os.path.abspath(path)
+    return None
+
+
+def resolve_mdp_template(base_directory, mdp_name_or_path, mdp_dir):
+    candidates = []
+    if mdp_name_or_path:
+        candidates.extend([
+            mdp_name_or_path,
+            os.path.join(base_directory, mdp_name_or_path),
+            os.path.join(SCRIPT_DIR, mdp_name_or_path),
+        ])
+
+    basename = os.path.basename(mdp_name_or_path) if mdp_name_or_path else None
+    if basename:
+        candidates.extend([
+            os.path.join(base_directory, basename),
+            os.path.join(base_directory, mdp_dir, basename),
+            os.path.join(SCRIPT_DIR, basename),
+            os.path.join(SCRIPT_DIR, mdp_dir, basename),
+        ])
+
+    seen = set()
+    for path in candidates:
+        if not path:
+            continue
+        abspath = os.path.abspath(path)
+        if abspath in seen:
+            continue
+        seen.add(abspath)
+        if os.path.exists(abspath):
+            return abspath
+    return None
+
+
+def prepare_step1_mdp_files(directory, options):
+    resolved = {
+        "ions.mdp": resolve_mdp_template(directory, options.ions_mdp, options.mdp_dir),
+        "em.mdp": resolve_mdp_template(directory, options.em_mdp, options.mdp_dir),
+    }
+    missing = [name for name, path in resolved.items() if not path]
+    if missing:
+        raise FileNotFoundError(
+            "Missing required setup MDP template(s): "
+            + ", ".join(missing)
+            + f". Searched local files and '{options.mdp_dir}'."
+        )
+
+    local_map = {}
+    for local_name, source_path in resolved.items():
+        dest_path = os.path.join(directory, local_name)
+        if os.path.abspath(source_path) != os.path.abspath(dest_path):
+            shutil.copyfile(source_path, dest_path)
+            print(f"📄 Copied {local_name} template from {source_path}")
+        else:
+            print(f"📄 Using local {local_name}: {dest_path}")
+        append_setup_log(directory, f"MDP {local_name}: source={source_path} local={dest_path}")
+        local_map[local_name] = dest_path
+    return local_map
+
+
+def detect_covalent_ligand_hints(pdb_path, ligand_code):
+    if not ligand_code:
+        return []
+
+    ligand_serials = set()
+    serial_is_ligand = {}
+    hints = []
+
+    with open(pdb_path, "r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.readlines()
+
+    for line in lines:
+        if not line.startswith(("ATOM  ", "HETATM")):
+            continue
+        try:
+            serial = int(line[6:11])
+        except ValueError:
+            continue
+        resname = line[17:20].strip().upper()
+        is_ligand = resname == ligand_code.upper()
+        serial_is_ligand[serial] = is_ligand
+        if is_ligand:
+            ligand_serials.add(serial)
+
+    for line in lines:
+        if line.startswith("LINK"):
+            left_res = line[17:20].strip().upper()
+            right_res = line[47:50].strip().upper()
+            if ligand_code.upper() in {left_res, right_res}:
+                hints.append(f"LINK record suggests covalent attachment: {line.strip()}")
+        elif line.startswith("CONECT") and ligand_serials:
+            tokens = line.split()[1:]
+            try:
+                serials = [int(token) for token in tokens]
+            except ValueError:
+                continue
+            if not serials:
+                continue
+            anchor = serials[0]
+            if anchor in ligand_serials:
+                partners = [s for s in serials[1:] if not serial_is_ligand.get(s, False)]
+                if partners:
+                    hints.append(
+                        f"CONECT record links ligand atom {anchor} to non-ligand atom(s) {partners}."
+                    )
+            elif serial_is_ligand.get(anchor, False) is False:
+                partners = [s for s in serials[1:] if s in ligand_serials]
+                if partners:
+                    hints.append(
+                        f"CONECT record links protein atom {anchor} to ligand atom(s) {partners}."
+                    )
+    return hints
+
+
+def validate_input_pdb(pdb_path, ligand_code=None, strict=False, allow_covalent=False):
+    if not os.path.exists(pdb_path):
+        raise FileNotFoundError(f"PDB file not found: {pdb_path}")
+
+    atom_records = []
+    hetatm_resnames = set()
+    warnings = []
+    chain_ids = set()
+    parsed_coords = 0
+
+    with open(pdb_path, "r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.readlines()
+
+    for line in lines:
+        if not line.startswith(("ATOM  ", "HETATM")):
+            continue
+        atom_records.append(line)
+        resname = line[17:20].strip().upper()
+        chain_id = line[21].strip()
+        if resname:
+            if line.startswith("HETATM"):
+                hetatm_resnames.add(resname)
+        else:
+            raise ValueError(
+                "A PDB atom record is missing a residue name. "
+                "Please provide standard ATOM/HETATM residue fields before running PyMACS."
+            )
+        if chain_id:
+            chain_ids.add(chain_id)
+        try:
+            float(line[30:38])
+            float(line[38:46])
+            float(line[46:54])
+            parsed_coords += 1
+        except ValueError:
+            raise ValueError(
+                "Failed to parse one or more PDB coordinates from columns 31-54. "
+                "Please verify standard ATOM/HETATM coordinate formatting."
+            )
+
+    if not atom_records:
+        raise ValueError(
+            "No ATOM/HETATM records were found in the input PDB. "
+            "PyMACS expects a coordinate PDB with standard atom records."
+        )
+    if parsed_coords == 0:
+        raise ValueError("No parseable coordinates were found in the input PDB.")
+
+    if not chain_ids:
+        warnings.append(
+            "No chain IDs were found in the PDB. PyMACS can continue, but chain-aware naming is strongly recommended."
+        )
+
+    detected_ligands = autodetect_ligands(pdb_path)
+    if len(detected_ligands) > 1:
+        warnings.append(
+            "Multiple ligand-like residues were detected: "
+            + ", ".join(detected_ligands)
+            + ". Provide --ligand explicitly if the intended ligand is ambiguous."
+        )
+
+    if ligand_code:
+        ligand_code = ligand_code.upper()
+        if ligand_code not in {line[17:20].strip().upper() for line in atom_records}:
+            raise ValueError(
+                f"Ligand residue '{ligand_code}' was requested but was not found in {os.path.basename(pdb_path)}. "
+                "Use --ligand with a residue name that exists in the PDB or rerun in protein mode."
+            )
+        covalent_hints = detect_covalent_ligand_hints(pdb_path, ligand_code)
+        if covalent_hints:
+            message = (
+                "Potential covalent ligand attachment detected. The default PyMACS ligand workflow is designed "
+                "for non-covalent ligands; covalent systems usually need custom topology handling.\n"
+                + "\n".join(f"  - {hint}" for hint in covalent_hints)
+            )
+            if allow_covalent:
+                warnings.append(message + "\nProceeding because --allow-covalent-ligand was supplied.")
+            else:
+                raise ValueError(message + "\nRe-run with --allow-covalent-ligand only if you have prepared the topology manually.")
+
+    if strict and warnings:
+        raise ValueError(
+            "Strict PDB validation failed due to the following warning-level issues:\n"
+            + "\n".join(f"  - {warning}" for warning in warnings)
+        )
+
+    print(f"✅ PDB preflight passed for {os.path.basename(pdb_path)}")
+    for warning in warnings:
+        print(f"⚠️ PDB preflight warning: {warning}")
+    return {
+        "warnings": warnings,
+        "detected_ligands": detected_ligands,
+        "chain_ids": sorted(chain_ids),
+        "hetatm_resnames": sorted(hetatm_resnames),
+        "atom_record_count": len(atom_records),
+    }
 
 
 
@@ -1716,6 +1995,20 @@ def process_directory(directory, pdb_filename, ligand_code):
         print(f"⚠️ Skipping {directory}: {pdb_filename} not found.")
         return False
 
+    print(
+        f"📦 Box configuration: type={args.box_type}, distance={args.box_distance:.3f} nm"
+    )
+    append_setup_log(
+        directory,
+        f"Box configuration: type={args.box_type}, distance={args.box_distance:.3f} nm",
+    )
+
+    try:
+        mdp_files = prepare_step1_mdp_files(directory, args)
+    except FileNotFoundError as exc:
+        print(f"❌ {exc}")
+        return False
+
     # Step 1: Remove ligand or copy original PDB based on presence of ligand
     if ligand_code:
         print(f"🛠️ Removing ligand ({ligand_code}) to create protein.pdb...")
@@ -1951,7 +2244,7 @@ def process_directory(directory, pdb_filename, ligand_code):
     # Step 7: Define box
     # ------------------------------------------------------------
     if not run_command(
-        "gmx editconf -f complex.gro -o newbox.gro -bt cubic -d 1.0",
+        f"gmx editconf -f complex.gro -o newbox.gro -bt {args.box_type} -d {args.box_distance}",
         cwd=directory
     ):
         return False
@@ -1971,7 +2264,7 @@ def process_directory(directory, pdb_filename, ligand_code):
     print("⚙️ Step 9: Running grompp for ion preparation...")
 
     grompp_result = subprocess.run(
-        "gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr -maxwarn 2",
+        f"gmx grompp -f {os.path.basename(mdp_files['ions.mdp'])} -c solv.gro -p topol.top -o ions.tpr -maxwarn 2",
         shell=True,
         cwd=directory,
         text=True,
@@ -2006,7 +2299,7 @@ def process_directory(directory, pdb_filename, ligand_code):
 
             print("🔁 Retrying grompp after reorder...")
             return run_command(
-                "gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr -maxwarn 2",
+                f"gmx grompp -f {os.path.basename(mdp_files['ions.mdp'])} -c solv.gro -p topol.top -o ions.tpr -maxwarn 2",
                 cwd=directory
             )
 
@@ -2065,7 +2358,7 @@ def process_directory(directory, pdb_filename, ligand_code):
     # Final grompp (energy minimization)
     # ------------------------------------------------------------
     if not run_command(
-        "gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr -maxwarn 2",
+        f"gmx grompp -f {os.path.basename(mdp_files['em.mdp'])} -c solv_ions.gro -p topol.top -o em.tpr -maxwarn 2",
         cwd=directory
     ):
         return False
@@ -2089,10 +2382,23 @@ if __name__ == "__main__":
         print(f"✅ Using specified PDB file: {pdb_filename}")
     else:
         pdb_filename = select_pdb_file(base_directory)
+
+    pdb_path = os.path.join(base_directory, pdb_filename)
+    try:
+        validate_input_pdb(
+            pdb_path,
+            ligand_code=args.ligand.upper() if args.ligand else None,
+            strict=args.strict_pdb_validation,
+            allow_covalent=args.allow_covalent_ligand,
+        )
+    except Exception as exc:
+        print(f"❌ PDB preflight failed: {exc}")
+        exit(1)
+
     # Ask user whether a ligand is present in the system
     
     # --- AUTO-DETECT LIGANDS FROM THE PDB ---
-    detected_ligs = autodetect_ligands(os.path.join(base_directory, pdb_filename))
+    detected_ligs = autodetect_ligands(pdb_path)
 
     ligand_code = None  # default
 
@@ -2139,6 +2445,17 @@ if __name__ == "__main__":
     else:
         print("\n✅ No ligand selected for this simulation.")
 
+    try:
+        validate_input_pdb(
+            pdb_path,
+            ligand_code=ligand_code,
+            strict=args.strict_pdb_validation,
+            allow_covalent=args.allow_covalent_ligand,
+        )
+    except Exception as exc:
+        print(f"❌ PDB validation failed for the selected workflow: {exc}")
+        exit(1)
+
 
 
     # Display chosen options
@@ -2147,6 +2464,8 @@ if __name__ == "__main__":
         print(f"✅ Using ligand code: {ligand_code}")
     else:
         print("✅ No ligand selected for this simulation.")
+    print(f"✅ Box type: {args.box_type}")
+    print(f"✅ Box distance: {args.box_distance:.3f} nm")
     if not process_directory(base_directory, pdb_filename, ligand_code):
         print("⚠️ Error detected. Stopping execution.")
         exit(1)

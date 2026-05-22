@@ -35,7 +35,7 @@ support and detailed CLI logging.
     • Automatic fallback to NumPy on CPU when GPU unavailable
 
 4️⃣ **Dynamic Binding Pocket Refinement**
-    • Chain-aware residue selection within 5 Å of the ligand
+    • Chain-aware residue selection within a configurable ligand pocket cutoff
     • Writes reduced pocket-only trajectory and topology for downstream analysis
 
 5️⃣ **Comprehensive RMSD/RMSF Analysis**
@@ -93,7 +93,7 @@ Headless (predefined threading):
 🧩 Workflow Summary
 -------------------
 STEP A  — Recenter & Subset (Protein|Ligand)
-STEP B  — Dynamic Pocket Refinement (5 Å cutoff)
+STEP B  — Dynamic Pocket Refinement (configurable pocket cutoff)
 STEP C  — Identify Binding Chains (via atomIndex.txt)
 STEP D1 — Global Protein RMSD
 STEP D2 — Ligand RMSD / RMSF
@@ -203,6 +203,21 @@ parser.add_argument(
 parser.add_argument(
     "--contact_cutoff", type=float, default=4.0,
     help="Contact cutoff distance in Å (default 4.0)."
+)
+
+parser.add_argument(
+    "--pocket-cutoff", type=float, default=5.0,
+    help="Pocket extraction cutoff in Å used when building binding_pocket_only.* around the ligand."
+)
+
+parser.add_argument(
+    "--hbond-distance-cutoff", type=float, default=3.5,
+    help="Distance cutoff in Å for hydrogen-bond-like interaction classification."
+)
+
+parser.add_argument(
+    "--hbond-angle-cutoff", type=float, default=135.0,
+    help="Reserved donor-hydrogen-acceptor angle cutoff in degrees for documenting hydrogen-bond geometry expectations."
 )
 
 parser.add_argument(
@@ -701,8 +716,16 @@ POCKET_PDB  = args.pocket_pdb
 POCKET_XTC  = args.pocket_xtc
 OUTPUT_DIR  = args.outdir
 CONTACT_CUTOFF = float(args.contact_cutoff)
+POCKET_CUTOFF_ANG = float(args.pocket_cutoff)
+POCKET_CUTOFF_NM = POCKET_CUTOFF_ANG / 10.0
+HBOND_DISTANCE_CUTOFF = float(args.hbond_distance_cutoff)
+HBOND_ANGLE_CUTOFF = float(args.hbond_angle_cutoff)
 MIN_CONTACT_FRAC = float(args.min_contact_frac)
 MAX_WORKERS = max(1, os.cpu_count() // 2)
+print(f"📏 Pocket cutoff: {POCKET_CUTOFF_ANG:.2f} Å")
+print(f"📏 Contact cutoff: {CONTACT_CUTOFF:.2f} Å")
+print(f"📏 H-bond-like distance cutoff: {HBOND_DISTANCE_CUTOFF:.2f} Å")
+print(f"📐 H-bond angle cutoff (documented): {HBOND_ANGLE_CUTOFF:.1f}°")
 # ============================================================
 # MIAMI COLOR PALETTE (LOCKED)
 # ============================================================
@@ -1163,7 +1186,7 @@ if not (file_exists("binding_pocket_only.xtc") and file_exists("binding_pocket_o
         print("✅ binding_pocket_only.* created as protein-only working copy.\n")
 
     else:
-        print("🔬 Extracting binding pocket using MDTraj...")
+        print(f"🔬 Extracting binding pocket using MDTraj with a {POCKET_CUTOFF_ANG:.2f} Å cutoff...")
 
         traj = md.load("Final_Trajectory.xtc", top="Final_Trajectory.pdb")
 
@@ -1176,13 +1199,13 @@ if not (file_exists("binding_pocket_only.xtc") and file_exists("binding_pocket_o
 
         neighbors = md.compute_neighbors(
             traj,
-            cutoff=0.5,
+            cutoff=POCKET_CUTOFF_NM,
             query_indices=lig_atoms,
             haystack_indices=prot_atoms
         )
 
         if len(neighbors) == 0:
-            raise SystemExit("❌ No protein atoms within 5 Å of ligand.")
+            raise SystemExit(f"❌ No protein atoms within {POCKET_CUTOFF_ANG:.1f} Å of ligand.")
 
         pocket_atoms = np.unique(np.concatenate(neighbors))
 
@@ -1316,6 +1339,20 @@ def savefig(path):
     plt.tight_layout()
     plt.savefig(path, dpi=300)
     plt.close()
+
+
+def ensure_interaction_summary_columns(summary, plot_types):
+    """Return a summary table with stable interaction-type columns and Total."""
+    plot_types = list(plot_types)
+
+    if summary is None or summary.empty:
+        normalized = pd.DataFrame(columns=plot_types, dtype=int)
+    else:
+        normalized = summary.copy().reindex(columns=plot_types, fill_value=0)
+        normalized = normalized.astype(int, copy=False)
+
+    normalized["Total"] = normalized.reindex(columns=plot_types, fill_value=0).sum(axis=1)
+    return normalized
 
 
 def infer_element(atom_name: str):
@@ -2248,6 +2285,7 @@ else:
     # STEP E — FULL BINDING-POCKET ANALYSIS WITH CSV EXPORTS
     # ============================================================
     _, _, _, lig_resname = get_aligned_traj_and_ligand()
+    chain_label = ", ".join(active_chains.keys()) if active_chains else "Protein"
     phase("STEP E — Binding Pocket Analysis")
 
     u = mda.Universe("binding_pocket_only.pdb", "binding_pocket_only.xtc")
@@ -2423,7 +2461,7 @@ else:
 
                 plt.figure(figsize=(16, 9))
                 sns.heatmap(pivot, cmap="coolwarm")
-                plt.title(f"{compound_name}–{chain} Contact Map (Binding Pocket Only)")
+                plt.title(f"{compound_name}–{chain_label} Contact Map (Binding Pocket Only)")
                 plt.xlabel("Time (ns)")
                 plt.ylabel("Residue")
 
@@ -2487,7 +2525,7 @@ else:
 
                 plt.figure(figsize=(8, 12))
                 ax = freq_pct.plot(kind="barh", color=MIAMI_ORANGE)
-                ax.set_title(f"{compound_name}-{chain} Contact Frequency")
+                ax.set_title(f"{compound_name}-{chain_label} Contact Frequency")
                 ax.set_xlabel("Percent of frames (%)")
                 ax.set_xlim(0, 100)
 
@@ -2552,7 +2590,7 @@ else:
 
             # H-bond detection
             if infer_element(prot_atom.name) in ("O","N") and infer_element(lig_atom.name) in ("O","N"):
-                if min_dist < 3.5:
+                if min_dist < HBOND_DISTANCE_CUTOFF:
                     itype = "H-bond"
 
             # Hydrophobic
@@ -2593,11 +2631,18 @@ else:
 
     int_df.to_csv(os.path.join(OUTPUT_DIR, "InteractionTypes_Framewise.csv"), index=False)
 
-    summary = int_df.groupby(["Residue","Type"]).size().unstack(fill_value=0)
-    summary["Total"] = summary.sum(axis=1)
+    if int_df.empty:
+        print("⚠️ No ligand:protein interactions were classified in STEP E2. Creating an empty interaction summary and skipping data-dependent interaction plots.")
+        summary = ensure_interaction_summary_columns(pd.DataFrame(), PLOT_TYPES)
+    else:
+        summary = int_df.groupby(["Residue","Type"]).size().unstack(fill_value=0)
+        summary = ensure_interaction_summary_columns(summary, PLOT_TYPES)
+
+    print("📊 Interaction summary columns:", list(summary.columns))
+    print("📊 Interaction type counts:", int_df["Type"].value_counts().to_dict() if not int_df.empty else {})
     summary.to_csv(os.path.join(OUTPUT_DIR, "InteractionTypes_Summary.csv"))
 
-    stacked_frac = summary.drop(columns=["Total"], errors="ignore").div(total_frames).fillna(0)
+    stacked_frac = summary[PLOT_TYPES].div(total_frames).fillna(0)
 
     import re
 
@@ -2615,107 +2660,113 @@ else:
     # STEP E2A — Grouped bar plot (comparison view)
     # ============================================================
 
-    fig, ax = plt.subplots(figsize=(16, 6), dpi=150)
+    if stacked_frac.empty:
+        print("⚠️ No interaction summary rows available for STEP E2A grouped bar plot — skipping figure.")
+    else:
+        fig, ax = plt.subplots(figsize=(16, 6), dpi=150)
 
-    stacked_frac.plot(
-        kind="bar",
-        ax=ax,
-        stacked=False,
-        width=0.75,
-        color=[COLORS[c] for c in PLOT_TYPES],
-        edgecolor="black",
-        linewidth=0.4,
-    )
+        stacked_frac.plot(
+            kind="bar",
+            ax=ax,
+            stacked=False,
+            width=0.75,
+            color=[COLORS[c] for c in PLOT_TYPES],
+            edgecolor="black",
+            linewidth=0.4,
+        )
 
-    ax.set_title(
-        f"Normalized {chain}–{compound_name} Interaction Frequencies",
-        fontsize=16,
-        pad=20
-    )
-    ax.set_ylabel("Fraction of Frames", fontsize=12)
-    ax.set_xlabel("Residue", fontsize=12)
+        ax.set_title(
+            f"Normalized {chain_label}–{compound_name} Interaction Frequencies",
+            fontsize=16,
+            pad=20
+        )
+        ax.set_ylabel("Fraction of Frames", fontsize=12)
+        ax.set_xlabel("Residue", fontsize=12)
 
-    # Comparison emphasis
-    ax.yaxis.grid(True, linestyle="--", alpha=0.4)
-    ax.set_axisbelow(True)
+        # Comparison emphasis
+        ax.yaxis.grid(True, linestyle="--", alpha=0.4)
+        ax.set_axisbelow(True)
 
-    ax.tick_params(axis="x", rotation=90, labelsize=8)
-    ax.tick_params(axis="y", labelsize=10)
+        ax.tick_params(axis="x", rotation=90, labelsize=8)
+        ax.tick_params(axis="y", labelsize=10)
 
-    # Legend ABOVE axes, right side of title (figure-level)
-    fig.legend(
-        handles=ax.get_legend_handles_labels()[0],
-        labels=ax.get_legend_handles_labels()[1],
-        title="Interaction Type",
-        fontsize=11,
-        title_fontsize=12,
-        ncol=len(PLOT_TYPES),
-        loc="upper right",
-        bbox_to_anchor=(0.98, 1.01),
-        frameon=False
-    )
+        # Legend ABOVE axes, right side of title (figure-level)
+        fig.legend(
+            handles=ax.get_legend_handles_labels()[0],
+            labels=ax.get_legend_handles_labels()[1],
+            title="Interaction Type",
+            fontsize=11,
+            title_fontsize=12,
+            ncol=len(PLOT_TYPES),
+            loc="upper right",
+            bbox_to_anchor=(0.98, 1.01),
+            frameon=False
+        )
 
-    # Remove axis legend
-    ax.get_legend().remove()
+        # Remove axis legend
+        ax.get_legend().remove()
 
-    ax.margins(x=0.01)
-    plt.tight_layout(rect=[0, 0, 1, 0.88])
+        ax.margins(x=0.01)
+        plt.tight_layout(rect=[0, 0, 1, 0.88])
 
-    savefig(os.path.join(OUTPUT_DIR, "interaction_grouped_normalized.png"))
-    plt.close()
+        savefig(os.path.join(OUTPUT_DIR, "interaction_grouped_normalized.png"))
+        plt.close()
 
 
     # ============================================================
     # STEP E2B — Stacked bar plot (composition view)
     # ============================================================
 
-    fig, ax = plt.subplots(figsize=(16, 6), dpi=150)
+    if stacked_frac.empty:
+        print("⚠️ No interaction summary rows available for STEP E2B stacked bar plot — skipping figure.")
+    else:
+        fig, ax = plt.subplots(figsize=(16, 6), dpi=150)
 
-    stacked_frac.plot(
-        kind="bar",
-        ax=ax,
-        stacked=True,
-        width=0.75,
-        color=[COLORS[c] for c in PLOT_TYPES],
-        edgecolor="white",
-        linewidth=0.6,
-    )
+        stacked_frac.plot(
+            kind="bar",
+            ax=ax,
+            stacked=True,
+            width=0.75,
+            color=[COLORS[c] for c in PLOT_TYPES],
+            edgecolor="white",
+            linewidth=0.6,
+        )
 
-    ax.set_title(
-        f"Normalized {chain}–{compound_name} Interaction Composition",
-        fontsize=16,
-        pad=20
-    )
-    ax.set_ylabel("Fraction of Frames", fontsize=12)
-    ax.set_xlabel("Residue", fontsize=12)
+        ax.set_title(
+            f"Normalized {chain_label}–{compound_name} Interaction Composition",
+            fontsize=16,
+            pad=20
+        )
+        ax.set_ylabel("Fraction of Frames", fontsize=12)
+        ax.set_xlabel("Residue", fontsize=12)
 
-    # Composition emphasis
-    ax.yaxis.grid(False)
+        # Composition emphasis
+        ax.yaxis.grid(False)
 
-    ax.tick_params(axis="x", rotation=90, labelsize=8)
-    ax.tick_params(axis="y", labelsize=10)
+        ax.tick_params(axis="x", rotation=90, labelsize=8)
+        ax.tick_params(axis="y", labelsize=10)
 
-    # Legend ABOVE axes, right side of title (figure-level)
-    fig.legend(
-        handles=ax.get_legend_handles_labels()[0],
-        labels=ax.get_legend_handles_labels()[1],
-        title="Interaction Type",
-        fontsize=11,
-        title_fontsize=12,
-        ncol=len(PLOT_TYPES),
-        loc="upper right",
-        bbox_to_anchor=(0.98, 1.01),
-        frameon=False
-    )
+        # Legend ABOVE axes, right side of title (figure-level)
+        fig.legend(
+            handles=ax.get_legend_handles_labels()[0],
+            labels=ax.get_legend_handles_labels()[1],
+            title="Interaction Type",
+            fontsize=11,
+            title_fontsize=12,
+            ncol=len(PLOT_TYPES),
+            loc="upper right",
+            bbox_to_anchor=(0.98, 1.01),
+            frameon=False
+        )
 
-    # Remove axis legend
-    ax.get_legend().remove()
+        # Remove axis legend
+        ax.get_legend().remove()
 
-    ax.margins(x=0.01)
-    plt.tight_layout(rect=[0, 0, 1, 0.88])
+        ax.margins(x=0.01)
+        plt.tight_layout(rect=[0, 0, 1, 0.88])
 
-    savefig(os.path.join(OUTPUT_DIR, "interaction_stacked_normalized.png"))
-    plt.close()
+        savefig(os.path.join(OUTPUT_DIR, "interaction_stacked_normalized.png"))
+        plt.close()
 
 
 
@@ -2819,59 +2870,62 @@ else:
         "Hydrophobic": 1
     }
 
-    # Encode interaction strength numerically
-    int_df["InteractionCode"] = int_df["Type"].map(PRIORITY_MAP).fillna(0)
+    if int_df.empty:
+        print("⚠️ No interaction rows available for STEP E4 — skipping interaction timeline heatmap.")
+    else:
+        # Encode interaction strength numerically
+        int_df["InteractionCode"] = int_df["Type"].map(PRIORITY_MAP).fillna(0)
 
-    # ------------------------------------------------------------
-    # OPTIONAL (HIGHLY RECOMMENDED): bin time to reduce sparsity
-    # ------------------------------------------------------------
-    TIME_BIN_NS = 2.0  # adjust if needed
-    int_df["Time_bin"] = (
-        (int_df["Time_ns"] / TIME_BIN_NS)
-        .round(0)
-        * TIME_BIN_NS
-    )
-
-    # ------------------------------------------------------------
-    # Pivot using MAX priority per residue per time bin
-    # ------------------------------------------------------------
-    timeline_matrix = (
-        int_df
-        .pivot_table(
-            index="Residue",
-            columns="Time_bin",
-            values="InteractionCode",
-            aggfunc="max",
-            fill_value=0
+        # ------------------------------------------------------------
+        # OPTIONAL (HIGHLY RECOMMENDED): bin time to reduce sparsity
+        # ------------------------------------------------------------
+        TIME_BIN_NS = 2.0  # adjust if needed
+        int_df["Time_bin"] = (
+            (int_df["Time_ns"] / TIME_BIN_NS)
+            .round(0)
+            * TIME_BIN_NS
         )
-        .sort_index(
-            key=lambda x: x.map(residue_number),
-            ascending=False   # 🔥 highest residue number on top
+
+        # ------------------------------------------------------------
+        # Pivot using MAX priority per residue per time bin
+        # ------------------------------------------------------------
+        timeline_matrix = (
+            int_df
+            .pivot_table(
+                index="Residue",
+                columns="Time_bin",
+                values="InteractionCode",
+                aggfunc="max",
+                fill_value=0
+            )
+            .sort_index(
+                key=lambda x: x.map(residue_number),
+                ascending=False   # 🔥 highest residue number on top
+            )
         )
-    )
 
-    # ------------------------------------------------------------
-    # Plot
-    # ------------------------------------------------------------
-    plt.figure(figsize=(20, 10))
+        # ------------------------------------------------------------
+        # Plot
+        # ------------------------------------------------------------
+        plt.figure(figsize=(20, 10))
 
-    sns.heatmap(
-        timeline_matrix,
-        cmap="viridis",
-        cbar_kws={
-            "label": "Interaction Strength (3=H-bond, 2=Ionic, 1=Hydrophobic)"
-        },
-        linewidths=0.05
-    )
+        sns.heatmap(
+            timeline_matrix,
+            cmap="viridis",
+            cbar_kws={
+                "label": "Interaction Strength (3=H-bond, 2=Ionic, 1=Hydrophobic)"
+            },
+            linewidths=0.05
+        )
 
-    plt.title(f"{compound_name} Interaction Timeline Heatmap")
-    plt.xlabel("Time (ns)")
-    plt.ylabel("Residue")
-    plt.tight_layout()
+        plt.title(f"{compound_name} Interaction Timeline Heatmap")
+        plt.xlabel("Time (ns)")
+        plt.ylabel("Residue")
+        plt.tight_layout()
 
-    savefig(os.path.join(OUTPUT_DIR, f"{lig_resname}_interaction_timeline.png"))
+        savefig(os.path.join(OUTPUT_DIR, f"{lig_resname}_interaction_timeline.png"))
 
-    print("✅ STEP E4 complete — interaction timeline heatmap created.")
+        print("✅ STEP E4 complete — interaction timeline heatmap created.")
 
 
     # ============================================================
@@ -2883,92 +2937,95 @@ else:
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
 
-    # Sort data
-    df = int_df.sort_values(["Residue", "Time_ns"])
+    if int_df.empty:
+        print("⚠️ No interaction rows available for STEP E4B — skipping interaction event timeline.")
+    else:
+        # Sort data
+        df = int_df.sort_values(["Residue", "Time_ns"])
 
-    # Residue ordering
-    residues = sorted(
-        df["Residue"].unique(),
-        key=residue_number,
-        reverse=False   # 🔥 highest number at top
-    )
+        # Residue ordering
+        residues = sorted(
+            df["Residue"].unique(),
+            key=residue_number,
+            reverse=False   # 🔥 highest number at top
+        )
 
-    res_to_y = {res: i for i, res in enumerate(residues)}
+        res_to_y = {res: i for i, res in enumerate(residues)}
 
-    fig, ax = plt.subplots(figsize=(22, 12))
-    BAR_HEIGHT = 0.8
+        fig, ax = plt.subplots(figsize=(22, 12))
+        BAR_HEIGHT = 0.8
 
-    # Color map
-    TYPE_COLORS = {
-        "H-bond": "#FDE725",
-        "Ionic": "#5EC962",
-        "Hydrophobic": "#31688E"
-    }
+        # Color map
+        TYPE_COLORS = {
+            "H-bond": "#FDE725",
+            "Ionic": "#5EC962",
+            "Hydrophobic": "#31688E"
+        }
 
-    # Gap threshold (ns) to define event break
-    GAP_NS = 1.5  # ns; maximum allowed gap between frames for a continuous event
+        # Gap threshold (ns) to define event break
+        GAP_NS = 1.5  # ns; maximum allowed gap between frames for a continuous event
 
-    for residue, g in df.groupby("Residue"):
-        y = res_to_y[residue]
-        g = g.sort_values("Time_ns")
+        for residue, g in df.groupby("Residue"):
+            y = res_to_y[residue]
+            g = g.sort_values("Time_ns")
 
-        current_type = None
-        start_time = None
-        prev_time = None
+            current_type = None
+            start_time = None
+            prev_time = None
 
-        for _, row in g.iterrows():
-            t = row["Time_ns"]
-            itype = row["Type"]
+            for _, row in g.iterrows():
+                t = row["Time_ns"]
+                itype = row["Type"]
 
-            # Start new event
-            if start_time is None:
-                start_time = t
-                current_type = itype
+                # Start new event
+                if start_time is None:
+                    start_time = t
+                    current_type = itype
 
-            # Break event if gap or type change
-            elif (t - prev_time > GAP_NS) or (itype != current_type):
+                # Break event if gap or type change
+                elif (t - prev_time > GAP_NS) or (itype != current_type):
+                    ax.broken_barh(
+                        [(start_time, prev_time - start_time)],
+                        (y - BAR_HEIGHT / 2, BAR_HEIGHT),
+                        facecolors=TYPE_COLORS.get(current_type, "gray")
+                    )
+                    start_time = t
+                    current_type = itype
+
+                prev_time = t
+
+            # Final segment
+            if start_time is not None:
                 ax.broken_barh(
                     [(start_time, prev_time - start_time)],
                     (y - BAR_HEIGHT / 2, BAR_HEIGHT),
                     facecolors=TYPE_COLORS.get(current_type, "gray")
                 )
-                start_time = t
-                current_type = itype
 
-            prev_time = t
+        # Axis formatting
+        ax.set_yticks(range(len(residues)))
+        ax.set_yticklabels(residues)
+        ax.set_xlabel("Time (ns)")
+        ax.set_ylabel("Residue")
+        ax.set_title(f"{compound_name} Interaction Event Timeline")
 
-        # Final segment
-        if start_time is not None:
-            ax.broken_barh(
-                [(start_time, prev_time - start_time)],
-                (y - BAR_HEIGHT / 2, BAR_HEIGHT),
-                facecolors=TYPE_COLORS.get(current_type, "gray")
-            )
+        ax.set_ylim(-1, len(residues))
+        ax.set_xlim(df["Time_ns"].min(), df["Time_ns"].max())
 
-    # Axis formatting
-    ax.set_yticks(range(len(residues)))
-    ax.set_yticklabels(residues)
-    ax.set_xlabel("Time (ns)")
-    ax.set_ylabel("Residue")
-    ax.set_title(f"{compound_name} Interaction Event Timeline")
+        # Legend
+        legend_elements = [
+            Patch(facecolor=c, label=t) for t, c in TYPE_COLORS.items()
+        ]
+        ax.legend(
+            handles=legend_elements,
+            title="Interaction Type",
+            loc="upper right"
+        )
 
-    ax.set_ylim(-1, len(residues))
-    ax.set_xlim(df["Time_ns"].min(), df["Time_ns"].max())
+        plt.tight_layout()
+        savefig(os.path.join(OUTPUT_DIR, f"{lig_resname}_interaction_event_timeline.png"))
 
-    # Legend
-    legend_elements = [
-        Patch(facecolor=c, label=t) for t, c in TYPE_COLORS.items()
-    ]
-    ax.legend(
-        handles=legend_elements,
-        title="Interaction Type",
-        loc="upper right"
-    )
-
-    plt.tight_layout()
-    savefig(os.path.join(OUTPUT_DIR, f"{lig_resname}_interaction_event_timeline.png"))
-
-    print("✅ STEP E4B complete — Figure 25 interaction event timeline created.")
+        print("✅ STEP E4B complete — Figure 25 interaction event timeline created.")
 
 
 
@@ -2979,36 +3036,34 @@ else:
     phase("STEP E5 — Residue Pie Charts")
     print("\n📊 Generating pie charts for per-residue interaction composition...")
 
-    top_residues = summary.sort_values("Total", ascending=False).head(20).index
-    # top_residues = summary.sort_values("Total", ascending=False).index
+    if summary.empty or summary["Total"].sum() == 0:
+        print("⚠️ No interaction summary data available for STEP E5 — skipping residue pie charts.")
+    else:
+        top_residues = summary.sort_values("Total", ascending=False).head(20).index
+        # top_residues = summary.sort_values("Total", ascending=False).index
 
-    for res in top_residues:
-        print(f"   • Creating pie chart for {res} ...")
+        for res in top_residues:
+            print(f"   • Creating pie chart for {res} ...")
 
-        # Extract full row
-        vals = summary.loc[res][["H-bond", "Hydrophobic", "Ionic"]]
+            vals = summary.loc[res].reindex(PLOT_TYPES, fill_value=0)
+            vals = vals[vals > 0]
 
-        # Remove zero-valued categories
-        vals = vals[vals > 0]
+            if len(vals) == 0:
+                print(f"     ⚠️  Skipping {res} — no nonzero interactions.")
+                continue
 
-        # If a residue somehow has no counted interactions (very rare)
-        if len(vals) == 0:
-            print(f"     ⚠️  Skipping {res} — no nonzero interactions.")
-            continue
+            plt.figure(figsize=(4,4))
+            plt.pie(
+                vals,
+                labels=vals.index,
+                autopct="%1.1f%%",
+                startangle=90,
+                pctdistance=0.75
+            )
+            plt.title(f"{res} Interaction Composition")
+            plt.tight_layout()
 
-        # Make pie chart
-        plt.figure(figsize=(4,4))
-        plt.pie(
-            vals,
-            labels=vals.index,
-            autopct="%1.1f%%",
-            startangle=90,
-            pctdistance=0.75
-        )
-        plt.title(f"{res} Interaction Composition")
-        plt.tight_layout()
-
-        savefig(os.path.join(PIE_DIR, f"pie_{res}.png"))
+            savefig(os.path.join(PIE_DIR, f"pie_{res}.png"))
 
     print("✅ STEP E5 complete — Pie charts saved.\n")
 
@@ -3109,22 +3164,25 @@ else:
     phase("STEP E7B — Composite Distance Histogram")
     print("\n📊 Generating composite histogram of ALL interaction distances...")
 
-    plt.figure(figsize=(10, 7))
+    if int_df.empty:
+        print("⚠️ No interaction rows available for STEP E7B — skipping composite distance histogram.")
+    else:
+        plt.figure(figsize=(10, 7))
 
-    for itype, color in zip(
-        ["H-bond", "Hydrophobic", "Ionic"],
-        ["#4DB6AC", "#64B5F6", "#FFD54F"]
-    ):
-        d = int_df.loc[int_df["Type"] == itype, "Distance"]
-        sns.histplot(d, bins=40, kde=True, label=itype, color=color, alpha=0.6)
+        for itype, color in zip(
+            PLOT_TYPES,
+            ["#4DB6AC", "#64B5F6", "#FFD54F"]
+        ):
+            d = int_df.loc[int_df["Type"] == itype, "Distance"]
+            sns.histplot(d, bins=40, kde=True, label=itype, color=color, alpha=0.6)
 
-    plt.xlabel("Interaction Distance (Å)")
-    plt.ylabel("Count")
-    plt.title(f"{compound_name} – Composite Interaction Distance Distributions")
-    plt.legend()
+        plt.xlabel("Interaction Distance (Å)")
+        plt.ylabel("Count")
+        plt.title(f"{compound_name} – Composite Interaction Distance Distributions")
+        plt.legend()
 
-    savefig(os.path.join(OUTPUT_DIR, "Composite_Distance_Distributions.png"))
-    plt.close()
+        savefig(os.path.join(OUTPUT_DIR, "Composite_Distance_Distributions.png"))
+        plt.close()
 
     print("✅ STEP E7B complete — Composite distance histogram saved.\n")
 
@@ -3136,19 +3194,23 @@ else:
     phase("STEP E8 — Violin Plot by Interaction Type")
     print("\n🎻 Generating violin plot for interaction type distance distributions...")
 
-    plt.figure(figsize=(9,6))
-    sns.violinplot(
-        data=int_df[int_df["Type"].isin(["H-bond","Hydrophobic","Ionic"])],
-        x="Type",
-        y="Distance",
-        palette="Set2"
-    )
+    violin_df = int_df[int_df["Type"].isin(PLOT_TYPES)] if not int_df.empty else int_df
+    if violin_df.empty:
+        print("⚠️ No interaction rows available for STEP E8 — skipping violin plot.")
+    else:
+        plt.figure(figsize=(9,6))
+        sns.violinplot(
+            data=violin_df,
+            x="Type",
+            y="Distance",
+            palette="Set2"
+        )
 
-    plt.title(f"{compound_name} — Distance Distribution by Interaction Type")
-    plt.ylabel("Distance (Å)")
+        plt.title(f"{compound_name} — Distance Distribution by Interaction Type")
+        plt.ylabel("Distance (Å)")
 
-    savefig(os.path.join(OUTPUT_DIR, "interaction_type_violin.png"))
-    plt.close()
+        savefig(os.path.join(OUTPUT_DIR, "interaction_type_violin.png"))
+        plt.close()
 
     print("✅ STEP E8 complete — Violin plot saved.\n")
 
@@ -3159,32 +3221,33 @@ else:
     phase("STEP E9 — Interaction Heatmap")
     print("\n🔥 Generating interaction frequency heatmap...")
 
-    PLOT_TYPES = ["H-bond", "Hydrophobic", "Ionic"]
-
     # Normalize counts → fraction of frames
-    heatmap_df = summary[PLOT_TYPES].div(total_frames)
+    heatmap_df = summary.reindex(columns=PLOT_TYPES, fill_value=0).div(total_frames)
 
-    # Order residues by overall interaction frequency (NOT a Total column)
-    order = heatmap_df.sum(axis=1).sort_values(ascending=False).index
-    heatmap_df = heatmap_df.loc[order]
+    if heatmap_df.empty:
+        print("⚠️ No interaction summary rows available for STEP E9 — skipping interaction heatmap.")
+    else:
+        # Order residues by overall interaction frequency (NOT a Total column)
+        order = heatmap_df.sum(axis=1).sort_values(ascending=False).index
+        heatmap_df = heatmap_df.loc[order]
 
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(
-        heatmap_df,
-        cmap="magma",
-        vmin=0,
-        vmax=1,
-        cbar_kws={
-            "label": "Interaction Frequency\n(fraction of simulation frames)"
-        }
-    )
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(
+            heatmap_df,
+            cmap="magma",
+            vmin=0,
+            vmax=1,
+            cbar_kws={
+                "label": "Interaction Frequency\n(fraction of simulation frames)"
+            }
+        )
 
-    plt.title(f"{compound_name} Interaction Type vs Residue Heatmap")
-    plt.xlabel("Interaction Type")
-    plt.ylabel("Residue")
+        plt.title(f"{compound_name} Interaction Type vs Residue Heatmap")
+        plt.xlabel("Interaction Type")
+        plt.ylabel("Residue")
 
-    savefig(os.path.join(OUTPUT_DIR, "interaction_heatmap_normalized.png"))
-    plt.close()
+        savefig(os.path.join(OUTPUT_DIR, "interaction_heatmap_normalized.png"))
+        plt.close()
 
     print("✅ STEP E9 complete — Normalized interaction heatmap saved.\n")
 
@@ -3201,18 +3264,21 @@ else:
     print("\n🏆 Computing and plotting binding importance ranking...")
 
     importance = (
-        3*summary["H-bond"] +
-        2*summary["Ionic"] +
-        1*summary["Hydrophobic"]
+        3 * summary.reindex(columns=PLOT_TYPES, fill_value=0)["H-bond"] +
+        2 * summary.reindex(columns=PLOT_TYPES, fill_value=0)["Ionic"] +
+        1 * summary.reindex(columns=PLOT_TYPES, fill_value=0)["Hydrophobic"]
     ).sort_values(ascending=False)
 
-    plt.figure(figsize=(10,6))
-    importance.plot(kind="bar", color="slateblue")
-    plt.title("Residue Binding Importance Score")
-    plt.ylabel("Weighted Interaction Score")
-    plt.xlabel("Residue")
+    if importance.empty:
+        print("⚠️ No interaction summary rows available for STEP E10 — skipping binding importance chart.")
+    else:
+        plt.figure(figsize=(10,6))
+        importance.plot(kind="bar", color="slateblue")
+        plt.title("Residue Binding Importance Score")
+        plt.ylabel("Weighted Interaction Score")
+        plt.xlabel("Residue")
 
-    savefig(os.path.join(OUTPUT_DIR, "binding_importance_ranking.png"))
+        savefig(os.path.join(OUTPUT_DIR, "binding_importance_ranking.png"))
 
     print("✅ STEP E10 complete — Binding importance chart saved.\n")
 
@@ -3225,32 +3291,35 @@ else:
 
     phase("STEP E11 — Persistence vs Distance Scatter")
 
-    # --- Compute per-residue mean interaction distance ---
-    mean_dist_series = int_df.groupby("Residue")["Distance"].mean()
+    if int_df.empty or summary.empty:
+        print("⚠️ No interaction rows available for STEP E11 — skipping persistence vs distance scatter.")
+    else:
+        # --- Compute per-residue mean interaction distance ---
+        mean_dist_series = int_df.groupby("Residue")["Distance"].mean()
 
-    # --- Compute persistence fraction for the same residues ---
-    persistence_series = summary["Total"] / total_frames
+        # --- Compute persistence fraction for the same residues ---
+        persistence_series = summary["Total"] / total_frames
 
-    # --- Align indices so x and y match ---
-    common_residues = mean_dist_series.index.intersection(persistence_series.index)
+        # --- Align indices so x and y match ---
+        common_residues = mean_dist_series.index.intersection(persistence_series.index)
 
-    mean_dist = mean_dist_series.loc[common_residues]
-    frac = persistence_series.loc[common_residues]
+        mean_dist = mean_dist_series.loc[common_residues]
+        frac = persistence_series.loc[common_residues]
 
-    # --- Make sure lengths match ---
-    print("Residues used:", len(common_residues))
+        # --- Make sure lengths match ---
+        print("Residues used:", len(common_residues))
 
-    plt.figure(figsize=(10, 6))
-    plt.scatter(mean_dist, frac, s=120, edgecolor="k")
+        plt.figure(figsize=(10, 6))
+        plt.scatter(mean_dist, frac, s=120, edgecolor="k")
 
-    for r in common_residues:
-        plt.text(mean_dist[r], frac[r], r, fontsize=8)
+        for r in common_residues:
+            plt.text(mean_dist[r], frac[r], r, fontsize=8)
 
-    plt.xlabel("Mean Minimum Distance (Å)")
-    plt.ylabel("Persistence Fraction")
-    plt.title(f"{compound_name} — Persistence vs Distance")
+        plt.xlabel("Mean Minimum Distance (Å)")
+        plt.ylabel("Persistence Fraction")
+        plt.title(f"{compound_name} — Persistence vs Distance")
 
-    savefig(os.path.join(OUTPUT_DIR, f"{lig_resname}_persistence_vs_distance.png"))
+        savefig(os.path.join(OUTPUT_DIR, f"{lig_resname}_persistence_vs_distance.png"))
 
     print("✅ STEP E11 complete.")
 

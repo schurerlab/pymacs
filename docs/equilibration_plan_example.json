@@ -1,0 +1,10 @@
+[
+  {
+    "name": "nvt_1",
+    "mdp": "MDPs/nvt.mdp"
+  },
+  {
+    "name": "npt_1",
+    "mdp": "MDPs/npt.mdp"
+  }
+]

@@ -137,17 +137,36 @@ import shutil
 import os
 import json
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Automated GROMACS Step 2: MD equilibration + production run"
+        description="Automated GROMACS Step 2: MD equilibration + production run",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--mode", choices=["ligand", "protein", "peptide", "protac"], required=False)
     p.add_argument("--ligand", type=str, help="3-letter ligand code (required for ligand or protac modes)")
     p.add_argument("--ns", type=float, default=None, help="Production length in nanoseconds (default 50)")
-    p.add_argument("--gpu", type=int, help="GPU ID (optional; auto-detected if omitted)")
+    p.add_argument("--gpu", "--gpu-id", dest="gpu", type=int, help="GPU ID to expose to GROMACS when running in GPU mode.")
+    p.add_argument("--gpu-ids", type=str, default=None, help="Expert override for the exact gmx mdrun -gpu_id value (for example 0 or 01).")
     p.add_argument("--compute", choices=["CPU", "GPU"], default="CPU", help="Computation mode")
-    p.add_argument("--threads", type=int, default=None, help="Number of CPU threads to use (default = auto)")
+    p.add_argument("--no-gpu", action="store_true", help="Force CPU-only execution even if GPUs are available.")
+    p.add_argument("--threads", type=int, default=None, help="Legacy alias for OpenMP thread count (same role as --ntomp).")
+    p.add_argument("--ntomp", type=int, default=None, help="Number of OpenMP threads for gmx mdrun.")
+    p.add_argument("--ntmpi", type=int, default=1, help="Number of MPI ranks passed to gmx mdrun.")
     p.add_argument("--pinoffset", type=int, default=None, help="Starting CPU core index for thread pinning")
+    p.add_argument("--index-file", type=str, default=None, help="Use a user-supplied GROMACS index file instead of auto-generating index.ndx.")
+    p.add_argument("--mdp-dir", type=str, default="MDPs", help="Directory searched for MDP templates when local copies are not present.")
+    p.add_argument("--em-mdp", type=str, default="em.mdp", help="Energy-minimization MDP template.")
+    p.add_argument("--nvt-mdp", type=str, default="nvt.mdp", help="NVT equilibration MDP template.")
+    p.add_argument("--npt-mdp", type=str, default="npt.mdp", help="NPT equilibration MDP template.")
+    p.add_argument("--md-mdp", type=str, default="md.mdp", help="Production MD MDP template.")
+    p.add_argument(
+        "--equilibration-plan",
+        type=str,
+        default=None,
+        help="Optional JSON file describing a custom ordered equilibration plan. If omitted, PyMACS runs the default NVT then NPT sequence.",
+    )
     p.add_argument("--headless", action="store_true",
                    help="Non-interactive mode; skip all prompts and use provided flags")
     p.add_argument("--production_only", action="store_true",
@@ -159,6 +178,13 @@ def parse_args():
 
 
     args = p.parse_args()
+    if args.no_gpu:
+        args.compute = "CPU"
+        args.gpu = -1
+    if args.ntomp is not None and args.ntomp <= 0:
+        p.error("--ntomp must be a positive integer.")
+    if args.ntmpi <= 0:
+        p.error("--ntmpi must be a positive integer.")
 
     # Interactive fallback only when not headless
     if not args.headless and not args.mode:
@@ -172,6 +198,110 @@ def parse_args():
         print(f"🧠 Selected mode: {args.mode}")
 
     return args
+
+
+def append_mdrun_log(directory, message):
+    with open(os.path.join(directory, "mdrun.log"), "a", encoding="utf-8") as handle:
+        handle.write(f"{message}\n")
+
+
+def resolve_existing_path(base_directory, candidate):
+    if not candidate:
+        return None
+    paths = [candidate]
+    if not os.path.isabs(candidate):
+        paths.extend([
+            os.path.join(base_directory, candidate),
+            os.path.join(SCRIPT_DIR, candidate),
+        ])
+    seen = set()
+    for path in paths:
+        abspath = os.path.abspath(path)
+        if abspath in seen:
+            continue
+        seen.add(abspath)
+        if os.path.exists(abspath):
+            return abspath
+    return None
+
+
+def resolve_mdp_template(base_directory, mdp_name_or_path, mdp_dir):
+    basename = os.path.basename(mdp_name_or_path) if mdp_name_or_path else None
+    candidates = []
+    if mdp_name_or_path:
+        candidates.extend([
+            mdp_name_or_path,
+            os.path.join(base_directory, mdp_name_or_path),
+            os.path.join(SCRIPT_DIR, mdp_name_or_path),
+        ])
+    if basename:
+        candidates.extend([
+            os.path.join(base_directory, basename),
+            os.path.join(base_directory, mdp_dir, basename),
+            os.path.join(SCRIPT_DIR, basename),
+            os.path.join(SCRIPT_DIR, mdp_dir, basename),
+        ])
+
+    seen = set()
+    for path in candidates:
+        if not path:
+            continue
+        abspath = os.path.abspath(path)
+        if abspath in seen:
+            continue
+        seen.add(abspath)
+        if os.path.exists(abspath):
+            return abspath
+    return None
+
+
+def prepare_local_mdp_template(directory, source_path, local_name):
+    dest_path = os.path.join(directory, local_name)
+    if os.path.abspath(source_path) != os.path.abspath(dest_path):
+        shutil.copyfile(source_path, dest_path)
+    return dest_path
+
+
+def prepare_standard_mdp_files(directory, args):
+    requested = {
+        "em.mdp": args.em_mdp,
+        "nvt.mdp": args.nvt_mdp,
+        "npt.mdp": args.npt_mdp,
+        "md.mdp": args.md_mdp,
+    }
+    local_paths = {}
+    for local_name, requested_path in requested.items():
+        resolved = resolve_mdp_template(directory, requested_path, args.mdp_dir)
+        if not resolved:
+            raise FileNotFoundError(
+                f"Required MDP template '{requested_path}' for {local_name} was not found. "
+                f"Check --mdp-dir or provide an explicit path."
+            )
+        local_paths[local_name] = prepare_local_mdp_template(directory, resolved, local_name)
+        append_mdrun_log(directory, f"MDP {local_name}: source={resolved} local={local_paths[local_name]}")
+    return local_paths
+
+
+def load_equilibration_plan(plan_path, directory):
+    if not plan_path:
+        return None
+    resolved = resolve_existing_path(directory, plan_path)
+    if not resolved:
+        raise FileNotFoundError(f"Equilibration plan JSON not found: {plan_path}")
+    with open(resolved, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("Equilibration plan must be a non-empty JSON list of stage objects.")
+    normalized = []
+    for idx, item in enumerate(payload, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"Equilibration plan entry {idx} must be a JSON object.")
+        name = str(item.get("name", "")).strip()
+        mdp = str(item.get("mdp", "")).strip()
+        if not name or not mdp:
+            raise ValueError(f"Equilibration plan entry {idx} must define both 'name' and 'mdp'.")
+        normalized.append({"name": name, "mdp": mdp})
+    return resolved, normalized
 
 
 def system_has_virtual_sites(tpr_path: str) -> bool:
@@ -211,7 +341,9 @@ def run_mdrun_with_fallback(
     threads,
     gpu_id,
     use_gpu=True,
-    tpr_check=None
+    tpr_check=None,
+    ntmpi=1,
+    gpu_id_arg=None,
 ):
     """
     Try best GPU profile first; if virtual sites exist, force CPU update.
@@ -246,21 +378,25 @@ def run_mdrun_with_fallback(
     # --------------------
     if use_gpu and gpu_id is not None and gpu_id >= 0:
         for profile in profiles:
+            gpu_selector = gpu_id_arg if gpu_id_arg else "0"
             cmd = (
                 f"{base_cmd} "
                 f"-pin on -pinoffset {pin_offset} "
-                f"-ntmpi 1 -ntomp {threads} "
-                f"-gpu_id 0 {profile['flags']}"
+                f"-ntmpi {ntmpi} -ntomp {threads} "
+                f"-gpu_id {gpu_selector} {profile['flags']}"
             )
 
             print(f"\n🚀 Trying {profile['name']} → {cmd}")
+            append_mdrun_log(cwd, f"mdrun attempt ({profile['name']}): {cmd}")
             rc = run_command_check_rc(cmd, cwd=cwd)
 
             if rc == 0:
                 print(f"✅ Success using {profile['name']}")
+                append_mdrun_log(cwd, f"mdrun success ({profile['name']}): {cmd}")
                 return
 
             print(f"⚠️ {profile['name']} failed, trying next fallback...")
+            append_mdrun_log(cwd, f"mdrun failed ({profile['name']}): {cmd}")
 
     # --------------------
     # CPU fallback
@@ -269,15 +405,17 @@ def run_mdrun_with_fallback(
     cpu_cmd = (
         f"{base_cmd} "
         f"-pin on -pinoffset {pin_offset} "
-        f"-ntmpi 1 -ntomp {threads}"
+        f"-ntmpi {ntmpi} -ntomp {threads}"
     )
 
+    append_mdrun_log(cwd, f"mdrun CPU fallback: {cpu_cmd}")
     rc = run_command_check_rc(cpu_cmd, cwd=cwd)
     if rc != 0:
         print("❌ CPU fallback also failed. Aborting.")
         exit(rc)
 
     print("✅ CPU-only execution successful")
+    append_mdrun_log(cwd, f"mdrun CPU success: {cpu_cmd}")
 
 
 
@@ -543,7 +681,8 @@ def save_peptide_chainmap(directory=".", peptide_info=None):
         print(f"⚠️ Could not save {path}: {e}")
 
 
-def maybe_resume_production_only(directory, args, gpu_id, pin_offset, threads, use_gpu, target_ns, md_deffnm="md_0_1"):
+def maybe_resume_production_only(directory, args, gpu_id, pin_offset, threads, use_gpu, target_ns,
+                                 md_deffnm="md_0_1", ntmpi=1, gpu_id_arg=None):
     md_tpr = os.path.join(directory, f"{md_deffnm}.tpr")
     md_cpt = os.path.join(directory, f"{md_deffnm}.cpt")
     md_prev_cpt = os.path.join(directory, f"{md_deffnm}_prev.cpt")
@@ -588,7 +727,9 @@ def maybe_resume_production_only(directory, args, gpu_id, pin_offset, threads, u
         threads=threads,
         gpu_id=gpu_id,
         use_gpu=use_gpu,
-        tpr_check=f"{md_deffnm}.tpr"   # ✅ ADD THIS
+        tpr_check=f"{md_deffnm}.tpr",
+        ntmpi=ntmpi,
+        gpu_id_arg=gpu_id_arg,
     )
 
 
@@ -840,8 +981,6 @@ def get_numa_cores_for_gpu(gpu_id: int):
     return list(range(start, end))
 
 
-import os, subprocess, psutil
-
 def set_env(gpu_id:int, threads:int, offset:int):
     """Prepare environment vars for proper GPU/CPU pinning."""
     env = os.environ.copy()
@@ -945,6 +1084,80 @@ def standardize_mdp_groups(mdp_path, coupling_group_str):
         f.writelines(filtered)
 
 
+def set_md_nsteps(md_path, simulation_time_ns):
+    if not os.path.exists(md_path):
+        print(f"❌ ERROR: md.mdp not found: {md_path}")
+        exit(1)
+
+    nsteps = int(round(simulation_time_ns * 500000))
+    with open(md_path, "r", encoding="utf-8") as handle:
+        lines = handle.readlines()
+
+    updated = []
+    found_nsteps = False
+    for line in lines:
+        if line.strip().startswith("nsteps"):
+            updated.append(f"nsteps                  = {nsteps}\n")
+            found_nsteps = True
+        else:
+            updated.append(line)
+    if not found_nsteps:
+        updated.append(f"nsteps                  = {nsteps}\n")
+
+    with open(md_path, "w", encoding="utf-8") as handle:
+        handle.writelines(updated)
+    return nsteps
+
+
+def maybe_use_custom_index(directory, args):
+    if not args.index_file:
+        return False
+    resolved = resolve_existing_path(directory, args.index_file)
+    if not resolved:
+        print(f"❌ User-supplied index file not found: {args.index_file}")
+        exit(1)
+    dest_path = os.path.join(directory, "index.ndx")
+    backup_path = os.path.join(directory, "index.user_supplied.ndx")
+    shutil.copyfile(resolved, dest_path)
+    if os.path.abspath(resolved) != os.path.abspath(backup_path):
+        shutil.copyfile(resolved, backup_path)
+    print(f"📋 Using user-supplied index file: {resolved}")
+    append_mdrun_log(directory, f"Index mode: user-supplied ({resolved})")
+    return True
+
+
+def run_equilibration_stage(stage_name, mdp_path, start_gro, ref_gro, prev_cpt, directory,
+                            pin_offset, available_threads, gpu_id, use_gpu, ntmpi, gpu_id_arg,
+                            coupling_group_str):
+    local_name = f"{stage_name}.mdp"
+    local_mdp = prepare_local_mdp_template(directory, mdp_path, local_name)
+    standardize_mdp_groups(local_mdp, coupling_group_str)
+    append_mdrun_log(directory, f"Equilibration stage {stage_name}: mdp={mdp_path} local={local_mdp}")
+
+    grompp_cmd = (
+        f"gmx grompp -f {local_name} -c {os.path.basename(start_gro)} "
+        f"-r {os.path.basename(ref_gro)} "
+    )
+    if prev_cpt and os.path.exists(prev_cpt):
+        grompp_cmd += f"-t {os.path.basename(prev_cpt)} "
+    grompp_cmd += f"-p topol.top -n index.ndx -o {stage_name}.tpr -maxwarn 2"
+
+    print(f"🧪 Running custom equilibration stage '{stage_name}'")
+    append_mdrun_log(directory, f"grompp ({stage_name}): {grompp_cmd}")
+    run_command_cpu(grompp_cmd, cwd=directory)
+    run_mdrun_with_fallback(
+        base_cmd=f"gmx mdrun -v -deffnm {stage_name}",
+        cwd=directory,
+        pin_offset=pin_offset,
+        threads=available_threads,
+        gpu_id=gpu_id,
+        use_gpu=use_gpu,
+        ntmpi=ntmpi,
+        gpu_id_arg=gpu_id_arg,
+    )
+    return os.path.join(directory, f"{stage_name}.gro"), os.path.join(directory, f"{stage_name}.cpt")
+
+
 def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns, use_gpu, args, peptide_info=None):
     """
     Runs full MD simulation setup on a specified GPU, with dynamic MDP configuration.
@@ -959,6 +1172,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
 
     available_cores = multiprocessing.cpu_count()
     print(f"🧠 Detected {available_cores} total CPU cores on system.")
+    gpu_id_arg = args.gpu_ids if getattr(args, "gpu_ids", None) else ("0" if gpu_id is not None and gpu_id >= 0 else None)
 
     # --- Detect GPUs ---
     try:
@@ -1022,7 +1236,9 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         print(f"🤖 Headless mode: auto-accepted NUMA mapping → threads={threads}, pin offset={pin_offset}")
 
     # --- Apply CLI overrides ---
-    if getattr(args, "threads", None):
+    if getattr(args, "ntomp", None):
+        threads = int(args.ntomp)
+    elif getattr(args, "threads", None):
         threads = int(args.threads)
     if getattr(args, "pinoffset", None):
         pin_offset = int(args.pinoffset)
@@ -1033,9 +1249,14 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     if gpu_id is not None and gpu_id >= 0:
         # Map the chosen physical GPU (e.g., 1 or 2) into a single visible device (index 0)
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        os.environ["GMX_FORCE_GPU_ID"] = "0"  # GROMACS now always sees it as device 0
-        print(f"🎯 Forcing isolation: physical GPU {gpu_id} → visible GPU 0")
+        if args.gpu_ids:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_ids)
+            os.environ.pop("GMX_FORCE_GPU_ID", None)
+            print(f"🎯 Using user-specified GPU visibility string: {args.gpu_ids}")
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+            os.environ["GMX_FORCE_GPU_ID"] = "0"  # GROMACS now always sees it as device 0
+            print(f"🎯 Forcing isolation: physical GPU {gpu_id} → visible GPU 0")
     else:
         # No GPU explicitly chosen: expose all GPUs
         try:
@@ -1060,9 +1281,15 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         print(f"   • GPU {gpu_id}: {gpu_list[gpu_id]} (cores {suggested_offset}–{cores[-1]})")
     else:
         print("   • CPU-only mode active.")
-    print(f"   • Using {available_threads} threads, pin offset {pin_offset}")
+    print(f"   • Using {available_threads} OpenMP thread(s), pin offset {pin_offset}")
+    print(f"   • Using {args.ntmpi} MPI rank(s)")
     print(f"   • CUDA_VISIBLE_DEVICES={gpu_id if gpu_id >= 0 else 'None'}")
     print(f"   • OMP_NUM_THREADS={available_threads}")
+    if gpu_id_arg:
+        print(f"   • gmx mdrun -gpu_id {gpu_id_arg}")
+
+    append_mdrun_log(directory, f"Compute mode: {'GPU' if use_gpu else 'CPU'}")
+    append_mdrun_log(directory, f"Resources: ntmpi={args.ntmpi} ntomp={available_threads} pinoffset={pin_offset} gpu_id={gpu_id} gpu_id_arg={gpu_id_arg}")
 
 
 
@@ -1076,7 +1303,9 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         threads=available_threads,
         use_gpu=use_gpu,
         target_ns=simulation_time_ns,
-        md_deffnm="md_0_1"
+        md_deffnm="md_0_1",
+        ntmpi=args.ntmpi,
+        gpu_id_arg=gpu_id_arg,
     ):
         return  # <- IMPORTANT: skip steps 1–7 entirely
 
@@ -1086,7 +1315,11 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     # ============================================================
     print("\n🧩 [STEP 1] Updating MDP files (tc-grps, comm-grps, nsteps) ...")
 
-    mdp_files = ["md.mdp", "nvt.mdp", "npt.mdp"]
+    try:
+        mdp_files = prepare_standard_mdp_files(directory, args)
+    except FileNotFoundError as exc:
+        print(f"❌ {exc}")
+        exit(1)
 
     # Decide the exact thermostat / COM groups based on system type
     if ligand_code:
@@ -1094,62 +1327,12 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     else:
         coupling_group_str = "Protein Water_and_ions"
 
-    for mdp in mdp_files:
-        mdp_path = os.path.join(directory, mdp)
-        if not os.path.exists(mdp_path):
-            print(f"❌ ERROR: Required file {mdp} not found.")
-            exit(1)
-
-        with open(mdp_path) as f:
-            lines = f.readlines()
-
-        filtered = []
-        found_tc = False
-        found_comm_mode = False
-        found_comm_grps = False
-
-        for line in lines:
-            stripped = line.strip()
-
-            if stripped.startswith("tc-grps"):
-                filtered.append(f"tc-grps                 = {coupling_group_str}\n")
-                found_tc = True
-            elif stripped.startswith("comm-mode"):
-                filtered.append("comm-mode               = Linear\n")
-                found_comm_mode = True
-            elif stripped.startswith("comm-grps"):
-                filtered.append(f"comm-grps               = {coupling_group_str}\n")
-                found_comm_grps = True
-            else:
-                filtered.append(line)
-
-        # Ensure required entries exist even if missing from template
-        if not found_tc:
-            filtered.append(f"tc-grps                 = {coupling_group_str}\n")
-        if not found_comm_mode:
-            filtered.append("comm-mode               = Linear\n")
-        if not found_comm_grps:
-            filtered.append(f"comm-grps               = {coupling_group_str}\n")
-
-        with open(mdp_path, "w") as f:
-            f.writelines(filtered)
+    for mdp in ["md.mdp", "nvt.mdp", "npt.mdp"]:
+        standardize_mdp_groups(mdp_files[mdp], coupling_group_str)
 
     print(f"🛠️ Standardized tc-grps/comm-grps to: {coupling_group_str}")
 
-    # Update nsteps in md.mdp (dt=0.002 ps → 500,000 steps/ns)
-    md_path = os.path.join(directory, "md.mdp")
-    if not os.path.exists(md_path):
-        print("❌ ERROR: md.mdp not found.")
-        exit(1)
-
-    nsteps = int(round(simulation_time_ns * 500000))
-    with open(md_path) as f:
-        lines = [
-            f"nsteps                  = {nsteps}\n" if l.strip().startswith("nsteps") else l
-            for l in f
-        ]
-    with open(md_path, "w") as f:
-        f.writelines(lines)
+    nsteps = set_md_nsteps(mdp_files["md.mdp"], simulation_time_ns)
 
     print(f"🧮 Set nsteps = {nsteps} (~{simulation_time_ns} ns).")
     print("✅ Finished MDP standardization.\n")
@@ -1177,7 +1360,9 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         pin_offset=pin_offset,
         threads=available_threads,
         gpu_id=gpu_id,
-        use_gpu=use_gpu
+        use_gpu=use_gpu,
+        ntmpi=args.ntmpi,
+        gpu_id_arg=gpu_id_arg,
     )
 
     print("✅ Energy minimization complete.\n")
@@ -1263,6 +1448,8 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     # ============================================================
     print("\n🧩 [STEP 5] Building clean index.ndx ...")
 
+    custom_index_in_use = maybe_use_custom_index(directory, args)
+
     # ------------------------------------------------------------
     # 5A — Clean old index files
     # ------------------------------------------------------------
@@ -1270,10 +1457,11 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     if ligand_code:
         cleanup_files.append(f"index_{ligand_code.lower()}.ndx")
 
-    for f in cleanup_files:
-        fp = os.path.join(directory, f)
-        if os.path.exists(fp):
-            os.remove(fp)
+    if not custom_index_in_use:
+        for f in cleanup_files:
+            fp = os.path.join(directory, f)
+            if os.path.exists(fp):
+                os.remove(fp)
 
     # ------------------------------------------------------------
     # 5B — Ensure ligand restraint file exists if ligand is present
@@ -1324,7 +1512,15 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     # ------------------------------------------------------------
     simtype = simulation_type.upper().strip()
 
-    if (not ligand_code) and (simtype != "PROTAC"):
+    if custom_index_in_use:
+        if (not ligand_code) and (simtype != "PROTAC"):
+            expected_group = "Protein"
+            expected_water_group = "Water_and_ions"
+        else:
+            expected_group = f"Protein_{ligand_code.upper()}"
+            expected_water_group = "Water_and_ions"
+        print("📋 Skipping index auto-generation because --index-file was provided.")
+    elif (not ligand_code) and (simtype != "PROTAC"):
         # ========================================================
         # PROTEIN-ONLY MODE
         # ========================================================
@@ -1436,16 +1632,9 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
 
     print(f"✅ Verified Step 5 index groups exist: {expected_group}, {expected_water_group}\n")
 
-
-
     # ============================================================
-    # 🌡️ 6. NVT Equilibration
+    # 🌡️ 6–7. Equilibration
     # ============================================================
-    print("🌡️ [STEP 6] Starting NVT equilibration ...")
-
-    # ------------------------------------------------------------
-    # 6A — Determine the exact coupling group expected for this system
-    # ------------------------------------------------------------
     if ligand_code:
         expected_group = f"Protein_{ligand_code.upper()}"
         coupling_group_str = f"{expected_group} Water_and_ions"
@@ -1453,26 +1642,16 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         expected_group = "Protein"
         coupling_group_str = "Protein Water_and_ions"
 
-    print(f"🧭 Expected NVT coupling/index group: {expected_group}")
+    print(f"🧭 Expected equilibration coupling/index group: {expected_group}")
 
-    # ------------------------------------------------------------
-    # 6B — Force nvt.mdp to match the actual simulation mode
-    # ------------------------------------------------------------
-    nvt_mdp_path = os.path.join(directory, "nvt.mdp")
-    standardize_mdp_groups(nvt_mdp_path, coupling_group_str)
-    print(f"✅ Standardized nvt.mdp groups to: {coupling_group_str}")
-
-    # ------------------------------------------------------------
-    # 6C — Validate that index.ndx contains the groups nvt.mdp expects
-    # ------------------------------------------------------------
     index_path = os.path.join(directory, "index.ndx")
     if not os.path.exists(index_path):
-        print("❌ FATAL: index.ndx not found before NVT grompp.")
+        print("❌ FATAL: index.ndx not found before equilibration grompp.")
         exit(1)
 
     if not index_has_group(index_path, expected_group):
         print(f"❌ FATAL: Expected index group '{expected_group}' not found in index.ndx")
-        print("   The NVT MDP file and index file are out of sync.")
+        print("   The equilibration MDP file and index file are out of sync.")
         print("\n📋 Groups found in index.ndx:")
         with open(index_path, "r") as f:
             for line in f:
@@ -1483,7 +1662,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
 
     if not index_has_group(index_path, "Water_and_ions"):
         print("❌ FATAL: Expected index group 'Water_and_ions' not found in index.ndx")
-        print("   The default solvent/ion group is missing from the generated index.")
+        print("   The default solvent/ion group is missing from the generated or supplied index.")
         print("\n📋 Groups found in index.ndx:")
         with open(index_path, "r") as f:
             for line in f:
@@ -1494,51 +1673,81 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
 
     print(f"✅ Verified index groups exist: {expected_group}, Water_and_ions")
 
-    # ------------------------------------------------------------
-    # 6D — Build NVT TPR
-    # ------------------------------------------------------------
-    run_command_cpu(
-        "gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -n index.ndx -o nvt.tpr -maxwarn 2",
-        cwd=directory
-    )
+    equilibration_start_gro = os.path.join(directory, "em.gro")
+    equilibration_ref_gro = os.path.join(directory, "em.gro")
+    equilibration_cpt = None
 
-    # ------------------------------------------------------------
-    # 6E — Run NVT with GPU→fallback handling
-    # ------------------------------------------------------------
-    run_mdrun_with_fallback(
-        base_cmd="gmx mdrun -v -deffnm nvt",
-        cwd=directory,
-        pin_offset=pin_offset,
-        threads=available_threads,
-        gpu_id=gpu_id,
-        use_gpu=use_gpu
-    )
+    plan_info = None
+    if args.equilibration_plan:
+        try:
+            plan_info = load_equilibration_plan(args.equilibration_plan, directory)
+        except Exception as exc:
+            print(f"❌ Invalid equilibration plan: {exc}")
+            exit(1)
 
-    print("✅ NVT equilibration complete.\n")
+    if plan_info:
+        plan_path, plan_rows = plan_info
+        print(f"🧭 [STEP 6] Running custom equilibration plan from {plan_path}")
+        append_mdrun_log(directory, f"Equilibration plan: {plan_path}")
+        for item in plan_rows:
+            resolved_stage_mdp = resolve_mdp_template(directory, item["mdp"], args.mdp_dir)
+            if not resolved_stage_mdp:
+                print(f"❌ Could not locate equilibration stage MDP: {item['mdp']}")
+                exit(1)
+            equilibration_start_gro, equilibration_cpt = run_equilibration_stage(
+                stage_name=item["name"],
+                mdp_path=resolved_stage_mdp,
+                start_gro=equilibration_start_gro,
+                ref_gro=equilibration_ref_gro,
+                prev_cpt=equilibration_cpt,
+                directory=directory,
+                pin_offset=pin_offset,
+                available_threads=available_threads,
+                gpu_id=gpu_id,
+                use_gpu=use_gpu,
+                ntmpi=args.ntmpi,
+                gpu_id_arg=gpu_id_arg,
+                coupling_group_str=coupling_group_str,
+            )
+        print("✅ Custom equilibration plan complete.\n")
+    else:
+        print("🌡️ [STEP 6] Starting NVT equilibration ...")
+        append_mdrun_log(directory, "grompp (nvt): gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -n index.ndx -o nvt.tpr -maxwarn 2")
+        run_command_cpu(
+            "gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -n index.ndx -o nvt.tpr -maxwarn 2",
+            cwd=directory
+        )
+        run_mdrun_with_fallback(
+            base_cmd="gmx mdrun -v -deffnm nvt",
+            cwd=directory,
+            pin_offset=pin_offset,
+            threads=available_threads,
+            gpu_id=gpu_id,
+            use_gpu=use_gpu,
+            ntmpi=args.ntmpi,
+            gpu_id_arg=gpu_id_arg,
+        )
+        print("✅ NVT equilibration complete.\n")
 
-
-    # ============================================================
-    # 💧 7. NPT Equilibration
-    # ============================================================
-    
-    print("💧 [STEP 7] Starting NPT equilibration ...")
-
-    run_command_cpu(
-        "gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -n index.ndx -o npt.tpr -maxwarn 2",
-        cwd=directory
-    )
-
-    # ✅ GPU→GPU-lite→CPU fallback
-    run_mdrun_with_fallback(
-        base_cmd="gmx mdrun -v -deffnm npt",
-        cwd=directory,
-        pin_offset=pin_offset,
-        threads=available_threads,
-        gpu_id=gpu_id,
-        use_gpu=use_gpu
-    )
-
-    print("✅ NPT equilibration complete.\n")
+        print("💧 [STEP 7] Starting NPT equilibration ...")
+        append_mdrun_log(directory, "grompp (npt): gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -n index.ndx -o npt.tpr -maxwarn 2")
+        run_command_cpu(
+            "gmx grompp -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top -n index.ndx -o npt.tpr -maxwarn 2",
+            cwd=directory
+        )
+        run_mdrun_with_fallback(
+            base_cmd="gmx mdrun -v -deffnm npt",
+            cwd=directory,
+            pin_offset=pin_offset,
+            threads=available_threads,
+            gpu_id=gpu_id,
+            use_gpu=use_gpu,
+            ntmpi=args.ntmpi,
+            gpu_id_arg=gpu_id_arg,
+        )
+        equilibration_start_gro = os.path.join(directory, "npt.gro")
+        equilibration_cpt = os.path.join(directory, "npt.cpt")
+        print("✅ NPT equilibration complete.\n")
 
 
     # ============================================================
@@ -1552,8 +1761,16 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
 
     # build / rebuild TPR if needed
     if not (os.path.exists(md_tpr) and os.path.exists(md_cpt)):
+        append_mdrun_log(
+            directory,
+            f"grompp (production): gmx grompp -f md.mdp -c {os.path.basename(equilibration_start_gro)} "
+            + (f"-t {os.path.basename(equilibration_cpt)} " if equilibration_cpt and os.path.exists(equilibration_cpt) else "")
+            + f"-p topol.top -n index.ndx -o {md_deffnm}.tpr -maxwarn 2"
+        )
         run_command_cpu(
-            "gmx grompp -f md.mdp -c npt.gro -t npt.cpt -p topol.top -n index.ndx "
+            f"gmx grompp -f md.mdp -c {os.path.basename(equilibration_start_gro)} "
+            + (f"-t {os.path.basename(equilibration_cpt)} " if equilibration_cpt and os.path.exists(equilibration_cpt) else "")
+            + "-p topol.top -n index.ndx "
             f"-o {md_deffnm}.tpr -maxwarn 2",
             cwd=directory
         )
@@ -1572,7 +1789,9 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         threads=available_threads,
         gpu_id=gpu_id,
         use_gpu=use_gpu,
-        tpr_check=f"{md_deffnm}.tpr"
+        tpr_check=f"{md_deffnm}.tpr",
+        ntmpi=args.ntmpi,
+        gpu_id_arg=gpu_id_arg,
     )
 
     print("✅ Production MD complete.\n")
