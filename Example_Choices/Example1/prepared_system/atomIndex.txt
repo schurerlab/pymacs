@@ -1,0 +1,1 @@
+HDGF 1-1443 # current_chain=A chain_type=protein current_residues=1-90 source_chain=C source_residues=3-92 source_rescount=90

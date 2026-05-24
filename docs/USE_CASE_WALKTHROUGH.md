@@ -1,23 +1,42 @@
 # Use Case Walkthrough
 
-This walkthrough documents a reviewer-visible PyMACS workflow using only files that are currently present in this repository.
+This walkthrough documents reviewer-visible PyMACS workflows using the four curated examples now included in this repository under `Example_Choices/`.
 
-## Available example inputs in this repo
+## Curated example sets in this repo
 
-The repository currently includes:
+- `Example_Choices/Example1`
+  Purpose: conventional protein-ligand workflow for `CPD32_9G94` with ligand `A1D`.
+  Main input file: `Example_Choices/Example1/input/CPD32_9G94.pdb`
+  Parameter files: `Example_Choices/Example1/parameters/A1D/A1D.str`, `Example_Choices/Example1/parameters/A1D/A1D.cgenff.mol2`, plus converted `a1d.itp`, `a1d.prm`, and `posre_a1d.itp`.
+  `prepared_system/`: solvated and indexed setup outputs such as `solv_ions.gro`, `topol.top`, `index.ndx`, `protein_processed.gro`, and setup registries.
+  `completed_run/`: production trajectory files, analysis-ready trajectories, and `MD_ANALYSIS_FIGUREBOOK.pdf`.
 
-- `Example/CPD32_9G94.pdb`
-- `Example/A1D/A1D.cgenff.mol2`
-- `Example/A1D/A1D.str`
-- `Example/MD_ANALYSIS_FIGUREBOOK.pdf`
+- `Example_Choices/Example2`
+  Purpose: cofactor-aware receptor workflow for `9UWJ` / `AVPR1A` with retained `A1E` ligand and `CLR` cofactor.
+  Main input file: `Example_Choices/Example2/input/9UWJ.cif` with curated PDB exports in the same `input/` folder.
+  Parameter files: `Example_Choices/Example2/parameters/A1E.str`, `Example_Choices/Example2/parameters/A1E.cgenff.mol2`, `Example_Choices/Example2/parameters/CLR.str`, `Example_Choices/Example2/parameters/CLR.cgenff.mol2`, plus converted topology files.
+  `prepared_system/`: multi-chain topology outputs, indexes, component registries, and solvated system files.
+  `completed_run/`: representative production MD files including `md_0_1.tpr`, `md_0_1.gro`, `md_0_1.xtc`, and `md_0_1.edr`.
 
-The `Example/` directory also contains additional structure files such as `1URN.pdb`, `5T35.pdb`, and `9UWJ.pdb`. These are useful representative inputs for supported workflow branches, but they are not packaged here as full reproducible walkthroughs with complete associated ligand/cofactor parameter bundles and finished output trees.
+- `Example_Choices/Example3`
+  Purpose: RNA/protein biological assembly workflow for `1URN`.
+  Main input file: `Example_Choices/Example3/input/1URN.pdb`
+  Parameter files: none required beyond the bundled force-field-derived topology outputs in the example tree.
+  `prepared_system/`: RNA and protein chain topology/position-restraint files, indexes, registries, and solvated setup outputs.
+  `completed_run/`: representative production files, analysis trajectories, pocket exports, and `MD_ANALYSIS_FIGUREBOOK.pdf`.
+
+- `Example_Choices/Example4`
+  Purpose: PROTAC ternary-complex workflow for `5T35` with `PTC`.
+  Main input file: `Example_Choices/Example4/input/5T35.pdb`
+  Parameter files: `Example_Choices/Example4/parameters/PTC.str`, `Example_Choices/Example4/parameters/PTC.cgenff.mol2`, plus converted `ptc.itp`, `ptc.prm`, and `posre_ptc.itp`.
+  `prepared_system/`: ternary-complex topology outputs, indexes, component registries, and solvated system files.
+  `completed_run/`: representative production MD files including `md_0_1.tpr`, `md_0_1.gro`, `md_0_1.xtc`, and `md_0_1.edr`.
 
 ## Scope and limitations
 
-- The primary packaged reproducible walkthrough in this repository is the `CPD32_9G94` plus `A1D` protein-ligand example.
-- Additional representative cofactor-aware, RNA-containing, and PROTAC/ternary-complex execution traces are described in the supplementary information associated with the manuscript. These examples demonstrate supported workflow branches, while the packaged repository walkthrough focuses on the included protein-ligand example.
-- The repository does support cofactor-aware selection, CIF/mmCIF intake, polymer-chain pruning, biological-system analysis branches, and PROTAC analysis code paths, but those branches are not all distributed here as complete runnable example folders with every required companion input.
+- The repository now packages four curated example trees that cover protein-ligand, cofactor-aware receptor, RNA/protein assembly, and PROTAC ternary-complex workflows.
+- The command walkthrough below still uses `Example1` as the shortest end-to-end reproducible demo.
+- The repository also supports additional workflow branches beyond these curated examples, but the examples above are the public reference layouts included directly in the repo.
 
 ## Recommended run-directory setup
 
@@ -44,10 +63,10 @@ cp ../../MDPs/md.mdp .
 cp -r ../../charmm36.ff .
 cp -r ../../charmm36_ljpme-jul2022.ff .
 
-cp ../../Example/CPD32_9G94.pdb .
+cp ../../Example_Choices/Example1/input/CPD32_9G94.pdb .
 mkdir -p A1D
-cp ../../Example/A1D/A1D.str ./A1D/
-cp ../../Example/A1D/A1D.cgenff.mol2 ./A1D/
+cp ../../Example_Choices/Example1/parameters/A1D/A1D.str ./A1D/
+cp ../../Example_Choices/Example1/parameters/A1D/A1D.cgenff.mol2 ./A1D/
 ```
 
 ## Step 1: system preparation
@@ -177,7 +196,7 @@ Expected Step 4 output:
 
 Compare the result against:
 
-- `../../Example/MD_ANALYSIS_FIGUREBOOK.pdf`
+- `../../Example_Choices/Example1/completed_run/MD_ANALYSIS_FIGUREBOOK.pdf`
 
 If a run is analyzed in PROTAC mode and `Analysis_Results/PROTAC/QC/protac_figure_manifest.csv` exists, `4PDF4MD.py` switches automatically into its PROTAC figurebook path and writes `PROTAC_MD_ANALYSIS_FIGUREBOOK.pdf` instead of the standard report.
 

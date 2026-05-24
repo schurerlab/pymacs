@@ -1,0 +1,25 @@
+{
+  "primary_ligand": "A1D",
+  "cofactors": [],
+  "all_components": [
+    "A1D"
+  ],
+  "dropped_components": [],
+  "detected_components": {
+    "A1D": {
+      "copies": 1,
+      "atom_count_raw_pdb": 12,
+      "instance_labels": [
+        "C:101"
+      ],
+      "recommended_role": "candidate_primary_ligand",
+      "category": "ligand_like",
+      "excluded_by_default": false,
+      "warning": null
+    }
+  },
+  "molecule_counts": {
+    "A1D": 1
+  },
+  "analysis_ligand": "A1D"
+}

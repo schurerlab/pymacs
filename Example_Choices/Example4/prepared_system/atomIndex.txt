@@ -1,0 +1,2 @@
+VHL 1-2445 # current_chain=A chain_type=protein current_residues=1-149 source_chain=D source_residues=1-149 source_rescount=149
+BRD4 2446-4244 # current_chain=B chain_type=protein current_residues=1-111 source_chain=A source_residues=151-261 source_rescount=111

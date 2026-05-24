@@ -1,0 +1,25 @@
+{
+  "system_class": "protein_only",
+  "polymer_chains": {
+    "A": "protein"
+  },
+  "polymer_chain_summaries": [
+    {
+      "chain_id": "A",
+      "chain_type": "protein",
+      "residue_count": 90,
+      "first_resname": "HIS",
+      "first_resid": "1",
+      "last_resname": "TYR",
+      "last_resid": "90",
+      "has_5prime_phosphate": false,
+      "chosen_start_terminus": "NH2",
+      "chosen_end_terminus": "COO-"
+    }
+  ],
+  "has_protein": true,
+  "has_nucleic_acid": false,
+  "has_rna": false,
+  "has_dna": false,
+  "warnings": []
+}

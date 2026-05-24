@@ -61,7 +61,6 @@ rmsf*.csv
 *.png
 *.svg
 *.pdf
-!Example/**/*.pdf
 !images/**/*.png
 !images/**/*.svg
 
@@ -90,3 +89,58 @@ REVIEWER_RESPONSE_IMPLEMENTATION_LOG.md
 *.tmp
 *.old
 Pasted text*.txt
+
+# Ignore GROMACS backup/hash files everywhere, e.g. #topol.top.1#
+\#*#
+
+# Local-only staging / backup artifacts
+_raw_kyle_examples/
+_example_backups_*/
+_example_choices_backup_*/
+_*/
+package_pymacs_examples.sh
+rebuild_example_choices_from_raw.sh
+clean_example_clutter.sh
+
+# --------------------------------------------------------------------
+# PyMACS curated examples under Example_Choices/
+# --------------------------------------------------------------------
+
+!Example_Choices/
+!Example_Choices/Example1/
+!Example_Choices/Example2/
+!Example_Choices/Example3/
+!Example_Choices/Example4/
+
+!Example_Choices/Example1/**
+!Example_Choices/Example2/**
+!Example_Choices/Example3/**
+!Example_Choices/Example4/**
+
+# Re-ignore clutter inside curated examples
+Example_Choices/**/__pycache__/
+Example_Choices/**/.ipynb_checkpoints/
+Example_Choices/**/.DS_Store
+Example_Choices/**/*.log
+Example_Choices/**/*.stderr.log
+Example_Choices/**/*.stdout.log
+Example_Choices/**/*_raw.pdb
+Example_Choices/**/*_h.pdb
+Example_Choices/**/*_template_raw.pdb
+Example_Choices/**/*.perceived.*
+Example_Choices/**/*.extract_hadd.pml
+Example_Choices/**/environment_*.yml
+Example_Choices/**/recreate_envs.sh
+Example_Choices/**/docs/
+Example_Choices/**/images/
+Example_Choices/**/PaperNotes/
+Example_Choices/**/charmm36.ff/
+Example_Choices/**/charmm36_ljpme-jul2022.ff/
+Example_Choices/**/EBGaramond-VariableFont_wght.ttf
+Example_Choices/**/\#*#
+
+# Re-allow completed outputs inside curated examples
+!Example_Choices/**/completed_run/
+!Example_Choices/**/completed_run/**
+!Example_Choices/**/completed_run/Analysis_Results/
+!Example_Choices/**/completed_run/Analysis_Results/**

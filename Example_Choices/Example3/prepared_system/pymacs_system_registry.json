@@ -1,0 +1,90 @@
+{
+  "system_class": "protein_rna",
+  "polymer_chains": {
+    "A": "RNA",
+    "B": "RNA",
+    "C": "RNA",
+    "D": "protein",
+    "E": "protein",
+    "F": "protein"
+  },
+  "polymer_chain_summaries": [
+    {
+      "chain_id": "A",
+      "chain_type": "RNA",
+      "residue_count": 20,
+      "first_resname": "A",
+      "first_resid": "1",
+      "last_resname": "U",
+      "last_resid": "20",
+      "has_5prime_phosphate": false,
+      "chosen_start_terminus": "5TER",
+      "chosen_end_terminus": "3TER"
+    },
+    {
+      "chain_id": "B",
+      "chain_type": "RNA",
+      "residue_count": 21,
+      "first_resname": "A",
+      "first_resid": "1",
+      "last_resname": "U",
+      "last_resid": "21",
+      "has_5prime_phosphate": false,
+      "chosen_start_terminus": "5TER",
+      "chosen_end_terminus": "3TER"
+    },
+    {
+      "chain_id": "C",
+      "chain_type": "RNA",
+      "residue_count": 20,
+      "first_resname": "A",
+      "first_resid": "1",
+      "last_resname": "U",
+      "last_resid": "20",
+      "has_5prime_phosphate": false,
+      "chosen_start_terminus": "5TER",
+      "chosen_end_terminus": "3TER"
+    },
+    {
+      "chain_id": "D",
+      "chain_type": "protein",
+      "residue_count": 96,
+      "first_resname": "ALA",
+      "first_resid": "1",
+      "last_resname": "MET",
+      "last_resid": "96",
+      "has_5prime_phosphate": false,
+      "chosen_start_terminus": "NH2",
+      "chosen_end_terminus": "COO-"
+    },
+    {
+      "chain_id": "E",
+      "chain_type": "protein",
+      "residue_count": 96,
+      "first_resname": "ALA",
+      "first_resid": "1",
+      "last_resname": "MET",
+      "last_resid": "96",
+      "has_5prime_phosphate": false,
+      "chosen_start_terminus": "NH2",
+      "chosen_end_terminus": "COO-"
+    },
+    {
+      "chain_id": "F",
+      "chain_type": "protein",
+      "residue_count": 96,
+      "first_resname": "ALA",
+      "first_resid": "1",
+      "last_resname": "MET",
+      "last_resid": "96",
+      "has_5prime_phosphate": false,
+      "chosen_start_terminus": "NH2",
+      "chosen_end_terminus": "COO-"
+    }
+  ],
+  "has_protein": true,
+  "has_nucleic_acid": true,
+  "has_rna": true,
+  "has_dna": false,
+  "warnings": []
+}

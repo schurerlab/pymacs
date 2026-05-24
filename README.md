@@ -12,10 +12,10 @@
   <a href="https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6584500">
     <img src="https://img.shields.io/badge/Read%20the%20Preprint-SSRN-success?style=for-the-badge&logo=readthedocs" alt="Read the PyMACS preprint">
   </a>
-  <a href="https://github.com/schurerlab/Pymacs/tree/main/Example">
+  <a href="https://github.com/schurerlab/Pymacs/tree/main/Example_Choices">
     <img src="https://img.shields.io/badge/View%20Example-GitHub%20Folder-orange?style=for-the-badge&logo=github" alt="View the PyMACS example folder">
   </a>
-  <a href="https://github.com/schurerlab/Pymacs/blob/main/Example/MD_ANALYSIS_FIGUREBOOK.pdf">
+  <a href="https://github.com/schurerlab/Pymacs/blob/main/Example_Choices/Example1/completed_run/MD_ANALYSIS_FIGUREBOOK.pdf">
     <img src="https://img.shields.io/badge/View%20Example-Figurebook%20PDF-blueviolet?style=for-the-badge&logo=adobeacrobatreader" alt="View the example MD analysis figurebook PDF">
   </a>
 </p>
@@ -205,14 +205,15 @@ PyMACs/
 ├── cgenff_charmm2gmx_py3_nx2.py
 ├── charmm36.ff/
 ├── charmm36_ljpme-jul2022.ff/
-├── Example/
-│   ├── A1D/
-│   │   ├── A1D.cgenff.mol2
-│   │   ├── A1D.err
-│   │   ├── A1D.mol2
-│   │   └── A1D.str
-│   ├── CPD32_9G94.pdb
-│   └── MD_ANALYSIS_FIGUREBOOK.pdf
+├── Example_Choices/
+│   ├── Example1/
+│   │   ├── input/
+│   │   ├── parameters/
+│   │   ├── prepared_system/
+│   │   └── completed_run/
+│   ├── Example2/
+│   ├── Example3/
+│   └── Example4/
 ├── em.mdp
 ├── MDPs/
 │   ├── em.mdp
@@ -1090,23 +1091,41 @@ In that case, the PDF builder uses the manifest rather than `4_MDfigs.txt`.
 
 ## 🧪 Reproduce the included Example figurebook — demo
 
-The repository includes a complete example system and a reference figurebook.
+The repository now includes four curated public examples under `Example_Choices/`, with bundled inputs, prepared systems, and selected completed outputs.
 
 <p align="center">
-  <a href="https://github.com/schurerlab/Pymacs/tree/main/Example">
+  <a href="https://github.com/schurerlab/Pymacs/tree/main/Example_Choices">
     <img src="https://img.shields.io/badge/Browse%20Example-GitHub%20Folder-orange?style=for-the-badge&logo=github" alt="Browse the example folder">
   </a>
-  <a href="https://github.com/schurerlab/Pymacs/blob/main/Example/MD_ANALYSIS_FIGUREBOOK.pdf">
+  <a href="https://github.com/schurerlab/Pymacs/blob/main/Example_Choices/Example1/completed_run/MD_ANALYSIS_FIGUREBOOK.pdf">
     <img src="https://img.shields.io/badge/Open%20Figurebook-PDF-blueviolet?style=for-the-badge&logo=adobeacrobatreader" alt="Open the example figurebook PDF">
   </a>
 </p>
 
+### Curated examples
+
+- `Example_Choices/Example1`: `CPD32_9G94` + `A1D` conventional protein-ligand workflow
+- `Example_Choices/Example2`: `9UWJ` / `AVPR1A` with `A1E` and `CLR` ligand/cofactor-aware workflow
+- `Example_Choices/Example3`: `1URN` RNA/protein biological assembly workflow
+- `Example_Choices/Example4`: `5T35` PROTAC ternary-complex workflow with `PTC`
+
+### Git LFS
+
+Large curated example trajectories, GROMACS files, parameter bundles, and figurebooks are tracked with Git LFS.
+
+```bash
+git lfs install
+git clone <repo>
+cd Pymacs
+git lfs pull
+```
+
 Included files:
 
-- `Example/CPD32_9G94.pdb` — demo input
-- `Example/A1D/A1D.str` — demo ligand stream file
-- `Example/A1D/A1D.cgenff.mol2` — demo CGenFF MOL2 file
-- `Example/MD_ANALYSIS_FIGUREBOOK.pdf` — reference figurebook output
+- `Example_Choices/Example1/input/CPD32_9G94.pdb` — demo input
+- `Example_Choices/Example1/parameters/A1D/A1D.str` — demo ligand stream file
+- `Example_Choices/Example1/parameters/A1D/A1D.cgenff.mol2` — demo CGenFF MOL2 file
+- `Example_Choices/Example1/completed_run/MD_ANALYSIS_FIGUREBOOK.pdf` — reference figurebook output
 
 ### Goal
 
@@ -1142,10 +1161,10 @@ cp -r ../../charmm36.ff .
 cp -r ../../charmm36_ljpme-jul2022.ff .
 
 # Copy Example inputs
-cp ../../Example/CPD32_9G94.pdb .
+cp ../../Example_Choices/Example1/input/CPD32_9G94.pdb .
 mkdir -p A1D
-cp ../../Example/A1D/A1D.str ./A1D/
-cp ../../Example/A1D/A1D.cgenff.mol2 ./A1D/
+cp ../../Example_Choices/Example1/parameters/A1D/A1D.str ./A1D/
+cp ../../Example_Choices/Example1/parameters/A1D/A1D.cgenff.mol2 ./A1D/
 ```
 
 Run the pipeline:
@@ -1165,7 +1184,7 @@ python 4PDF4MD.py
 Compare the generated figurebook against:
 
 ```text
-../../Example/MD_ANALYSIS_FIGUREBOOK.pdf
+../../Example_Choices/Example1/completed_run/MD_ANALYSIS_FIGUREBOOK.pdf
 ```
 
 If the PDF is missing sections:

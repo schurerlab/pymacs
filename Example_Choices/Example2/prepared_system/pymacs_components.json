@@ -1,0 +1,25 @@
+{
+  "primary_ligand": "DR7",
+  "cofactors": [],
+  "all_components": [
+    "DR7"
+  ],
+  "dropped_components": [],
+  "detected_components": {
+    "DR7": {
+      "copies": 1,
+      "atom_count_raw_pdb": 51,
+      "instance_labels": [
+        "C:100"
+      ],
+      "recommended_role": "candidate_primary_ligand",
+      "category": "ligand_like",
+      "excluded_by_default": false,
+      "warning": null
+    }
+  },
+  "molecule_counts": {
+    "DR7": 1
+  },
+  "analysis_ligand": "DR7"
+}

@@ -1,0 +1,25 @@
+{
+  "primary_ligand": "PTC",
+  "cofactors": [],
+  "all_components": [
+    "PTC"
+  ],
+  "dropped_components": [],
+  "detected_components": {
+    "PTC": {
+      "copies": 1,
+      "atom_count_raw_pdb": 129,
+      "instance_labels": [
+        "A:1"
+      ],
+      "recommended_role": "candidate_primary_ligand",
+      "category": "ligand_like",
+      "excluded_by_default": false,
+      "warning": null
+    }
+  },
+  "molecule_counts": {
+    "PTC": 1
+  },
+  "analysis_ligand": "PTC"
+}
