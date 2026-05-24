@@ -143,16 +143,51 @@ continues with equilibration (NVT, NPT) and production MD.
 
 
 import os
+import select
 import subprocess
 # Define number of threads for GROMACS execution
 import multiprocessing
+import pty
 import shutil  # For file operations
 import shlex
+import sys
+import time
+from collections import deque
 
 import re
 
 
 import argparse
+from pymacs_component_utils import (
+    apply_chain_type_overrides,
+    build_component_all_copies_from_template,
+    classify_polymer_chains,
+    count_component_instances,
+    count_atoms_in_itp_moleculetype,
+    count_gro_atoms,
+    detect_component_clashes,
+    extract_component_instance_from_pdb,
+    format_polymer_chain_report,
+    format_clash_report,
+    extract_component_instances_from_pdb,
+    format_component_validation_report,
+    get_all_retained_components,
+    ordered_unique_resnames,
+    parse_component_list,
+    parse_chain_type_overrides,
+    polymer_type_label,
+    polymer_chain_type_list,
+    render_detected_component_table,
+    resolve_component_selection,
+    select_representative_component_instance,
+    selectable_component_resnames,
+    summarize_detected_hetero_components,
+    validate_single_instance_template,
+    validate_complex_against_topology_components,
+    write_component_registry,
+    write_system_registry,
+    write_protein_pdb_without_components,
+)
 
 
 VALID_BOX_TYPES = {"cubic", "dodecahedron", "octahedron"}
@@ -231,12 +266,24 @@ parser.add_argument("--mode", choices=["ligand", "protein"], help="Skip interact
 parser.add_argument("--chain-names", type=str, help="Comma-separated custom chain names (e.g. Rap1B,Rap1GAP)")
 parser.add_argument("--chain-map", type=str, help="Explicit chainID:name pairs (e.g. A:Rap1B,B:Rap1GAP)")
 parser.add_argument("--ligand", "-l", type=str, help="Ligand residue code used for non-covalent ligand workflows.")
+parser.add_argument("--cofactors", type=str, default=None, help="Comma-separated retained non-protein components (e.g. CLR,HEM).")
+parser.add_argument("--auto-keep-hetero", action="store_true", help="When multiple ligand-like residues are detected, keep non-primary residues as cofactors automatically.")
+parser.add_argument("--component-mode", choices=["selected", "all", "none"], default="selected", help="Retained-component mode: selected keeps --ligand plus --cofactors, all keeps all detected ligand-like residues, none disables retained non-protein components unless explicitly requested.")
+parser.add_argument("--component-clash-check", dest="component_clash_check", action="store_true", default=True, help="Run retained-component clash checks before solvation.")
+parser.add_argument("--no-component-clash-check", dest="component_clash_check", action="store_false", help="Skip retained-component clash checks.")
+parser.add_argument("--drop-clashing-cofactors", action="store_true", help="Drop non-primary cofactors automatically if severe clashes are detected.")
 parser.add_argument("--pdb", type=str, help="Input PDB filename (e.g., Model_2.pdb)")
+parser.add_argument("--show-generated-pdbs", action="store_true", help="Include generated intermediate PDB files in the interactive PDB picker.")
+parser.add_argument("--allow-generated-inputs", action="store_true", help="Alias for --show-generated-pdbs.")
 parser.add_argument(
     "--gmx-bin",
     default="auto",
     help="GROMACS executable to use: auto, gmx, gmx_mpi, gmx-mpi, or an explicit path.",
 )
+parser.add_argument("--nucleic-acid-termini", choices=["auto", "5ter-3ter", "none"], default="auto", help="How RNA/DNA termini should be selected for pdb2gmx.")
+parser.add_argument("--protein-nterm", choices=["NH2", "NH3+", "None"], default="NH2", help="Default protein N-terminus selection passed to pdb2gmx.")
+parser.add_argument("--protein-cterm", choices=["COO-", "COOH", "None"], default="COO-", help="Default protein C-terminus selection passed to pdb2gmx.")
+parser.add_argument("--chain-types", type=str, help='Optional polymer chain-type override, e.g. "A:RNA,B:RNA,C:protein".')
 parser.add_argument(
     "--box-type",
     choices=sorted(VALID_BOX_TYPES),
@@ -737,62 +784,96 @@ def fix_missing_atoms(input_pdb, output_pdb, ph=7.4):
         print(f"❌ Failed to fix atoms in {input_pdb}: {str(e)}")
         return False
 
-def modify_topology_file(topol_path, ligand_code):
-    """Updates the topology file by inserting required lines at the correct positions."""
-    # Modified: ensure ligand parameters are included dynamically if ligand is present
+def modify_topology_file_multi(topol_path, components, molecule_counts):
+    """Insert component includes and molecule counts while preserving GROMACS-safe ordering."""
     with open(topol_path, "r") as f:
         lines = f.readlines()
-    # If ligand is present, include its parameter and topology files
-    if ligand_code:
-        # Find insertion point after forcefield includes
-        insertion_index = None
-        for i, line in enumerate(lines):
-            if "; Include forcefield parameters" in line:
-                insertion_index = i + 2
-                break
-        if insertion_index is not None:
-            prm_line = f'#include "{ligand_code.lower()}.prm"\n'
-            itp_line = f'; Include ligand topology\n#include "{ligand_code.lower()}.itp"\n'
-            if prm_line not in lines[insertion_index:]:
-                lines.insert(insertion_index, prm_line)
-                lines.insert(insertion_index + 1, itp_line)
-        # Append ligand molecule entry at end of file if not present
-        ligand_entry = f"{ligand_code:<20}1\n"
-        if not any(line.strip().startswith(ligand_code) for line in lines):
-            lines.append(ligand_entry)
-        print(f"✅ Added ligand includes and entry for {ligand_code} in topol.top")
-    else:
-        print("ℹ️ No ligand present; skipping ligand-specific topology modifications.")
-    # Write changes back to topology file
+    components = get_all_retained_components(None, components)
+    if not components:
+        print("ℹ️ No retained components present; skipping topology component modifications.")
+        return
+
+    include_lines = []
+    for component in components:
+        include_lines.append(f'#include "{component.lower()}.prm"\n')
+    for component in components:
+        include_lines.append(f'#include "{component.lower()}.itp"\n')
+
+    stripped = [line.strip() for line in lines]
+    existing_includes = set(stripped)
+    forcefield_index = next((i for i, line in enumerate(lines) if "forcefield.itp" in line), None)
+    protein_include_index = next((i for i, line in enumerate(lines) if "topol_Protein_chain" in line), None)
+    water_include_index = next((i for i, line in enumerate(lines) if "spc.itp" in line or "tip3p.itp" in line), None)
+
+    prm_insert_index = (forcefield_index + 1) if forcefield_index is not None else 0
+    for include_line in reversed(include_lines[:len(components)]):
+        if include_line.strip() not in existing_includes:
+            lines.insert(prm_insert_index, include_line)
+
+    itp_insert_index = water_include_index if water_include_index is not None else (protein_include_index + 1 if protein_include_index is not None else len(lines))
+    for include_line in reversed(include_lines[len(components):]):
+        if include_line.strip() not in existing_includes:
+            lines.insert(itp_insert_index, include_line)
+
+    molecule_header_index = None
+    for i, line in enumerate(lines):
+        if line.strip().lower() == "[ molecules ]":
+            molecule_header_index = i
+            break
+    if molecule_header_index is None:
+        lines.append("\n[ molecules ]\n")
+        lines.append("; Compound        #mols\n")
+        molecule_header_index = len(lines) - 2
+
+    molecule_line_index = {}
+    for i in range(molecule_header_index + 1, len(lines)):
+        stripped_line = lines[i].strip()
+        if not stripped_line or stripped_line.startswith(";") or stripped_line.startswith("["):
+            continue
+        fields = stripped_line.split()
+        if fields:
+            molecule_line_index[fields[0].upper()] = i
+
+    for component in components:
+        count = molecule_counts.get(component, 1)
+        entry = f"{component:<20}{count}\n"
+        if component in molecule_line_index:
+            lines[molecule_line_index[component]] = entry
+        else:
+            lines.append(entry)
+
     with open(topol_path, "w") as f:
         f.writelines(lines)
+    print(f"✅ Updated topol.top with retained components: {', '.join(components)}")
 
-def merge_gro_files(protein_gro, ligand_gro, complex_gro):
-    """Merges protein_processed.gro and ligand .gro into complex.gro while preserving the last row."""
-    if not os.path.exists(protein_gro) or not os.path.exists(ligand_gro):
-        print(f"❌ ERROR: Missing input files: {protein_gro} or {ligand_gro}")
-        return
-    # Read input .gro files
+def merge_gro_files_multi(protein_gro, component_gros, complex_gro):
+    """Merge protein and one or more component GRO files into a single complex GRO."""
+    component_gros = [path for path in component_gros if path]
+    for path in [protein_gro] + component_gros:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Missing GRO file required for merge: {path}")
     with open(protein_gro, "r") as f:
         protein_lines = f.readlines()
-    with open(ligand_gro, "r") as f:
-        ligand_lines = f.readlines()
-    correct_box = protein_lines[-1].strip()  # Box from protein
-    ligand_body = ligand_lines[2:-1]         # Ligand atoms (skip header/count/box)
-    total_atoms = int(protein_lines[1].strip()) + int(ligand_lines[1].strip())
-    merged_lines = []
-    merged_lines.append(protein_lines[0])                # Title
-    merged_lines.append(f"{total_atoms}\n")              # Updated atom count
-    merged_lines.extend(protein_lines[2:-1])             # Protein atoms
-    merged_lines.extend(ligand_body)                     # Ligand atoms
-    merged_lines.append(correct_box + "\n")              # Box dimensions
+    merged_atom_lines = list(protein_lines[2:-1])
+    total_atoms = int(protein_lines[1].strip())
+    correct_box = protein_lines[-1].strip()
+
+    for gro_path in component_gros:
+        with open(gro_path, "r") as f:
+            component_lines = f.readlines()
+        total_atoms += int(component_lines[1].strip())
+        merged_atom_lines.extend(component_lines[2:-1])
+
+    merged_lines = [protein_lines[0], f"{total_atoms}\n"] + merged_atom_lines + [correct_box + "\n"]
     with open(complex_gro, "w") as f:
         f.writelines(merged_lines)
-    # Verify last line
     with open(complex_gro, "r") as f:
         final_lines = f.readlines()
         if final_lines[-1].strip() != correct_box:
             print("❌ ERROR: Final row of complex.gro does not match protein_processed.gro!")
+            exit(1)
+        if int(final_lines[1].strip()) != len(final_lines[2:-1]):
+            print("❌ ERROR: complex.gro atom count does not match merged body length.")
             exit(1)
     print(f"✅ complex.gro merged successfully with {total_atoms} atoms.")
 
@@ -840,7 +921,30 @@ def detect_forcefield(directory):
 
 def select_pdb_file(directory):
     """Prompts the user to select a PDB file from available options."""
-    pdb_files = [f for f in os.listdir(directory) if f.endswith(".pdb")]
+    generated_names = {
+        "protein.pdb",
+        "protein_fixed.pdb",
+    }
+    generated_suffixes = (
+        "_raw.pdb",
+        "_pose_match.pdb",
+        "_all.pdb",
+        "_ini.pdb",
+        "_h.pdb",
+        "_pose_h.pdb",
+        "_from_pdb.pdb",
+        "_template_raw.pdb",
+    )
+    show_generated = args.show_generated_pdbs or args.allow_generated_inputs
+    pdb_files = []
+    for f in os.listdir(directory):
+        if not f.endswith(".pdb"):
+            continue
+        lower = f.lower()
+        if not show_generated and (lower in generated_names or lower.endswith(generated_suffixes)):
+            continue
+        pdb_files.append(f)
+    pdb_files.sort()
     if not pdb_files:
         print("❌ No PDB files found in the current directory.")
         exit(1)
@@ -859,8 +963,322 @@ def get_ligand_code():
     choice = input("\n💊 Enter ligand 3-letter code or press ENTER to use default [PTC]: ").strip()
     return choice.upper() if choice else "PTC"
 
-def automate_pdb2gmx(directory):
-    """Automates GROMACS pdb2gmx selection for force field and termini settings."""
+def _parse_menu_options(menu_text):
+    options = {}
+    for line in menu_text.replace("\r", "\n").splitlines():
+        match = re.match(r"\s*(\d+)\s*:\s*(.+?)\s*$", line)
+        if match:
+            options[match.group(2).strip()] = match.group(1)
+    return options
+
+
+def _extract_current_menu_text(menu_text, kind):
+    prompt = "Select start terminus type for" if kind == "start" else "Select end terminus type for"
+    normalized = menu_text.replace("\r", "\n")
+    idx = normalized.rfind(prompt)
+    if idx == -1:
+        return normalized
+    return normalized[idx:]
+
+
+def _recent_pdb2gmx_tail(output_lines, max_lines=80):
+    return "\n".join(list(output_lines)[-max_lines:])
+
+
+def _detect_latest_terminus_prompt(buffer_text):
+    normalized = buffer_text.replace("\r", "\n")
+    prompts = [
+        ("start", normalized.rfind("Select start terminus type for")),
+        ("end", normalized.rfind("Select end terminus type for")),
+    ]
+    kind, idx = max(prompts, key=lambda item: item[1])
+    if idx < 0:
+        return None
+    return {
+        "kind": kind,
+        "buffer": normalized[idx:],
+    }
+
+
+def _detect_latest_processing_chain(buffer_text):
+    normalized = buffer_text.replace("\r", "\n")
+    matches = re.findall(r"Processing chain\s+\d+\s+'([^']+)'", normalized)
+    if not matches:
+        return None
+    return matches[-1]
+
+
+def _chain_summary_lookup(chain_summaries):
+    return {
+        entry.get("chain_id"): entry
+        for entry in (chain_summaries or [])
+        if entry.get("chain_id") is not None
+    }
+
+
+def _lookup_menu_option(available_options, preferred_labels):
+    normalized = {label.strip().lower(): number for label, number in available_options.items()}
+    for preferred in preferred_labels:
+        preferred_norm = preferred.strip().lower()
+        for label_norm, number in normalized.items():
+            if label_norm == preferred_norm:
+                return number
+        for label_norm, number in normalized.items():
+            if preferred_norm in label_norm:
+                return number
+    return None
+
+
+def choose_start_terminus_for_chain(chain_type, available_options):
+    chain_type = (chain_type or "mixed_or_unknown").lower()
+    if chain_type == "protein":
+        preferred = [args.protein_nterm]
+        if args.protein_nterm != "NH3+":
+            preferred.append("NH3+")
+        preferred.append("None")
+        return _lookup_menu_option(available_options, preferred)
+    if chain_type in {"rna", "dna"}:
+        if args.nucleic_acid_termini == "none":
+            return _lookup_menu_option(available_options, ["None"])
+        return _lookup_menu_option(available_options, ["5TER", "5PHO", "None"])
+    return _lookup_menu_option(available_options, ["None"])
+
+
+def choose_end_terminus_for_chain(chain_type, available_options):
+    chain_type = (chain_type or "mixed_or_unknown").lower()
+    if chain_type == "protein":
+        preferred = [args.protein_cterm]
+        if args.protein_cterm != "COOH":
+            preferred.append("COOH")
+        preferred.append("None")
+        return _lookup_menu_option(available_options, preferred)
+    if chain_type in {"rna", "dna"}:
+        if args.nucleic_acid_termini == "none":
+            return _lookup_menu_option(available_options, ["None"])
+        return _lookup_menu_option(available_options, ["3TER", "None"])
+    return _lookup_menu_option(available_options, ["None"])
+
+
+def send_pdb2gmx_choice(master_fd, choice_number, reason):
+    print(f"\n🧬 {reason}")
+    os.write(master_fd, (choice_number + "\n").encode("utf-8"))
+
+
+def _choose_nucleic_start_option(chain_summary, available_options):
+    if args.nucleic_acid_termini == "none":
+        return _lookup_menu_option(available_options, ["None"]), "None"
+    preferred_labels = ["5PHO", "5TER", "None"] if chain_summary.get("has_5prime_phosphate") else ["5TER", "5PHO", "None"]
+    selection = _lookup_menu_option(available_options, preferred_labels)
+    chosen_label = next((label for label in preferred_labels if _lookup_menu_option(available_options, [label]) == selection), None)
+    return selection, chosen_label
+
+
+def _choose_nucleic_end_option(available_options):
+    if args.nucleic_acid_termini == "none":
+        return _lookup_menu_option(available_options, ["None"]), "None"
+    preferred_labels = ["3TER", "None"]
+    selection = _lookup_menu_option(available_options, preferred_labels)
+    chosen_label = next((label for label in preferred_labels if _lookup_menu_option(available_options, [label]) == selection), None)
+    return selection, chosen_label
+
+
+def remap_chain_keyed_mapping_by_order(source_chain_ids, current_chain_ids, mapping, mapping_name):
+    mapping = mapping or {}
+    if not mapping:
+        return {}
+
+    source_chain_ids = list(source_chain_ids or [])
+    current_chain_ids = list(current_chain_ids or [])
+    mapping_keys = list(mapping)
+    current_set = set(current_chain_ids)
+    source_set = set(source_chain_ids)
+    source_to_current = {}
+    if len(source_chain_ids) == len(current_chain_ids):
+        source_to_current = {
+            source_chain_ids[idx]: current_chain_ids[idx]
+            for idx in range(len(source_chain_ids))
+        }
+
+    use_source_mapping = any(
+        chain_id not in current_set and chain_id in source_to_current
+        for chain_id in mapping_keys
+    )
+    if not use_source_mapping and mapping_keys and all(chain_id in source_set for chain_id in mapping_keys):
+        overlap_differs = any(source_to_current.get(chain_id, chain_id) != chain_id for chain_id in mapping_keys)
+        if overlap_differs:
+            use_source_mapping = True
+
+    remapped = {}
+    for chain_id, value in mapping.items():
+        if use_source_mapping and chain_id in source_to_current:
+            target_chain_id = source_to_current[chain_id]
+            if target_chain_id != chain_id:
+                print(f"🔁 Remapped {mapping_name} entry {chain_id} -> {target_chain_id} by chain order after PDBFixer.")
+        elif chain_id in current_set:
+            target_chain_id = chain_id
+        elif chain_id in source_to_current:
+            target_chain_id = source_to_current[chain_id]
+            print(f"🔁 Remapped {mapping_name} entry {chain_id} -> {target_chain_id} by chain order after PDBFixer.")
+        else:
+            raise ValueError(
+                f"Could not match {mapping_name} entry '{chain_id}' to post-PDBFixer chains {current_chain_ids}. "
+                "Provide chain IDs from the current protein.pdb or use chain order-compatible input."
+            )
+        if target_chain_id in remapped and remapped[target_chain_id] != value:
+            raise ValueError(
+                f"Conflicting {mapping_name} assignments mapped onto chain {target_chain_id}: "
+                f"{remapped[target_chain_id]} vs {value}"
+            )
+        remapped[target_chain_id] = value
+    return remapped
+
+
+def _detect_forcefield_nucleic_phosphate_names(forcefield_path):
+    na_rtp_path = os.path.join(forcefield_path, "na.rtp")
+    if not os.path.exists(na_rtp_path):
+        return None
+    with open(na_rtp_path, "r", encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+    op_style = len(re.findall(r"(?m)^\s*OP[12]\b", text))
+    o_style = len(re.findall(r"(?m)^\s*O[12]P\b", text))
+    if op_style and not o_style:
+        return ("OP1", "OP2")
+    if o_style and not op_style:
+        return ("O1P", "O2P")
+    return None
+
+
+def _detect_pdb_nucleic_phosphate_names(pdb_path, polymer_info):
+    nucleic_chain_ids = {
+        entry.get("chain_id")
+        for entry in (polymer_info or {}).get("chains", [])
+        if entry.get("chain_type") in {"rna", "dna"}
+    }
+    if not nucleic_chain_ids:
+        return None
+    observed = set()
+    with open(pdb_path, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            if line[21].strip() not in nucleic_chain_ids:
+                continue
+            atom_name = line[12:16].strip().upper().replace('"', "'")
+            if atom_name in {"OP1", "OP2", "O1P", "O2P"}:
+                observed.add(atom_name)
+    if {"OP1", "OP2"} & observed:
+        return ("OP1", "OP2")
+    if {"O1P", "O2P"} & observed:
+        return ("O1P", "O2P")
+    return None
+
+
+def normalize_nucleic_phosphate_atom_names_for_forcefield(input_pdb, output_pdb, polymer_info, forcefield_path):
+    expected = _detect_forcefield_nucleic_phosphate_names(forcefield_path)
+    observed = _detect_pdb_nucleic_phosphate_names(input_pdb, polymer_info)
+    if not expected or not observed or expected == observed:
+        if input_pdb != output_pdb:
+            shutil.copyfile(input_pdb, output_pdb)
+        return {
+            "changed": False,
+            "expected": expected,
+            "observed": observed,
+            "mapping": None,
+        }
+
+    rename_map = {
+        observed[0]: expected[0],
+        observed[1]: expected[1],
+    }
+    nucleic_chain_ids = {
+        entry.get("chain_id")
+        for entry in (polymer_info or {}).get("chains", [])
+        if entry.get("chain_type") in {"rna", "dna"}
+    }
+    with open(input_pdb, "r", encoding="utf-8", errors="replace") as handle:
+        lines = handle.readlines()
+    new_lines = []
+    changed = False
+    for line in lines:
+        if line.startswith(("ATOM", "HETATM")) and line[21].strip() in nucleic_chain_ids:
+            atom_name = line[12:16].strip().upper().replace('"', "'")
+            if atom_name in rename_map:
+                replacement = f"{rename_map[atom_name]:>4}"
+                line = f"{line[:12]}{replacement}{line[16:]}"
+                changed = True
+        new_lines.append(line)
+    with open(output_pdb, "w", encoding="utf-8") as handle:
+        handle.writelines(new_lines)
+    return {
+        "changed": changed,
+        "expected": expected,
+        "observed": observed,
+        "mapping": rename_map,
+    }
+
+
+def _maybe_send_menu_selection(master_fd, menu_state, chain_lookup, answered_prompts):
+    menu_text = _extract_current_menu_text(menu_state.get("buffer", ""), menu_state["kind"])
+    available_options = _parse_menu_options(menu_text)
+    if not available_options:
+        return False
+    quiet_for = time.time() - menu_state.get("last_update", 0.0)
+    if quiet_for < 0.25:
+        return False
+
+    chain_id = menu_state.get("chain_id")
+    chain_summary = chain_lookup.get(chain_id)
+    if chain_summary is None:
+        raise RuntimeError(
+            f"PyMACS could not map the active pdb2gmx prompt to a detected chain. "
+            f"Current chain id: {chain_id!r}. Detected chains: {list(chain_lookup)}"
+        )
+
+    chain_type = chain_summary.get("chain_type", "mixed_or_unknown")
+    if menu_state["kind"] == "start":
+        if chain_type in {"rna", "dna"}:
+            selection, chosen_label = _choose_nucleic_start_option(chain_summary, available_options)
+        else:
+            selection = choose_start_terminus_for_chain(chain_type, available_options)
+            chosen_label = next((label for label, number in available_options.items() if number == selection), None)
+        if selection is None:
+            raise RuntimeError(
+                f"Could not resolve a START terminus option for chain {chain_id} ({chain_type}) "
+                f"from {list(available_options)}"
+            )
+        chain_summary["chosen_start_terminus"] = chosen_label
+        answered_prompts.setdefault(chain_id, {"start": False, "end": False})["start"] = True
+        send_pdb2gmx_choice(
+            master_fd,
+            selection,
+            f"Chain {chain_id} classified as {polymer_type_label(chain_type)}; "
+            f"selected START terminus {chosen_label} option {selection}.",
+        )
+        return True
+
+    if chain_type in {"rna", "dna"}:
+        selection, chosen_label = _choose_nucleic_end_option(available_options)
+    else:
+        selection = choose_end_terminus_for_chain(chain_type, available_options)
+        chosen_label = next((label for label, number in available_options.items() if number == selection), None)
+    if selection is None:
+        raise RuntimeError(
+            f"Could not resolve an END terminus option for chain {chain_id} ({chain_type}) "
+            f"from {list(available_options)}"
+        )
+    chain_summary["chosen_end_terminus"] = chosen_label
+    answered_prompts.setdefault(chain_id, {"start": False, "end": False})["end"] = True
+    send_pdb2gmx_choice(
+        master_fd,
+        selection,
+        f"Chain {chain_id} classified as {polymer_type_label(chain_type)}; "
+        f"selected END terminus {chosen_label} option {selection}.",
+    )
+    return True
+
+
+def automate_pdb2gmx(directory, polymer_info=None):
+    """Automates GROMACS pdb2gmx selection for force field and chain-aware termini settings."""
     omp_threads = os.environ.get("OMP_NUM_THREADS") or str(multiprocessing.cpu_count())
     os.environ["OMP_NUM_THREADS"] = omp_threads
     print(f"🧠 Using OMP_NUM_THREADS = {omp_threads}")
@@ -875,23 +1293,165 @@ def automate_pdb2gmx(directory):
         print("\n❌ CHARMM forcefield not found. Manual selection required.")
         return False
     print(f"✅ Using CHARMM force field from: {forcefield_path}")
-    forcefield_option = "1"  # CHARMM
-    chain_count = count_chains(protein_pdb)
-    print(f"🔍 Detected {chain_count} chains in the protein.")
-    if chain_count == 0:
+    polymer_info = polymer_info or classify_polymer_chains(protein_pdb)
+    chain_summaries = polymer_info.get("chains", [])
+    chain_lookup = _chain_summary_lookup(chain_summaries)
+    print(f"🔍 Detected {len(chain_summaries)} polymer chain(s) in protein.pdb.")
+    if chain_summaries:
+        print(format_polymer_chain_report(polymer_info))
+    if not chain_summaries:
         print("❌ No chains detected. Check protein.pdb formatting.")
         return False
-    input_selections = [forcefield_option]
-    for i in range(chain_count):
-        input_selections.append("1" if i == 0 else "0")  # Start terminus: first chain NH3+, others PRO-NH2+
-        input_selections.append("0")                    # End terminus: COO-
-    input_text = "\n".join(input_selections) + "\n"
-    print("\n✅ Auto-selecting force field and termini for pdb2gmx.")
-    return run_command(
-        gmx_cmd("pdb2gmx", "-f protein.pdb -o protein_processed.gro -p topol.top -ignh -water spc -ter"),
-        cwd=directory,
-        input_text=input_text,
+
+    forcefield_name = os.path.basename(forcefield_path)
+    if forcefield_name.lower().endswith(".ff"):
+        forcefield_name = forcefield_name[:-3]
+    pdb2gmx_input_path = os.path.join(directory, "protein_pdb2gmx_ready.pdb")
+    normalization = normalize_nucleic_phosphate_atom_names_for_forcefield(
+        protein_pdb,
+        pdb2gmx_input_path,
+        polymer_info,
+        forcefield_path,
     )
+    if normalization.get("changed"):
+        rename_map = normalization.get("mapping") or {}
+        print(
+            "🧬 Normalized RNA/DNA phosphate atom names for CHARMM36: "
+            + ", ".join(f"{src}->{dst}" for src, dst in rename_map.items())
+        )
+    else:
+        pdb2gmx_input_path = protein_pdb
+    command = gmx_cmd(
+        "pdb2gmx",
+        f"-f {os.path.basename(pdb2gmx_input_path)} -o protein_processed.gro -p topol.top -ignh -water spc -ff {forcefield_name} -ter",
+    )
+    master_fd, slave_fd = pty.openpty()
+    process = subprocess.Popen(
+        command,
+        cwd=directory,
+        shell=True,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+
+    transcript = ""
+    menu_state = None
+    answered_prompts = {entry.get("chain_id"): {"start": False, "end": False} for entry in chain_summaries}
+    current_chain_id = None
+    recent_output = deque(maxlen=80)
+    last_output_time = time.time()
+    idle_timeout_seconds = 20.0
+
+    while True:
+        ready, _, _ = select.select([master_fd], [], [], 0.25)
+        if not ready:
+            if menu_state is not None:
+                try:
+                    sent = _maybe_send_menu_selection(master_fd, menu_state, chain_lookup, answered_prompts)
+                except RuntimeError as exc:
+                    process.kill()
+                    print(f"\n❌ {exc}")
+                    return False
+                if sent:
+                    menu_state = None
+            if process.poll() is not None:
+                break
+            if time.time() - last_output_time > idle_timeout_seconds:
+                process.kill()
+                print("\n❌ pdb2gmx became idle before PyMACS could finish prompt automation.")
+                answered_start = sum(1 for state in answered_prompts.values() if state.get("start"))
+                answered_end = sum(1 for state in answered_prompts.values() if state.get("end"))
+                print(f"   prompts answered: start={answered_start}/{len(chain_summaries)}, end={answered_end}/{len(chain_summaries)}")
+                if menu_state is not None:
+                    print(f"   pending prompt kind: {menu_state.get('kind')} on chain {menu_state.get('chain_id')}")
+                tail = _recent_pdb2gmx_tail(recent_output)
+                if tail:
+                    print("📜 Last pdb2gmx output:")
+                    print(tail)
+                return False
+            continue
+        try:
+            chunk = os.read(master_fd, 1024).decode("utf-8", errors="replace")
+        except OSError:
+            if process.poll() is not None:
+                break
+            continue
+        if chunk == "" and process.poll() is not None:
+            break
+        if not chunk:
+            continue
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+        transcript += chunk
+        recent_output.extend(chunk.replace("\r", "\n").splitlines())
+        last_output_time = time.time()
+
+        latest_processing_chain = _detect_latest_processing_chain(transcript[max(0, len(transcript) - 1200):])
+        if latest_processing_chain and latest_processing_chain != current_chain_id:
+            next_chain_id = latest_processing_chain
+            if current_chain_id and current_chain_id in answered_prompts:
+                prior_state = answered_prompts[current_chain_id]
+                if not (prior_state.get("start") and prior_state.get("end")):
+                    process.kill()
+                    print(
+                        f"\n❌ pdb2gmx advanced to chain {next_chain_id} before PyMACS finished both termini for chain {current_chain_id}."
+                    )
+                    return False
+            current_chain_id = next_chain_id
+
+        if menu_state is None:
+            prompt_state = _detect_latest_terminus_prompt(transcript[max(0, len(transcript) - 800):])
+            if prompt_state:
+                menu_state = {
+                    **prompt_state,
+                    "chain_id": current_chain_id,
+                    "last_update": time.time(),
+                }
+            continue
+
+        menu_state["buffer"] += chunk
+        menu_state["last_update"] = time.time()
+        prompt_state = _detect_latest_terminus_prompt(menu_state["buffer"])
+        if prompt_state:
+            menu_state["kind"] = prompt_state["kind"]
+            menu_state["buffer"] = prompt_state["buffer"]
+            menu_state["chain_id"] = current_chain_id
+        elif menu_state.get("chain_id") is None:
+            menu_state["chain_id"] = current_chain_id
+        buffer_text = menu_state["buffer"]
+        if ("Select start terminus type for" in buffer_text or "Select end terminus type for" in buffer_text) and _parse_menu_options(buffer_text):
+            try:
+                sent = _maybe_send_menu_selection(master_fd, menu_state, chain_lookup, answered_prompts)
+            except RuntimeError as exc:
+                process.kill()
+                print(f"\n❌ {exc}")
+                return False
+            if sent:
+                menu_state = None
+
+    try:
+        os.close(master_fd)
+    except OSError:
+        pass
+    rc = process.wait()
+    if rc != 0:
+        if menu_state and _parse_menu_options(menu_state.get("buffer", "")) == {}:
+            print("\n❌ pdb2gmx exited before PyMACS could resolve the termini menus.")
+        print(f"\n❌ Command failed with exit code {rc}: {command}")
+        return False
+    answered_start = sum(1 for state in answered_prompts.values() if state.get("start"))
+    answered_end = sum(1 for state in answered_prompts.values() if state.get("end"))
+    if answered_start != len(chain_summaries) or answered_end != len(chain_summaries):
+        print(
+            f"\n❌ pdb2gmx finished without matching all termini prompts "
+            f"(start={answered_start}/{len(chain_summaries)}, end={answered_end}/{len(chain_summaries)})."
+        )
+        return False
+    print("\n✅ Auto-selected force field and chain-aware termini for pdb2gmx.")
+    return True
 
 def count_chains(protein_pdb):
     """Counts the number of unique chains in a PDB file."""
@@ -907,7 +1467,7 @@ import os, json
 
 
 
-def generate_atom_index_file(directory, chain_names_arg=None, chain_map_arg=None, source_pdb_path=None):
+def generate_atom_index_file(directory, chain_names_arg=None, chain_map_arg=None, source_pdb_path=None, polymer_info=None):
     """
     Generates atomIndex.txt with chain names, while also displaying:
       - current detected chain IDs
@@ -1059,9 +1619,11 @@ def generate_atom_index_file(directory, chain_names_arg=None, chain_map_arg=None
     for i, cid in enumerate(chain_ids):
         current_info = current_chain_summaries[i] if i < len(current_chain_summaries) else None
         source_info = source_chain_summaries[i] if i < len(source_chain_summaries) else None
+        chain_type = (polymer_info or {}).get("chain_types", {}).get(cid, "mixed_or_unknown")
         provenance_by_current_chain[cid] = {
             "current": current_info,
             "source": source_info,
+            "chain_type": chain_type,
         }
 
     # PRINT SUMMARY BEFORE ASKING FOR NAMES
@@ -1077,9 +1639,11 @@ def generate_atom_index_file(directory, chain_names_arg=None, chain_map_arg=None
         src_chain = src["chain_id"] if src else "?"
         src_span = f"{src['resid_start']}-{src['resid_end']}" if src and src["resid_start"] is not None else "?"
         src_rescount = src["residue_count"] if src else "?"
+        chain_type = prov.get("chain_type", "mixed_or_unknown")
 
         print(
             f"  chain {cid} | "
+            f"type {chain_type} | "
             f"GRO atoms {atom_start}-{atom_end} | "
             f"current residues {cur_span} [{cur_rescount}] | "
             f"source chain {src_chain} | "
@@ -1091,9 +1655,17 @@ def generate_atom_index_file(directory, chain_names_arg=None, chain_map_arg=None
     # Priority 1: explicit CLI mapping
     if chain_map_arg:
         try:
+            raw_chain_map = {}
             for pair in chain_map_arg.split(","):
                 cid, name = pair.split(":", 1)
-                chain_map[cid.strip()] = name.strip()
+                raw_chain_map[cid.strip()] = name.strip()
+            source_chain_ids = [entry["chain_id"] for entry in source_chain_summaries]
+            chain_map = remap_chain_keyed_mapping_by_order(
+                source_chain_ids,
+                chain_ids,
+                raw_chain_map,
+                "chain map",
+            )
             print(f"🧾 Using chain map from CLI: {chain_map}")
         except Exception as e:
             print(f"❌ Failed to parse --chain-map: {e}")
@@ -1144,7 +1716,8 @@ def generate_atom_index_file(directory, chain_names_arg=None, chain_map_arg=None
                 directory,
                 chain_names_arg=chain_names_arg,
                 chain_map_arg=chain_map_arg,
-                source_pdb_path=source_pdb_path
+                source_pdb_path=source_pdb_path,
+                polymer_info=polymer_info,
             )
 
     with open(cache_file, "w") as f:
@@ -1165,9 +1738,11 @@ def generate_atom_index_file(directory, chain_names_arg=None, chain_map_arg=None
         src_chain = src["chain_id"] if src else "?"
         src_span = f"{src['resid_start']}-{src['resid_end']}" if src and src["resid_start"] is not None else "?"
         src_rescount = src["residue_count"] if src else "?"
+        chain_type = prov.get("chain_type", "mixed_or_unknown")
 
         print(
             f"  current {cid} ({label}) | "
+            f"type {chain_type} | "
             f"GRO atoms {atom_start}-{atom_end} | "
             f"current residues {cur_span} [{cur_rescount}] | "
             f"source chain {src_chain} | "
@@ -1179,18 +1754,19 @@ def generate_atom_index_file(directory, chain_names_arg=None, chain_map_arg=None
             label = chain_map[cid]
             prov = provenance_by_current_chain.get(cid, {})
             src = prov.get("source")
+            chain_type = prov.get("chain_type", "mixed_or_unknown")
 
             if src:
                 f.write(
                     f"{label} {atom_start}-{atom_end} "
-                    f"# current_chain={cid} current_residues={gro_resid_start}-{gro_resid_end} "
+                    f"# current_chain={cid} chain_type={chain_type} current_residues={gro_resid_start}-{gro_resid_end} "
                     f"source_chain={src['chain_id']} source_residues={src['resid_start']}-{src['resid_end']} "
                     f"source_rescount={src['residue_count']}\n"
                 )
             else:
                 f.write(
                     f"{label} {atom_start}-{atom_end} "
-                    f"# current_chain={cid} current_residues={gro_resid_start}-{gro_resid_end}\n"
+                    f"# current_chain={cid} chain_type={chain_type} current_residues={gro_resid_start}-{gro_resid_end}\n"
                 )
 
     print(f"✅ Generated atomIndex.txt in {directory}")
@@ -1415,6 +1991,227 @@ def graft_coords_onto_ini(ini_pdb, pose_pdb, out_pdb):
     with open(out_pdb, "w") as f:
         f.writelines(out_lines)
     return True
+
+
+def prepare_component_topology(directory, component_code, pdb_filename, role, molecule_count):
+    """Prepare topology for one retained component and return single/all-copy coordinate paths."""
+    print(f"\n🛠️ Preparing {role.replace('_', ' ')} topology for {component_code}...")
+    forcefield_path = detect_forcefield(directory)
+    if forcefield_path is None:
+        return None
+
+    source_pdb_path = os.path.join(directory, pdb_filename)
+    representative = select_representative_component_instance(source_pdb_path, component_code)
+    if representative is None:
+        print(f"❌ No residue instances found for {component_code} in {pdb_filename}.")
+        return None
+    representative_key = representative["instance_key"]
+    representative_label = f"{representative['chain_id']}:{representative['resid']}"
+    print(
+        f"🧩 Representative instance for {component_code} topology generation: "
+        f"{representative_label} ({representative['atom_count']} source atoms)"
+    )
+    template_raw_pdb = os.path.join(directory, f"{component_code.lower()}_template_raw.pdb")
+    if not extract_component_instance_from_pdb(source_pdb_path, component_code, representative_key, template_raw_pdb):
+        print(f"❌ Failed to extract representative instance {representative_label} for {component_code}.")
+        return None
+    try:
+        validate_single_instance_template(template_raw_pdb, component_code)
+    except RuntimeError as exc:
+        print(str(exc))
+        return None
+
+    single_gro_file = os.path.join(directory, f"{component_code.lower()}.gro")
+    all_pdb_file = os.path.join(directory, f"{component_code.lower()}_all.pdb")
+    all_gro_file = os.path.join(directory, f"{component_code.lower()}_all.gro")
+    itp_path = os.path.join(directory, f"{component_code.lower()}.itp")
+    prm_path = os.path.join(directory, f"{component_code.lower()}.prm")
+    template_pdb = None
+
+    paramchem = import_paramchem_gromacs(directory, component_code)
+    if paramchem:
+        print(f"🔒 Using ParamChem GROMACS topology for {component_code}")
+        ini_pdb_file = paramchem["ini_pdb"]
+        template_pdb = ini_pdb_file
+        if not run_command(
+            gmx_cmd("editconf", f"-f {os.path.basename(ini_pdb_file)} -o {os.path.basename(single_gro_file)}"),
+            cwd=directory,
+        ):
+            return None
+    else:
+        candidate_mol2 = None
+        for fname in (f"{component_code}.cgenff.mol2", f"{component_code}.mol2"):
+            candidate = os.path.join(directory, fname)
+            if os.path.exists(candidate):
+                candidate_mol2 = candidate
+                break
+        str_file = os.path.join(directory, f"{component_code}.str")
+
+        if candidate_mol2 and os.path.exists(str_file):
+            mol2_file = candidate_mol2
+            print(f"✅ Using user-provided CGenFF inputs for {component_code}")
+        else:
+            print(f"ℹ️ Missing CGenFF inputs for {component_code} — attempting SILCSBio generation...")
+            cgenff_exec, _, _ = ensure_silcsbio_env()
+            if not cgenff_exec:
+                print(
+                    f"❌ No pre-generated topology found for retained component {component_code}, "
+                    "and SILCSBio/CGenFF generation is unavailable."
+                )
+                return None
+            mol2_file, str_file = build_cgenff_inputs_realtime(
+                directory,
+                component_code,
+                os.path.basename(template_raw_pdb),
+            )
+            if not (mol2_file and str_file):
+                print(f"❌ Local CGenFF generation failed for {component_code}.")
+                return None
+
+        try:
+            normalize_mol2_names(mol2_file, component_code)
+            normalize_str_resi_name(str_file, component_code)
+            assert_str_has_atoms(str_file)
+        except Exception as exc:
+            print(str(exc))
+            return None
+
+        if not run_command(
+            f"python cgenff_charmm2gmx_py3_nx2.py {component_code} "
+            f"{os.path.basename(mol2_file)} {os.path.basename(str_file)} {forcefield_path}",
+            cwd=directory,
+        ):
+            print(f"❌ CGenFF → GROMACS conversion failed for {component_code}.")
+            return None
+
+        try:
+            validate_cgenff_outputs(component_code, directory)
+        except RuntimeError as exc:
+            print(str(exc))
+            return None
+
+        ini_pdb_file = os.path.join(directory, f"{component_code.lower()}_ini.pdb")
+        pose_pdb = os.path.join(directory, f"{component_code.lower()}_pose_match.pdb")
+        pose_source_pdb = os.path.join(directory, f"{component_code.lower()}_h.pdb")
+        if os.path.exists(pose_source_pdb):
+            try:
+                validate_single_instance_template(pose_source_pdb, component_code)
+            except RuntimeError:
+                pose_source_pdb = os.path.join(directory, f"{component_code.lower()}_from_pdb.pdb")
+        if not os.path.exists(pose_source_pdb):
+            extracted_pose = os.path.join(directory, f"{component_code.lower()}_from_pdb.pdb")
+            if not extract_component_instance_from_pdb(source_pdb_path, component_code, representative_key, extracted_pose):
+                print(f"❌ Could not extract coordinates for {component_code} from the source PDB.")
+                return None
+            pose_source_pdb = extracted_pose
+
+        if not graft_coords_onto_ini(ini_pdb_file, pose_source_pdb, pose_pdb):
+            print(f"❌ Pose grafting failed for {component_code}.")
+            return None
+        template_pdb = pose_pdb
+        try:
+            validate_single_instance_template(template_pdb, component_code)
+        except RuntimeError as exc:
+            print(str(exc))
+            return None
+
+        pose_final = pose_pdb
+        if not ligand_has_hydrogens(pose_pdb):
+            pose_h_pdb = os.path.join(directory, f"{component_code.lower()}_pose_h.pdb")
+            if not run_command(
+                f"obabel {os.path.basename(pose_pdb)} -O {os.path.basename(pose_h_pdb)} -h",
+                cwd=directory,
+            ):
+                return None
+            pose_final = pose_h_pdb
+
+        if not run_command(
+            gmx_cmd("editconf", f"-f {os.path.basename(pose_final)} -o {os.path.basename(single_gro_file)}"),
+            cwd=directory,
+        ):
+            return None
+
+    if not template_pdb or not os.path.exists(template_pdb):
+        print(f"❌ No topology-complete template PDB is available for {component_code}.")
+        return None
+    try:
+        validate_single_instance_template(template_pdb, component_code)
+    except RuntimeError as exc:
+        print(str(exc))
+        return None
+
+    user_all_pdb = os.path.join(directory, f"{component_code.upper()}_all.pdb")
+    user_all_gro = os.path.join(directory, f"{component_code.upper()}_all.gro")
+    if os.path.exists(user_all_pdb) and os.path.getsize(user_all_pdb) > 0:
+        shutil.copyfile(user_all_pdb, all_pdb_file)
+        print(f"🔒 Using user-provided multi-copy PDB for {component_code}: {os.path.basename(user_all_pdb)}")
+    else:
+        try:
+            build_result = build_component_all_copies_from_template(
+                os.path.join(directory, pdb_filename),
+                component_code,
+                template_pdb,
+                all_pdb_file,
+            )
+        except Exception as exc:
+            print(f"❌ Failed to build topology-complete all-copy coordinates for {component_code}: {exc}")
+            return None
+        for report in build_result.get("copy_reports", []):
+            residue_key = report["residue_key"]
+            scaffold_partner = report.get("min_scaffold_partner") or "none"
+            prior_partner = report.get("min_prior_component_partner") or "none"
+            dropped_names = ",".join(report.get("dropped_heavy_atom_names") or []) or "none"
+            print(
+                f"🧭 Placement debug | {component_code} | source {residue_key[1]}:{residue_key[2]} "
+                f"| common heavy atoms={report['common_heavy_atoms']} "
+                f"| fit heavy atoms={report.get('fit_heavy_atoms', report['common_heavy_atoms'])} "
+                f"| dropped outliers={dropped_names} "
+                f"| post-fit RMSD={report['postfit_rmsd_ang']:.3f} Å "
+                f"| worst residual={report.get('worst_remaining_atom_name', 'n/a')}:{report.get('worst_remaining_residual_ang', float('nan')):.3f} Å "
+                f"| min scaffold distance={report['min_scaffold_distance_ang']:.3f} Å vs {scaffold_partner} "
+                f"| min prior-copy distance={report['min_prior_component_distance_ang']:.3f} Å vs {prior_partner}"
+            )
+
+    if os.path.exists(user_all_gro) and os.path.getsize(user_all_gro) > 0:
+        shutil.copyfile(user_all_gro, all_gro_file)
+        print(f"🔒 Using user-provided multi-copy GRO for {component_code}: {os.path.basename(user_all_gro)}")
+    else:
+        if not run_command(
+            gmx_cmd("editconf", f"-f {os.path.basename(all_pdb_file)} -o {os.path.basename(all_gro_file)}"),
+            cwd=directory,
+        ):
+            return None
+
+    for path in [single_gro_file, all_gro_file, itp_path, prm_path]:
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            print(f"❌ Expected component file is missing or empty: {path}")
+            return None
+
+    topology_atoms_per_molecule = count_atoms_in_itp_moleculetype(itp_path)
+    coordinate_atoms = count_gro_atoms(all_gro_file)
+    expected_atoms = topology_atoms_per_molecule * int(molecule_count)
+    if coordinate_atoms != expected_atoms:
+        print(
+            f"❌ Component coordinate/topology atom mismatch for {component_code}:\n"
+            f"   topology atoms per molecule: {topology_atoms_per_molecule}\n"
+            f"   molecule count: {molecule_count}\n"
+            f"   expected component atoms: {expected_atoms}\n"
+            f"   coordinate atoms in {os.path.basename(all_gro_file)}: {coordinate_atoms}\n"
+            "   This usually means raw PDB coordinates were used instead of topology-complete coordinates.\n"
+            f"   Regenerate complete multi-copy coordinates or provide {component_code}_all.gro matching {component_code.lower()}.itp."
+        )
+        return None
+
+    return {
+        "component_code": component_code,
+        "role": role,
+        "single_gro": single_gro_file,
+        "all_gro": all_gro_file,
+        "all_pdb": all_pdb_file,
+        "itp_path": itp_path,
+        "prm_path": prm_path,
+        "template_pdb": template_pdb,
+    }
 
 
 
@@ -2064,8 +2861,17 @@ def is_cgenff_ljpme_conflict(stderr):
 
 
 
-def process_directory(directory, pdb_filename, ligand_code):
-    """Processes a directory for MD setup using a selected PDB file and ligand code."""
+def process_directory(
+    directory,
+    pdb_filename,
+    ligand_code,
+    cofactors=None,
+    dropped_components=None,
+    strip_components=None,
+    detected_components=None,
+    polymer_info=None,
+):
+    """Process Step 1 setup for protein plus optional retained non-protein components."""
     print(f"\n🔄 Processing directory: {directory}")
     print_gmx_preflight(directory)
     pdb_path = os.path.join(directory, pdb_filename)
@@ -2073,6 +2879,11 @@ def process_directory(directory, pdb_filename, ligand_code):
     if not os.path.exists(pdb_path):
         print(f"⚠️ Skipping {directory}: {pdb_filename} not found.")
         return False
+    cofactors = parse_component_list(",".join(cofactors or []))
+    retained_components = get_all_retained_components(ligand_code, cofactors)
+    dropped_components = parse_component_list(",".join(dropped_components or []))
+    strip_components = ordered_unique_resnames(strip_components or retained_components)
+    detected_components = detected_components or {}
 
     print(
         f"📦 Box configuration: type={args.box_type}, distance={args.box_distance:.3f} nm"
@@ -2088,11 +2899,21 @@ def process_directory(directory, pdb_filename, ligand_code):
         print(f"❌ {exc}")
         return False
 
-    # Step 1: Remove ligand or copy original PDB based on presence of ligand
-    if ligand_code:
-        print(f"🛠️ Removing ligand ({ligand_code}) to create protein.pdb...")
-        if not run_command(f"grep -v '{ligand_code}' {pdb_filename} > protein.pdb", cwd=directory):
+    # Step 1: Remove all retained non-protein components before pdb2gmx
+    if strip_components:
+        print(f"🛠️ Removing non-protein components from protein.pdb before pdb2gmx: {', '.join(strip_components)}")
+        try:
+            removed_counts = write_protein_pdb_without_components(
+                pdb_path,
+                os.path.join(directory, "protein.pdb"),
+                strip_components,
+            )
+        except Exception as exc:
+            print(f"❌ Failed to create protein.pdb without retained components: {exc}")
             return False
+        print(f"✅ Components removed from protein.pdb before pdb2gmx: {', '.join(strip_components)}")
+        append_setup_log(directory, f"Components removed from protein.pdb before pdb2gmx: {', '.join(strip_components)}")
+        append_setup_log(directory, f"Removed atom counts by residue: {removed_counts}")
     else:
         print("🛠️ No ligand provided. Using the original PDB as protein.pdb")
         try:
@@ -2109,199 +2930,137 @@ def process_directory(directory, pdb_filename, ligand_code):
     if not fix_missing_atoms(protein_pdb_path, fixed_pdb_path):
         return False
     os.replace(fixed_pdb_path, protein_pdb_path)
+    original_chain_ids = [entry.get("chain_id") for entry in (polymer_info or {}).get("chains", [])]
+    classified_polymer_info = classify_polymer_chains(protein_pdb_path)
+    try:
+        remapped_chain_type_overrides = remap_chain_keyed_mapping_by_order(
+            original_chain_ids,
+            [entry.get("chain_id") for entry in classified_polymer_info.get("chains", [])],
+            parse_chain_type_overrides(args.chain_types),
+            "chain type",
+        )
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        return False
+    polymer_info = apply_chain_type_overrides(
+        classified_polymer_info,
+        remapped_chain_type_overrides,
+    )
+    print("🧬 Polymer chain classification after PDBFixer:")
+    print(format_polymer_chain_report(polymer_info))
+    system_registry_path, _ = write_system_registry(directory, polymer_info)
+    print(f"🧾 System registry written: {system_registry_path}")
+    append_setup_log(directory, f"System class: {polymer_info.get('system_class')}")
 
     # Step 2: Generate protein topology
-    if not automate_pdb2gmx(directory):
+    if not automate_pdb2gmx(directory, polymer_info=polymer_info):
         return False
+    system_registry_path, _ = write_system_registry(directory, polymer_info)
+    print(f"🧾 Updated system registry with pdb2gmx termini: {system_registry_path}")
 
     # Step 3: Generate atom index file
     if not generate_atom_index_file(
                                     directory,
                                     chain_names_arg=args.chain_names,
                                     chain_map_arg=args.chain_map,
-                                    source_pdb_path=pdb_path
+                                    source_pdb_path=pdb_path,
+                                    polymer_info=polymer_info,
                                 ):
         print("⚠️ Failed to generate atom index file.")
 
         return False
     
-    # ============================================================
-    # Step 4: Generate ligand topology (if applicable)
-    # ============================================================
+    component_infos = []
+    molecule_counts = count_component_instances(pdb_path, retained_components)
+    registry_path, registry = write_component_registry(
+        directory,
+        primary_ligand=ligand_code,
+        cofactors=cofactors,
+        molecule_counts=molecule_counts,
+        analysis_ligand=ligand_code,
+        dropped_components=dropped_components,
+        detected_components=detected_components,
+    )
+    print(f"🧾 Component registry written: {registry_path}")
     if ligand_code:
-        print("\n🛠️ Generating ligand topology...")
-        forcefield_path = detect_forcefield(directory)
-        if forcefield_path is None:
+        print(f"🧪 Primary ligand: {ligand_code}")
+    print(f"🧪 Retained cofactors: {', '.join(cofactors) if cofactors else 'None'}")
+    print(f"🧪 Dropped hetero components: {', '.join(dropped_components) if dropped_components else 'None'}")
+    print(
+        "🧪 Molecule counts: "
+        + (", ".join(f"{code}={molecule_counts.get(code, 0)}" for code in retained_components) if retained_components else "None")
+    )
+    append_setup_log(directory, f"Primary ligand: {ligand_code or 'None'}")
+    append_setup_log(directory, f"Retained cofactors: {', '.join(cofactors) if cofactors else 'None'}")
+    append_setup_log(directory, f"Dropped hetero components: {', '.join(dropped_components) if dropped_components else 'None'}")
+    append_setup_log(directory, f"Molecule counts: {molecule_counts}")
+
+    if retained_components:
+        for component_code in retained_components:
+            role = "primary_ligand" if component_code == ligand_code else "cofactor"
+            info = prepare_component_topology(
+                directory,
+                component_code,
+                pdb_filename,
+                role,
+                molecule_count=molecule_counts.get(component_code, 0),
+            )
+            if not info:
+                return False
+            component_infos.append(info)
+        print(f"✅ Parameterized components: {', '.join(info['component_code'] for info in component_infos)}")
+        append_setup_log(directory, "Parameterized components: " + ", ".join(info["component_code"] for info in component_infos))
+        validation_results = validate_complex_against_topology_components(component_infos, molecule_counts)
+        validation_report = format_component_validation_report(validation_results)
+        print(validation_report)
+        append_setup_log(directory, validation_report)
+        if not all(result["ok"] for result in validation_results):
             return False
 
 
 
-        # ============================================================
-        # Step 4: Generate ligand topology (if applicable)
-        # ============================================================
-        if ligand_code:
-            print("\n🛠️ Generating ligand topology...")
-            forcefield_path = detect_forcefield(directory)
-            if forcefield_path is None:
-                return False
-
-            ligand_gro_file = None
-            ini_pdb_file    = None
-
-            # ------------------------------------------------------------
-            # 4a0) ParamChem GROMACS import (HIGHEST PRIORITY)
-            # ------------------------------------------------------------
-            paramchem = import_paramchem_gromacs(directory, ligand_code)
-
-            if paramchem:
-                print("🔒 Using ParamChem GROMACS ligand topology")
-
-                ini_pdb_file = paramchem["ini_pdb"]
-                ligand_gro_file = os.path.join(directory, f"{ligand_code.lower()}.gro")
-
-                # Convert ParamChem PDB → GRO
-                if not run_command(
-                    gmx_cmd(
-                        "editconf",
-                        f"-f {os.path.basename(ini_pdb_file)} -o {os.path.basename(ligand_gro_file)}",
-                    ),
-                    cwd=directory
-                ):
-                    return False
-
-                # Optional sanity check
-                prot_ctr = centroid_from_gro(os.path.join(directory, "protein_processed.gro"))
-                lig_ctr  = centroid_from_gro(ligand_gro_file)
-                print(f"🔎 Centroids (nm) — protein: {prot_ctr}, ligand: {lig_ctr}")
-
-            else:
-                # ------------------------------------------------------------
-                # 4a) Ensure CGenFF inputs exist
-                # ------------------------------------------------------------
-                candidate_mol2 = None
-                for fname in (f"{ligand_code}.cgenff.mol2", f"{ligand_code}.mol2"):
-                    p = os.path.join(directory, fname)
-                    if os.path.exists(p):
-                        candidate_mol2 = p
-                        break
-
-                str_file = os.path.join(directory, f"{ligand_code}.str")
-
-                if candidate_mol2 and os.path.exists(str_file):
-                    mol2_file = candidate_mol2
-                    print(f"✅ Using user-provided CGenFF inputs: "
-                        f"{os.path.basename(mol2_file)}, {os.path.basename(str_file)}")
-                else:
-                    print("ℹ️ Missing CGenFF inputs — attempting SILCSBio generation...")
-
-                    cgenff_exec, _, _ = ensure_silcsbio_env()
-                    if not cgenff_exec:
-                        print(
-                            "❌ No SILCSBio environment AND no pre-generated CGenFF inputs.\n"
-                            "   → Generate ligand parameters externally (ParamChem)\n"
-                            "   → Place them in this directory and rerun."
-                        )
-                        return False
-
-                    mol2_file, str_file = build_cgenff_inputs_realtime(
-                        directory, ligand_code, pdb_filename
-                    )
-                    if not (mol2_file and str_file):
-                        print("❌ Local CGenFF generation failed.")
-                        return False
-
-                # ------------------------------------------------------------
-                # 4a.5) Normalize + HARD FAIL if .str is invalid
-                #       (ALWAYS for CGenFF paths)
-                # ------------------------------------------------------------
-                try:
-                    normalize_mol2_names(mol2_file, ligand_code)
-                    normalize_str_resi_name(str_file, ligand_code)
-                    assert_str_has_atoms(str_file)
-                except Exception as e:
-                    print(str(e))
-                    return False
-
-                # ------------------------------------------------------------
-                # 4b) Convert CGenFF → GROMACS
-                # ------------------------------------------------------------
-                if not run_command(
-                    f"python cgenff_charmm2gmx_py3_nx2.py {ligand_code} "
-                    f"{os.path.basename(mol2_file)} {os.path.basename(str_file)} {forcefield_path}",
-                    cwd=directory
-                ):
-                    print("❌ CGenFF → GROMACS conversion failed.")
-                    return False
-
-                try:
-                    validate_cgenff_outputs(ligand_code, directory)
-                except RuntimeError as e:
-                    print(str(e))
-                    return False
-
-                # ------------------------------------------------------------
-                # 4c) Pose-matched coordinates
-                # ------------------------------------------------------------
-                ini_pdb_file = os.path.join(directory, f"{ligand_code.lower()}_ini.pdb")
-                pose_pdb    = os.path.join(directory, f"{ligand_code.lower()}_pose_match.pdb")
-                ligand_gro_file = os.path.join(directory, f"{ligand_code.lower()}.gro")
-
-                pose_source_pdb = os.path.join(directory, f"{ligand_code.lower()}_h.pdb")
-                if not os.path.exists(pose_source_pdb):
-                    extracted_pose = os.path.join(directory, f"{ligand_code.lower()}_from_pdb.pdb")
-                    if not run_command(
-                        f"grep '{ligand_code}' {pdb_filename} > {os.path.basename(extracted_pose)}",
-                        cwd=directory
-                    ):
-                        return False
-                    pose_source_pdb = extracted_pose
-
-                if not graft_coords_onto_ini(ini_pdb_file, pose_source_pdb, pose_pdb):
-                    print("❌ Pose grafting failed.")
-                    return False
-
-                # ------------------------------------------------------------
-                # 4d) Ensure hydrogens
-                # ------------------------------------------------------------
-                pose_final = pose_pdb
-                if not ligand_has_hydrogens(pose_pdb):
-                    pose_h_pdb = os.path.join(directory, f"{ligand_code.lower()}_pose_h.pdb")
-                    if not run_command(
-                        f"obabel {os.path.basename(pose_pdb)} "
-                        f"-O {os.path.basename(pose_h_pdb)} -h",
-                        cwd=directory
-                    ):
-                        return False
-                    pose_final = pose_h_pdb
-
-                # ------------------------------------------------------------
-                # 4e) Generate ligand .gro
-                # ------------------------------------------------------------
-                if not run_command(
-                    gmx_cmd(
-                        "editconf",
-                        f"-f {os.path.basename(pose_final)} -o {os.path.basename(ligand_gro_file)}",
-                    ),
-                    cwd=directory
-                ):
-                    return False
-
-                prot_ctr = centroid_from_gro(os.path.join(directory, "protein_processed.gro"))
-                lig_ctr  = centroid_from_gro(ligand_gro_file)
-                print(f"🔎 Centroids (nm) — protein: {prot_ctr}, ligand: {lig_ctr}")
-
-        else:
-            print("ℹ️ No ligand present, skipping ligand topology generation.")
-
-
-
-    # Step 5: Merge protein and ligand structures
-    if ligand_code:
-        print("\n🔄 Merging protein and ligand structures...")
+    # Step 5: Merge protein and retained component structures
+    if component_infos:
+        print("\n🔄 Merging protein and retained component structures...")
         protein_gro = os.path.join(directory, "protein_processed.gro")
-        ligand_gro = os.path.join(directory, ligand_gro_file)
         complex_gro = os.path.join(directory, "complex.gro")
-        merge_gro_files(protein_gro, ligand_gro, complex_gro)
+        merge_gro_files_multi(protein_gro, [info["all_gro"] for info in component_infos], complex_gro)
+        if args.component_clash_check:
+            clashes = detect_component_clashes(complex_gro, [info["component_code"] for info in component_infos], cutoff_nm=0.08)
+            if clashes:
+                clash_report = format_clash_report(clashes)
+                print(clash_report)
+                append_setup_log(directory, clash_report)
+                clashing_resnames = sorted(
+                    {
+                        atom_resname
+                        for clash in clashes
+                        for atom_resname in (clash["atom_a"]["resname"], clash["atom_b"]["resname"])
+                        if atom_resname in {info["component_code"] for info in component_infos}
+                    }
+                )
+                if ligand_code in clashing_resnames:
+                    print("❌ Primary ligand participates in a severe retained-component clash. Fix geometry before continuing.")
+                    return False
+                if args.drop_clashing_cofactors:
+                    print(f"⚠️ Dropping clashing cofactors: {', '.join(clashing_resnames)}")
+                    dropped_components = ordered_unique_resnames(dropped_components + clashing_resnames)
+                    component_infos = [info for info in component_infos if info["component_code"] not in clashing_resnames]
+                    cofactors = [code for code in cofactors if code not in clashing_resnames]
+                    retained_components = get_all_retained_components(ligand_code, cofactors)
+                    registry_path, registry = write_component_registry(
+                        directory,
+                        primary_ligand=ligand_code,
+                        cofactors=cofactors,
+                        molecule_counts={code: molecule_counts[code] for code in retained_components},
+                        analysis_ligand=ligand_code,
+                        dropped_components=dropped_components,
+                        detected_components=detected_components,
+                    )
+                    merge_gro_files_multi(protein_gro, [info["all_gro"] for info in component_infos], complex_gro)
+                else:
+                    print("❌ Severe retained-component clashes detected before solvation. Use --drop-clashing-cofactors to remove non-primary cofactors automatically.")
+                    return False
     else:
         print("ℹ️ Skipping merge step (protein-only system). Using protein structure as complex.")
         protein_gro = os.path.join(directory, "protein_processed.gro")
@@ -2310,10 +3069,14 @@ def process_directory(directory, pdb_filename, ligand_code):
         print("✅ Single protein structure saved as complex.gro")
 
     # Step 6: Modify topology
-    if ligand_code:
+    if component_infos:
         print("\n🛠️ Modifying topology file (topol.top)...")
         topol_path = os.path.join(directory, "topol.top")
-        modify_topology_file(topol_path, ligand_code)
+        modify_topology_file_multi(
+            topol_path,
+            [info["component_code"] for info in component_infos],
+            molecule_counts,
+        )
     else:
         print("ℹ️ Skipping topology file modifications for ligand.")
 
@@ -2480,12 +3243,36 @@ if __name__ == "__main__":
         print(f"❌ PDB preflight failed: {exc}")
         exit(1)
 
-    # Ask user whether a ligand is present in the system
-    
-    # --- AUTO-DETECT LIGANDS FROM THE PDB ---
-    detected_ligs = autodetect_ligands(pdb_path)
+    try:
+        chain_type_overrides = parse_chain_type_overrides(args.chain_types)
+    except ValueError as exc:
+        print(f"❌ Invalid --chain-types value: {exc}")
+        exit(1)
+    polymer_info = apply_chain_type_overrides(
+        classify_polymer_chains(pdb_path),
+        chain_type_overrides,
+    )
+    print("\n🧬 Detected polymer chains:")
+    print(format_polymer_chain_report(polymer_info))
+
+    component_summary = summarize_detected_hetero_components(pdb_path)
+    detected_ligs = selectable_component_resnames(component_summary)
+    component_table_text, component_index_lookup = render_detected_component_table(component_summary)
+    detected_component_registry = {
+        resname: {
+            "copies": entry.get("copies", 0),
+            "atom_count_raw_pdb": entry.get("atom_count_raw_pdb", 0),
+            "instance_labels": entry.get("instance_labels", []),
+            "recommended_role": entry.get("recommended_role"),
+            "category": entry.get("category"),
+            "excluded_by_default": entry.get("excluded_by_default", False),
+            "warning": entry.get("warning"),
+        }
+        for resname, entry in component_summary.items()
+    }
 
     ligand_code = None  # default
+    selected_cofactors = parse_component_list(args.cofactors)
 
     if args.ligand:
         ligand_code = args.ligand.upper()
@@ -2493,15 +3280,14 @@ if __name__ == "__main__":
 
     elif args.mode == "protein":
         ligand_code = None
-        print("\n✅ Protein-only mode forced by CLI. Skipping ligand detection.")
+        if polymer_info.get("has_nucleic_acid"):
+            print("\n✅ Biomolecule-only mode forced by CLI. Skipping small-molecule ligand detection.")
+        else:
+            print("\n✅ Protein-only mode forced by CLI. Skipping ligand detection.")
 
     else:
-        # If script is interactive OR mode not pre-selected
         if detected_ligs:
-            print("\n🔍 Auto-detected ligand(s) in the PDB:")
-            for lig in detected_ligs:
-                print(f"   • {lig}")
-
+            print("\n" + component_table_text)
             if len(detected_ligs) == 1:
                 choice = input(f"\nUse detected ligand '{detected_ligs[0]}'? [Y/n]: ").strip().lower()
                 if choice in ("", "y", "yes"):
@@ -2509,26 +3295,72 @@ if __name__ == "__main__":
                 else:
                     ligand_code = input("Enter 3-letter ligand code manually: ").strip().upper()
             else:
-                print("\nMultiple ligands detected.")
-                print("Enter one of these codes, or type a different ligand manually:")
-                ligand_code = input(f"Choose ligand [{', '.join(detected_ligs)}]: ").strip().upper()
-
-                if ligand_code == "":
-                    ligand_code = detected_ligs[0]  # default first
+                raw_primary = input(
+                    "\nSelect the PRIMARY ligand for analysis [number or residue name]: "
+                ).strip()
+                if not raw_primary:
+                    raw_primary = "1"
+                ligand_code = resolve_component_selection(raw_primary, component_index_lookup, detected_ligs)[0]
+                remaining = [code for code in detected_ligs if code != ligand_code]
+                if remaining:
+                    raw_cofactors = input(
+                        "Select retained cofactors/context components from the remaining residues.\n"
+                        "Enter comma-separated numbers/names, \"all\", or \"none\" [default: none]: "
+                    ).strip() or "none"
+                    if raw_cofactors.lower() == "all":
+                        selected_cofactors = remaining
+                    else:
+                        selected_cofactors = resolve_component_selection(raw_cofactors, component_index_lookup, remaining)
         else:
-            print("\nℹ️ No ligand detected in the PDB.")
-            use_lig = input("Run as protein-only? [Y/n]: ").strip().lower()
+            polymer_labels = polymer_chain_type_list(polymer_info)
+            print("\nℹ️ No small-molecule ligand/cofactor was selected.")
+            print(f"🧬 Detected polymer chains include: {', '.join(polymer_labels) if polymer_labels else 'unknown'}.")
+            if polymer_info.get("has_nucleic_acid"):
+                use_lig = input("Run as polymer-only / biomolecule-only system? [Y/n]: ").strip().lower()
+            else:
+                use_lig = input("Run as protein-only? [Y/n]: ").strip().lower()
 
             if use_lig in ("n", "no"):
                 ligand_code = input("Enter 3-letter ligand code manually: ").strip().upper()
             else:
                 ligand_code = None
 
+    if args.component_mode == "all" and ligand_code and detected_ligs:
+        selected_cofactors = [code for code in detected_ligs if code != ligand_code]
+        if selected_cofactors:
+            print(f"⚠️ Auto-retained cofactors: {', '.join(selected_cofactors)}")
+    elif args.auto_keep_hetero and ligand_code and detected_ligs:
+        selected_cofactors = [code for code in detected_ligs if code != ligand_code]
+        if selected_cofactors:
+            print(f"⚠️ Auto-retained cofactors: {', '.join(selected_cofactors)}")
+    elif args.component_mode == "selected":
+        selected_cofactors = [code for code in selected_cofactors if code in detected_ligs and code != ligand_code]
+        if args.ligand and detected_ligs and len(detected_ligs) > 1 and not args.cofactors:
+            dropped_preview = [code for code in detected_ligs if code != ligand_code]
+            if dropped_preview:
+                print(
+                    f"⚠️ Multiple non-protein components were detected: {', '.join(detected_ligs)}.\n"
+                    f"   Keeping primary ligand {ligand_code} only.\n"
+                    f"   Dropping unselected components: {', '.join(dropped_preview)}.\n"
+                    "   To retain them, rerun with --cofactors <RESNAME,...> or --component-mode all."
+                )
+    elif args.component_mode == "none":
+        selected_cofactors = []
+
+    selected_components = get_all_retained_components(ligand_code, selected_cofactors)
+    dropped_components = [code for code in detected_ligs if code not in selected_components]
+    strip_components = list(detected_ligs)
+
     # Final report
     if ligand_code:
         print(f"\n✅ Using ligand: {ligand_code}")
     else:
         print("\n✅ No ligand selected for this simulation.")
+    if selected_cofactors:
+        print(f"✅ Retained cofactors: {', '.join(selected_cofactors)}")
+    else:
+        print("✅ Retained cofactors: None")
+    print(f"✅ Dropped hetero components: {', '.join(dropped_components) if dropped_components else 'None'}")
 
     try:
         validate_input_pdb(
@@ -2549,8 +3381,18 @@ if __name__ == "__main__":
         print(f"✅ Using ligand code: {ligand_code}")
     else:
         print("✅ No ligand selected for this simulation.")
+    print(f"✅ Component mode: {args.component_mode}")
     print(f"✅ Box type: {args.box_type}")
     print(f"✅ Box distance: {args.box_distance:.3f} nm")
-    if not process_directory(base_directory, pdb_filename, ligand_code):
+    if not process_directory(
+        base_directory,
+        pdb_filename,
+        ligand_code,
+        cofactors=selected_cofactors,
+        dropped_components=dropped_components,
+        strip_components=strip_components,
+        detected_components=detected_component_registry,
+        polymer_info=polymer_info,
+    ):
         print("⚠️ Error detected. Stopping execution.")
         exit(1)

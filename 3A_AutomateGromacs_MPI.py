@@ -136,9 +136,20 @@ from tqdm import tqdm
 import time
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
+from itertools import combinations
 import mdtraj as md
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+from pymacs_component_utils import (
+    build_polymer_group_name,
+    get_all_retained_components,
+    index_has_group,
+    load_system_registry,
+    load_component_registry,
+    merged_component_group_name,
+    parse_component_list,
+    polymer_type_label,
+)
 
 GMX_BIN = None
 
@@ -216,6 +227,10 @@ parser = argparse.ArgumentParser(
 parser.add_argument(
     "-l", "--ligand", type=str, default=None,
     help="Ligand resname (e.g., PTC, GDP). If omitted, auto-detects largest non-protein residue."
+)
+parser.add_argument(
+    "--cofactors", "--context-ligands", dest="cofactors", type=str, default=None,
+    help="Comma-separated retained cofactors/context ligands kept in the trajectory but excluded from ligand-centered analysis by default."
 )
 
 parser.add_argument(
@@ -301,9 +316,9 @@ parser.add_argument(
 
 parser.add_argument(
     "--mode",
-    choices=["ligand", "protein", "protac", "peptide"],
+    choices=["ligand", "protein", "protac", "peptide", "biological"],
     default=None,
-    help="Analysis mode: ligand, protein, peptide, or protac. If omitted, prompts interactively like Step 2."
+    help="Analysis mode: ligand, protein, peptide, protac, or biological. If omitted, prompts interactively like Step 2."
 )
 
 parser.add_argument(
@@ -447,6 +462,98 @@ def parse_atomindex_file(path="atomIndex.txt"):
 
     return chain_map
 
+
+def parse_atomindex_entries(path="atomIndex.txt"):
+    """
+    Parse atomIndex.txt and preserve inline provenance comments like:
+      Label 1-100 # current_chain=A chain_type=rna ...
+    """
+    entries = []
+    if not os.path.exists(path):
+        return entries
+
+    with open(path) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            comment = ""
+            if "#" in line:
+                line, comment = line.split("#", 1)
+                line = line.strip()
+                comment = comment.strip()
+
+            if not line:
+                continue
+
+            m = re.match(r"^(\S+)\s+(\d+)\s*-\s*(\d+)$", line)
+            if not m:
+                print(f"⚠️ Skipping unparsable atomIndex line: {raw.rstrip()}")
+                continue
+
+            label = m.group(1)
+            start = int(m.group(2)) - 1
+            end = int(m.group(3)) - 1
+
+            meta = {}
+            for key, value in re.findall(r"(\w+)=([^\s#]+)", comment):
+                meta[key] = value
+
+            entries.append(
+                {
+                    "label": label,
+                    "start": start,
+                    "end": end,
+                    "current_chain": meta.get("current_chain"),
+                    "chain_type": (meta.get("chain_type") or "mixed_or_unknown").strip().lower(),
+                    "current_residues": meta.get("current_residues"),
+                    "source_chain": meta.get("source_chain"),
+                    "source_residues": meta.get("source_residues"),
+                }
+            )
+    return entries
+
+
+def anchor_atom_candidates_for_chain(chain_type):
+    normalized = (chain_type or "").strip().lower()
+    if normalized == "protein":
+        return ["CA"]
+    if normalized in {"rna", "dna"}:
+        return ["P", "C4'", "C4*", "C3'", "C3*", "O5'", "O5*"]
+    return ["CA", "P", "C4'", "C4*", "C3'", "C3*", "O5'", "O5*"]
+
+
+def select_chain_anchor_atoms(traj, start, end, chain_type="mixed_or_unknown"):
+    residue_map = []
+    for residue in traj.topology.residues:
+        atom_indices = [atom.index for atom in residue.atoms if start <= atom.index <= end]
+        if atom_indices:
+            residue_map.append((residue, atom_indices))
+
+    candidates = anchor_atom_candidates_for_chain(chain_type)
+    selected_indices = []
+    residue_numbers = []
+    used_anchor_name = None
+
+    for residue, atom_indices in residue_map:
+        residue_atoms = {traj.topology.atom(idx).name: idx for idx in atom_indices}
+        chosen = None
+        chosen_name = None
+        for atom_name in candidates:
+            if atom_name in residue_atoms:
+                chosen = residue_atoms[atom_name]
+                chosen_name = atom_name
+                break
+        if chosen is None:
+            continue
+        if used_anchor_name is None:
+            used_anchor_name = chosen_name
+        selected_indices.append(chosen)
+        residue_numbers.append(residue.resSeq)
+
+    return np.array(selected_indices, dtype=int), residue_numbers, used_anchor_name or "mixed"
+
 def peptide_atom_bounds(peptide_info):
     if not peptide_info:
         return None
@@ -530,12 +637,14 @@ def select_simulation_type(args):
         "2": "Protein:Protein/Peptide",
         "3": "PROTAC",
         "4": "Just Protein",
+        "5": "Biological System",
     }
     mode_map = {
         "ligand": "Ligand:Protein",
         "peptide": "Protein:Protein/Peptide",
         "protac": "PROTAC",
         "protein": "Just Protein",
+        "biological": "Biological System",
     }
 
     if args.mode:
@@ -549,8 +658,9 @@ def select_simulation_type(args):
     print("  2. Protein:Protein/Peptide")
     print("  3. PROTAC")
     print("  4. Just Protein")
+    print("  5. Biological System (Protein:RNA/DNA or RNA/DNA)")
 
-    sim_choice = input("Enter choice (1-4): ").strip()
+    sim_choice = input("Enter choice (1-5): ").strip()
     if sim_choice not in sim_map:
         print("❌ Invalid selection. Defaulting to Just Protein.")
         return "Just Protein"
@@ -600,14 +710,38 @@ def dispatch_to_protac_analysis():
 
 SIMULATION_TYPE = select_simulation_type(args)
 SIM_TYPE_NORM = SIMULATION_TYPE.lower().strip()
-PROTEIN_ONLY = SIM_TYPE_NORM in {"just protein", "protein"}
+PROTEIN_ONLY = SIM_TYPE_NORM in {"just protein", "protein", "biological system", "biological"}
 PEPTIDE_LIKE = SIM_TYPE_NORM in {"protein:protein/peptide", "peptide"}
 LIGAND_MODE = SIM_TYPE_NORM in {"ligand:protein", "ligand"}
 PROTAC_MODE = SIM_TYPE_NORM == "protac"
 PARTNER_MODE = LIGAND_MODE or PEPTIDE_LIKE
 PEPTIDE_INFO = load_peptide_chainmap(".") if PEPTIDE_LIKE else None
+COMPONENT_REGISTRY = load_component_registry(".") or {}
+SYSTEM_REGISTRY = load_system_registry(".") or {}
+REGISTRY_PRIMARY_LIGAND = (COMPONENT_REGISTRY.get("primary_ligand") or None)
+REGISTRY_COFACTORS = COMPONENT_REGISTRY.get("cofactors", [])
+CONTEXT_COFACTORS = parse_component_list(args.cofactors) if args.cofactors else REGISTRY_COFACTORS
+CONTEXT_COFACTORS = [code for code in CONTEXT_COFACTORS if code != REGISTRY_PRIMARY_LIGAND]
+BIOMOLECULE_MODE = bool(
+    PROTEIN_ONLY and (
+        SYSTEM_REGISTRY.get("has_rna")
+        or SYSTEM_REGISTRY.get("has_dna")
+    )
+)
+ANALYSIS_POLYMER_GROUP = build_polymer_group_name(SYSTEM_REGISTRY, [], override="auto")
 
 print(f"🧠 Selected analysis type: {SIMULATION_TYPE}")
+if COMPONENT_REGISTRY:
+    print(f"🧾 Loaded component registry: primary={REGISTRY_PRIMARY_LIGAND} cofactors={REGISTRY_COFACTORS}")
+if SYSTEM_REGISTRY:
+    print(
+        f"🧾 Loaded system registry: class={SYSTEM_REGISTRY.get('system_class')} "
+        f"polymer_chains={SYSTEM_REGISTRY.get('chain_types', {})}"
+    )
+if BIOMOLECULE_MODE:
+    print(f"🧬 Biomolecule-aware protein mode enabled via registry group: {ANALYSIS_POLYMER_GROUP}")
+    print("🧬 This path currently produces chain-vs-chain biomolecule contacts and distance summaries.")
+    print("🧬 Ligand-style per-residue interaction networks are still reserved for ligand/peptide partner analyses.")
 if PEPTIDE_LIKE:
     if PEPTIDE_INFO is not None:
         print("🧬 Protein:Protein/Peptide mode will use ligand-style peptide interaction analysis.")
@@ -925,9 +1059,10 @@ PARTNER_SELECTION_MDA = None
 PARTNER_IS_PEPTIDE = False
 
 if LIGAND_MODE:
-    if args.ligand:
-        ligand_code = args.ligand.strip().upper()
-        print(f"🧬 Using ligand from CLI: {ligand_code}")
+    if args.ligand or REGISTRY_PRIMARY_LIGAND:
+        ligand_code = (args.ligand or REGISTRY_PRIMARY_LIGAND).strip().upper()
+        source = "CLI" if args.ligand else "component registry"
+        print(f"🧬 Using ligand from {source}: {ligand_code}")
 
     else:
         candidates = detect_ligand_candidates()
@@ -959,8 +1094,10 @@ if LIGAND_MODE:
             print("❌ ERROR: No ligand provided and auto-detection failed.")
             exit(1)
 
+    CONTEXT_COMPONENTS = get_all_retained_components(ligand_code, CONTEXT_COFACTORS)
     PARTNER_SELECTION_MDA = mda_partner_selection(ligand_code=ligand_code)
     print(f"🧬 Final ligand selected: {ligand_code}")
+    print(f"🧬 Context cofactors retained in trajectory: {', '.join(CONTEXT_COFACTORS) if CONTEXT_COFACTORS else 'None'}")
 
     print("\n📌 You may now choose a full compound name for labeling graphs/output.")
     print("   • Press ENTER to use the ligand code above (recommended only for short names).")
@@ -980,6 +1117,7 @@ if LIGAND_MODE:
 
 elif PEPTIDE_LIKE:
     PARTNER_IS_PEPTIDE = True
+    CONTEXT_COMPONENTS = []
 
     if PEPTIDE_INFO is None:
         print("⚠️ No .chainmap.peptide.json detected; peptide partner cannot be auto-resolved.")
@@ -998,6 +1136,7 @@ else:
     ligand_code = None
     compound_name = "ProteinOnly"
     PARTNER_SELECTION_MDA = None
+    CONTEXT_COMPONENTS = []
     print("🧬 No ligand will be used for this analysis mode.")
     print(f"🏷️ Compound/output label for protein-centric analysis: {compound_name}")
 # ============================================================
@@ -1015,9 +1154,10 @@ else:
 
 
 # ------------------------- Ensure index group -------------------------
-def ensure_analysis_group(protein_only=False, ligand_code=None):
+def ensure_analysis_group(protein_only=False, ligand_code=None, context_components=None, polymer_group_override=None):
     index_file = "index.ndx"
-    wanted_group = "Protein" if protein_only else f"Protein_{ligand_code}"
+    merged_group = merged_component_group_name(context_components or [ligand_code] if ligand_code else [], fallback_ligand=ligand_code, protein_only=protein_only)
+    wanted_group = polymer_group_override or ("Protein" if protein_only else merged_group)
 
     if not os.path.exists(index_file):
         raise SystemExit("❌ index.ndx not found. Run MD setup script first.")
@@ -1033,11 +1173,16 @@ def ensure_analysis_group(protein_only=False, ligand_code=None):
         print(f"✅ Found existing group [{wanted_group}] in index.ndx.")
         return wanted_group
 
-    if protein_only:
+    if protein_only and not polymer_group_override:
         if "Protein" in groups:
             print("✅ Using existing [Protein] group for protein-only mode.")
             return "Protein"
         raise SystemExit("❌ [Protein] group not found in index.ndx.")
+
+    fallback_group = f"Protein_{ligand_code}" if ligand_code else "Protein"
+    if fallback_group in groups:
+        print(f"✅ Using existing fallback group [{fallback_group}] in index.ndx.")
+        return fallback_group
 
     print(f"⚠️ Group [{wanted_group}] not found — creating it now...")
     proc = subprocess.run(
@@ -1060,7 +1205,12 @@ def ensure_analysis_group(protein_only=False, ligand_code=None):
     print(f"✅ Created [{wanted_group}] (1 | {lig_num}) in index.ndx.")
     return wanted_group
 
-analysis_group = ensure_analysis_group(protein_only=(PROTEIN_ONLY or PEPTIDE_LIKE), ligand_code=ligand_code)
+analysis_group = ensure_analysis_group(
+    protein_only=(PROTEIN_ONLY or PEPTIDE_LIKE),
+    ligand_code=ligand_code,
+    context_components=CONTEXT_COMPONENTS,
+    polymer_group_override=ANALYSIS_POLYMER_GROUP if BIOMOLECULE_MODE else None,
+)
 
 
 
@@ -1325,21 +1475,33 @@ phase("STEP A+B complete")
 # ============================================================
 phase("STEP C — Identify Binding Chains for Downstream RMSD")
 
-print("\n🔍 Identifying chains for downstream protein analysis...")
+print("\n🔍 Identifying chains for downstream biomolecule analysis...")
 
 u_pocket = mda.Universe("binding_pocket_only.pdb")
 protein_residues = u_pocket.select_atoms("protein").residues
 
+atomindex_entries = parse_atomindex_entries("atomIndex.txt")
 chain_map = parse_atomindex_file("atomIndex.txt")
+chain_entry_meta = {entry["label"]: entry for entry in atomindex_entries}
 if not chain_map:
     print("⚠️ atomIndex.txt not found or contained no parseable chain ranges — treating entire protein as one chain")
     chain_map["Protein"] = (protein_residues.atoms[0].index,
                             protein_residues.atoms[-1].index)
+    chain_entry_meta["Protein"] = {
+        "label": "Protein",
+        "start": protein_residues.atoms[0].index,
+        "end": protein_residues.atoms[-1].index,
+        "current_chain": "Protein",
+        "chain_type": "protein",
+    }
 
 active_chains = {}
 
 if PROTEIN_ONLY:
-    print("🧬 Protein-centric mode: treating all available protein chains as active.")
+    if BIOMOLECULE_MODE:
+        print("🧬 Biomolecule-centric mode: treating all available polymer chains as active.")
+    else:
+        print("🧬 Protein-centric mode: treating all available protein chains as active.")
     active_chains = dict(chain_map)
 
 elif PEPTIDE_LIKE:
@@ -1617,7 +1779,9 @@ if not done_checkpoint("chk_D3.txt"):
     # --------------------------------------------------------
     # Load chain map
     # --------------------------------------------------------
+    atomindex_entries = parse_atomindex_entries("atomIndex.txt")
     chain_map = parse_atomindex_file("atomIndex.txt")
+    chain_entry_meta = {entry["label"]: entry for entry in atomindex_entries}
 
     if not chain_map:
         print("⚠️ atomIndex.txt not found or contained no parseable chain ranges — using full protein as one chain")
@@ -1704,25 +1868,30 @@ if not done_checkpoint("chk_D3.txt"):
         plt.close()
 
         # =========================
-        # RESIDUE-LEVEL RMSF (Cα)
+        # RESIDUE-LEVEL RMSF (anchor atoms)
         # =========================
-        ca_indices = [
-            atom.index for atom in traj.topology.atoms
-            if atom.name == "CA" and start <= atom.index <= end
-        ]
+        entry_meta = chain_entry_meta.get(chain, {})
+        current_chain_id = entry_meta.get("current_chain")
+        chain_type = entry_meta.get("chain_type")
+        if not chain_type and current_chain_id and SYSTEM_REGISTRY.get("chain_types"):
+            chain_type = SYSTEM_REGISTRY["chain_types"].get(current_chain_id)
+        if not chain_type:
+            chain_type = "mixed_or_unknown"
 
-        if not ca_indices:
-            print(f"⚠️ {chain}: no CA atoms found")
+        anchor_indices, res_ids, anchor_name = select_chain_anchor_atoms(
+            traj, start, end, chain_type=chain_type
+        )
+
+        if anchor_indices.size == 0:
+            print(
+                f"⚠️ {chain}: no residue anchor atoms found for "
+                f"{polymer_type_label(chain_type)} chain"
+            )
             continue
 
-        res_ids = [
-            traj.topology.atom(i).residue.resSeq
-            for i in ca_indices
-        ]
-
-        mean_ca = traj.xyz[:, ca_indices, :].mean(axis=0)
+        mean_ca = traj.xyz[:, anchor_indices, :].mean(axis=0)
         rmsf_res = np.sqrt(
-            ((traj.xyz[:, ca_indices, :] - mean_ca) ** 2)
+            ((traj.xyz[:, anchor_indices, :] - mean_ca) ** 2)
             .sum(axis=2)
             .mean(axis=0)
         ) * 10.0
@@ -1843,6 +2012,8 @@ if not done_checkpoint("chk_D3.txt"):
         plt.title(f"{chain} RMSF per Residue")
         plt.xlabel("Residue Number")
         plt.ylabel("RMSF (Å)")
+        if anchor_name:
+            plt.suptitle(f"Anchor atom: {anchor_name}", y=1.02, fontsize=10)
         plt.tight_layout()
 
         savefig(
@@ -2359,8 +2530,137 @@ else:
 
 
 
-if not PARTNER_MODE:
-    print("⏭️ Skipping ligand-contact, NETWORX, and pocket interaction analyses (protein-centric mode).")
+if BIOMOLECULE_MODE and not PARTNER_MODE and not done_checkpoint("chk_EBIO.txt"):
+    phase("STEP E-BIO — Chain Interaction Analysis")
+
+    traj, _, _, _ = get_aligned_traj_and_ligand()
+    atomindex_entries = parse_atomindex_entries("atomIndex.txt")
+    chain_entry_meta = {entry["label"]: entry for entry in atomindex_entries}
+    pair_rows = []
+    pair_series = {"Time_ns": traj.time / 1000.0}
+
+    active_chain_entries = []
+    for chain_label, (start, end) in active_chains.items():
+        meta = chain_entry_meta.get(chain_label, {})
+        current_chain_id = meta.get("current_chain")
+        chain_type = meta.get("chain_type")
+        if not chain_type and current_chain_id and SYSTEM_REGISTRY.get("chain_types"):
+            chain_type = SYSTEM_REGISTRY["chain_types"].get(current_chain_id)
+        chain_type = chain_type or "mixed_or_unknown"
+        anchor_indices, residue_numbers, anchor_name = select_chain_anchor_atoms(
+            traj, start, end, chain_type=chain_type
+        )
+        if anchor_indices.size == 0:
+            print(f"⚠️ Skipping {chain_label}: no usable anchor atoms for biomolecule contact analysis.")
+            continue
+        active_chain_entries.append(
+            {
+                "label": chain_label,
+                "chain_id": current_chain_id or chain_label,
+                "chain_type": chain_type,
+                "anchor_indices": anchor_indices,
+                "residue_numbers": residue_numbers,
+                "anchor_name": anchor_name,
+            }
+        )
+
+    if len(active_chain_entries) < 2:
+        print("⚠️ Fewer than two biomolecule chains had usable anchor atoms; skipping STEP E-BIO.")
+    else:
+        for left, right in combinations(active_chain_entries, 2):
+            pair_name = f"{left['label']}__vs__{right['label']}"
+            min_distances_ang = np.empty(traj.n_frames, dtype=float)
+            in_contact = np.empty(traj.n_frames, dtype=int)
+
+            for frame_i in range(traj.n_frames):
+                xyz_left = traj.xyz[frame_i, left["anchor_indices"], :]
+                xyz_right = traj.xyz[frame_i, right["anchor_indices"], :]
+                d = np.linalg.norm(
+                    xyz_left[:, None, :] - xyz_right[None, :, :],
+                    axis=2
+                )
+                min_distance_ang = float(d.min() * 10.0)
+                min_distances_ang[frame_i] = min_distance_ang
+                in_contact[frame_i] = int(min_distance_ang <= CONTACT_CUTOFF)
+
+            pair_series[f"{pair_name}_contact"] = in_contact
+            pair_series[f"{pair_name}_min_distance_A"] = min_distances_ang
+            pair_rows.append(
+                {
+                    "ChainA_Label": left["label"],
+                    "ChainA_ID": left["chain_id"],
+                    "ChainA_Type": polymer_type_label(left["chain_type"]),
+                    "ChainA_Anchor": left["anchor_name"],
+                    "ChainB_Label": right["label"],
+                    "ChainB_ID": right["chain_id"],
+                    "ChainB_Type": polymer_type_label(right["chain_type"]),
+                    "ChainB_Anchor": right["anchor_name"],
+                    "ContactFraction": float(in_contact.mean()),
+                    "MeanMinDistance_A": float(min_distances_ang.mean()),
+                    "MinObservedDistance_A": float(min_distances_ang.min()),
+                }
+            )
+
+        pair_df = pd.DataFrame(pair_rows).sort_values(
+            ["ContactFraction", "MeanMinDistance_A"],
+            ascending=[False, True],
+        )
+        pair_df.to_csv(
+            os.path.join(OUTPUT_DIR, "Biomolecule_Chain_Interaction_Summary.csv"),
+            index=False,
+        )
+        pd.DataFrame(pair_series).to_csv(
+            os.path.join(OUTPUT_DIR, "Biomolecule_Chain_Interaction_Timeseries.csv"),
+            index=False,
+        )
+
+        if not pair_df.empty:
+            heatmap_rows = []
+            for _, row in pair_df.iterrows():
+                heatmap_rows.append(
+                    {
+                        "Pair": f"{row['ChainA_Label']} vs {row['ChainB_Label']}",
+                        "ContactFraction": row["ContactFraction"],
+                    }
+                )
+            heatmap_df = pd.DataFrame(heatmap_rows).set_index("Pair")
+            plt.figure(figsize=(8, max(3, 0.5 * len(heatmap_df))))
+            sns.heatmap(
+                heatmap_df,
+                annot=True,
+                fmt=".2f",
+                cmap="viridis",
+                cbar_kws={"label": f"Fraction of frames within {CONTACT_CUTOFF:.1f} Å"},
+            )
+            plt.title("Biomolecule Chain-Chain Contact Fractions")
+            savefig(os.path.join(OUTPUT_DIR, "Biomolecule_Chain_Interaction_Heatmap.png"))
+
+            plt.figure(figsize=(12, 6))
+            time_ns = traj.time / 1000.0
+            for _, row in pair_df.iterrows():
+                pair_name = f"{row['ChainA_Label']}__vs__{row['ChainB_Label']}"
+                plt.plot(
+                    time_ns,
+                    pair_series[f"{pair_name}_min_distance_A"],
+                    lw=1.3,
+                    label=f"{row['ChainA_Label']} vs {row['ChainB_Label']}",
+                )
+            plt.axhline(CONTACT_CUTOFF, color="black", lw=1.0, ls="--", alpha=0.7)
+            plt.xlabel("Time (ns)")
+            plt.ylabel("Minimum chain-anchor distance (Å)")
+            plt.title("Biomolecule Chain-Chain Minimum Distances Over Time")
+            plt.legend(frameon=False, fontsize=8)
+            savefig(os.path.join(OUTPUT_DIR, "Biomolecule_Chain_Interaction_Distances.png"))
+
+        print("✅ STEP E-BIO complete — biomolecule chain interaction summaries saved.")
+
+    checkpoint("chk_EBIO.txt")
+
+elif not PARTNER_MODE:
+    if BIOMOLECULE_MODE:
+        print("⏭️ Skipping ligand-contact, NETWORX, and pocket interaction analyses; biomolecule chain analysis path already used.")
+    else:
+        print("⏭️ Skipping ligand-contact, NETWORX, and pocket interaction analyses (protein-centric mode).")
 else:
     # ============================================================
     # STEP E — FULL BINDING-POCKET ANALYSIS WITH CSV EXPORTS

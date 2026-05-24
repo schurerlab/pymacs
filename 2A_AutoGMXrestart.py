@@ -20,6 +20,15 @@ import os
 import subprocess
 import argparse
 from datetime import datetime
+from pymacs_component_utils import (
+    build_polymer_group_name,
+    get_all_retained_components,
+    index_has_group,
+    load_component_registry,
+    load_system_registry,
+    merged_component_group_name,
+    parse_component_list,
+)
 
 # ============================================================
 # 🧾 Logging & Utilities
@@ -201,7 +210,20 @@ def detect_ligand_from_cgenff():
 # 📦 2. Wrap / Center Final Trajectory (Protein + Ligand only)
 # ============================================================
 
-def wrap_trajectory(env, ligand_code=None):
+def resolve_component_context(cli_ligand=None, cli_cofactors=None):
+    registry = load_component_registry(".") or {}
+    system_registry = load_system_registry(".") or {}
+    ligand_code = (cli_ligand or registry.get("primary_ligand") or None)
+    ligand_code = ligand_code.upper() if ligand_code else None
+    cofactors = parse_component_list(cli_cofactors) if cli_cofactors else registry.get("cofactors", [])
+    cofactors = [code for code in cofactors if code != ligand_code]
+    all_components = get_all_retained_components(ligand_code, cofactors)
+    merged_group = merged_component_group_name(all_components, fallback_ligand=ligand_code, protein_only=not all_components)
+    polymer_group = build_polymer_group_name(system_registry, all_components, override="auto")
+    return ligand_code, cofactors, all_components, (polymer_group if system_registry.get("has_nucleic_acid") else merged_group)
+
+
+def wrap_trajectory(env, ligand_code=None, component_group_name=None):
     """Recenter & wrap the trajectory (protein + ligand only)."""
     if os.path.exists("Final_Trajectory.xtc"):
         log("ℹ️ Final_Trajectory.xtc already exists; skipping trjconv.")
@@ -210,11 +232,14 @@ def wrap_trajectory(env, ligand_code=None):
         log("⚠️ Missing trajectory or TPR; cannot wrap.")
         return
 
-    group_name = f"Protein_{ligand_code}" if ligand_code else "Protein"
+    group_name = component_group_name or (f"Protein_{ligand_code}" if ligand_code else "Protein")
+    if os.path.exists("index.ndx") and not index_has_group("index.ndx", group_name):
+        fallback = f"Protein_{ligand_code}" if ligand_code else "Protein"
+        group_name = fallback if index_has_group("index.ndx", fallback) else "Protein"
     log(f"📦 Re-centering & wrapping trajectory → Final_Trajectory.xtc (group: {group_name})")
 
     # Use index group from index.ndx (Protein + Ligand)
-    if os.path.exists("index.ndx") and ligand_code:
+    if os.path.exists("index.ndx") and index_has_group("index.ndx", group_name):
         cmd = (
             f"bash -lc \"printf '{group_name}\\n{group_name}\\n' | "
             "gmx trjconv -s md_0_1.tpr -f md_0_1.xtc "
@@ -309,6 +334,7 @@ def main():
 
     ap = argparse.ArgumentParser(description="Resume production MD and rebuild wrapped trajectory + pocket.")
     ap.add_argument("--ligand", default=None, help="Ligand 3-letter code (e.g., GDP)")
+    ap.add_argument("--cofactors", default=None, help="Comma-separated retained cofactors/context components (e.g. CLR,HEM).")
     ap.add_argument("--gpu", type=int, default=None, help="GPU ID to use (e.g., 0)")
     ap.add_argument("--threads", type=int, default=None, help="Number of CPU threads to use")
     ap.add_argument("--offset", type=int, default=None, help="CPU core offset (e.g., 64 means use cores 65–128)")
@@ -317,7 +343,7 @@ def main():
     args = ap.parse_args()
 
     # ─── 1️⃣ Ligand Detection / Confirmation ─────────────────
-    ligand = args.ligand
+    ligand, cofactors, all_components, merged_group = resolve_component_context(args.ligand, args.cofactors)
 
     if ligand is None:
         detected = detect_ligand_from_cgenff()
@@ -344,8 +370,8 @@ def main():
                 default=None
             )
 
-    ligand = ligand.upper() if ligand else None
     log(f"🧬 Using ligand: {ligand}")
+    log(f"🧬 Retained cofactors: {', '.join(cofactors) if cofactors else 'None'}")
 
 
 
@@ -403,8 +429,8 @@ def main():
         gpu_id = 0  # make GROMACS think it’s device 0
 
     resume_md(env, use_gpu=use_gpu, gpu_id=gpu_id, threads=threads)
-    # wrap_trajectory(env, ligand_code=ligand)
-    # build_binding_pocket(ligand.upper(), cutoff_ang=args.pocket_cutoff or 5.0)
+    wrap_trajectory(env, ligand_code=ligand, component_group_name=merged_group)
+    build_binding_pocket(ligand, cutoff_ang=args.pocket_cutoff or 5.0)
     log("✅ Restart + Finalization complete.")
 
 

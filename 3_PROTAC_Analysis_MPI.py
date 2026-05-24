@@ -28,6 +28,7 @@ from collections import defaultdict
 from contextlib import suppress
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from pymacs_component_utils import load_component_registry
 
 PLOTTING_IMPORT_ERROR = None
 try:
@@ -3970,7 +3971,7 @@ def main() -> int:
         run_dir=".",
         topo_path=args.topo,
         traj_path=args.traj,
-        cli_ligand=args.ligand,
+        cli_ligand=(args.ligand or (load_component_registry(".") or {}).get("primary_ligand")),
         headless=args.headless,
     )
     execute_stage(runtime_profiler, "Write ligand preflight QC files", write_ligand_preflight_reports, ligand_setup, qc_dir)

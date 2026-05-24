@@ -28,6 +28,7 @@ from pathlib import Path
 from PIL import Image
 from rdkit import Chem
 from rdkit.Chem.Draw import rdMolDraw2D
+from pymacs_component_utils import load_system_registry
 
 from reportlab.platypus import (
     Paragraph, PageBreak, Image as RLImage,
@@ -92,6 +93,30 @@ By integrating these orthogonal analyses, this report delivers a mechanistic por
 This document is intended as a rigorous, standalone reference for evaluating protein stability, comparing apo and bound states, interpreting domain motions, supporting manuscript-quality mechanistic discussion, and guiding subsequent modeling or experimental follow-up.
 """
 
+TITLE_PAGE_DESCRIPTION_BIOLOGICAL = """
+Molecular Dynamics Analysis of {Protein}
+
+Trajectory Generated with GROMACS and the Customized PyMACS Analysis Framework
+
+This report presents a comprehensive molecular dynamics (MD) analysis of a biological polymer system, integrating protein and nucleic-acid structural metrics into a unified, publication-ready dataset. The simulation was performed using GROMACS, and all post-processing was executed using our in-house PyMACS analysis suite—a customized Python-based framework designed for high-resolution trajectory evaluation of protein:RNA, protein:DNA, RNA-only, DNA-only, and mixed biomolecular assemblies where ligand-specific analyses are not applicable.
+
+The PyMACS pipeline quantifies global structural stability, chain-specific motions, residue-level flexibility, compactness, secondary-structure evolution, and chain-to-chain biomolecular contacts over time. Together, these metrics provide a detailed view of how the polymer assembly behaves throughout the simulation, which chains remain structurally anchored, which segments undergo adaptive motions, and how strongly the biomolecular partners remain associated during the trajectory.
+
+Across this report, each figure provides a distinct analytical lens:
+
+Global and chain-resolved RMSD/RMSF reveal stability, convergence, and dynamic hotspots across protein and nucleic-acid chains.
+
+Radius of gyration reports on overall compactness and breathing motions of the biomolecular assembly.
+
+Secondary-structure analyses (DSSP) capture folding transitions, helix/sheet integrity, and structural persistence for the protein components.
+
+Chain–chain biomolecule interaction summaries and distance traces report how strongly the polymer partners remain associated, helping identify persistent interfaces versus transient contacts.
+
+By integrating these orthogonal analyses, this report delivers a mechanistic portrait of the simulated biological system: how stable the assembly remains, which chains or domains move most strongly, whether compactness is preserved, and whether the biomolecular interface remains persistent or reorganizes over time.
+
+This document is intended as a rigorous, standalone reference for evaluating biological macromolecular assemblies, comparing apo and bound-like states, interpreting chain-level motions, and supporting manuscript-quality mechanistic discussion.
+"""
+
 PROTAC_MANIFEST_CSV = os.path.join("Analysis_Results", "PROTAC", "QC", "protac_figure_manifest.csv")
 
 
@@ -141,8 +166,13 @@ def detect_report_mode() -> str:
     print("\nSelect report type:")
     print("  1. Ligand-bound / small-molecule / peptide-bound")
     print("  2. Ligandless / protein-centric / peptide:peptide / protein:protein")
-    choice = safe_input("Enter choice [1/2, default 2]: ", "2")
-    return "ligand" if choice == "1" else "protein"
+    print("  3. Biological system / protein:RNA / protein:DNA / RNA:DNA")
+    choice = safe_input("Enter choice [1/2/3, default 2]: ", "2")
+    if choice == "1":
+        return "ligand"
+    if choice == "3":
+        return "biological"
+    return "protein"
 
 
 def detect_ligand_mol2() -> str:
@@ -341,6 +371,9 @@ def build_title_page(flow, styles, mode: str, pretty_ligand: Optional[str], prot
     if mode == "ligand":
         title_text = f"MD ANALYSIS REPORT — {pretty_ligand} Bound to {protein_title}"
         description = TITLE_PAGE_DESCRIPTION_LIGAND.format(LIG=pretty_ligand, Protein=protein_title)
+    elif mode == "biological":
+        title_text = f"MD ANALYSIS REPORT — Biological System: {protein_title}"
+        description = TITLE_PAGE_DESCRIPTION_BIOLOGICAL.format(Protein=protein_title)
     else:
         title_text = f"MD ANALYSIS REPORT — {protein_title}"
         description = TITLE_PAGE_DESCRIPTION_PROTEIN.format(Protein=protein_title)
@@ -516,6 +549,33 @@ def load_protein_centric_captions(chains: List[str], proteins: List[str]):
     return out
 
 
+def load_biological_system_captions(chains: List[str], proteins: List[str]):
+    out = load_protein_centric_captions(chains, proteins)
+
+    biomolecule_entries = [
+        (
+            "Biomolecule_Chain_Interaction_Heatmap.png",
+            "Figure 12. Biomolecule Chain–Chain Contact Fractions",
+            "This heatmap summarizes the fraction of simulation frames in which each biomolecular chain pair remained in contact under the configured distance cutoff. Higher values indicate persistent interfaces between protein and nucleic-acid partners, whereas lower values suggest transient association or limited chain–chain engagement.",
+        ),
+        (
+            "Biomolecule_Chain_Interaction_Distances.png",
+            "Figure 13. Biomolecule Chain–Chain Minimum Distance Over Time",
+            "This figure tracks the minimum anchor-atom distance between each biomolecular chain pair over time. Stable low distances indicate sustained association of the polymer partners, while increases or large fluctuations suggest interface breathing, partial dissociation, or conformational rearrangement.",
+        ),
+    ]
+
+    for filename, title, caption in biomolecule_entries:
+        out.append({
+            "type": "single",
+            "filename": filename,
+            "title": title,
+            "caption": caption,
+        })
+
+    return out
+
+
 def add_figure_and_caption(flow, styles, image_path: str, title: str, caption: str):
     img = prepare_image_for_pdf(image_path)
     if not img:
@@ -598,6 +658,7 @@ def build_protac_pdf_from_manifest(manifest_csv: str):
 
 def build_pdf():
     mode = detect_report_mode()
+    system_registry = load_system_registry(".") or {}
 
     ligand = None
     pretty_ligand = None
@@ -605,6 +666,12 @@ def build_pdf():
 
     proteins, chains = parse_atomindex()
     protein_title = " & ".join(proteins)
+
+    if mode == "protein" and (system_registry.get("has_rna") or system_registry.get("has_dna")):
+        print(
+            "🧬 Detected a nucleic-acid-containing system from pymacs_system_registry.json. "
+            "Consider selecting report type 3 for the biomolecule-aware report."
+        )
 
     if mode == "ligand":
         ligand = detect_ligand_mol2()
@@ -619,6 +686,8 @@ def build_pdf():
                 small_ligand_svg = None
 
         captions = load_main_captions_from_file(ligand, chains, proteins, mode="ligand")
+    elif mode == "biological":
+        captions = load_biological_system_captions(chains, proteins)
     else:
         captions = load_protein_centric_captions(chains, proteins)
 

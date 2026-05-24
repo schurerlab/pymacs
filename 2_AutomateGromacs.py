@@ -136,6 +136,17 @@ import multiprocessing, os, subprocess, time
 import shutil
 import os
 import json
+from pymacs_component_utils import (
+    build_polymer_group_name,
+    build_polymer_selection_terms,
+    describe_gro_atom,
+    get_all_retained_components,
+    load_component_registry,
+    load_system_registry,
+    merged_component_group_name,
+    parse_component_list,
+    read_index_groups,
+)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -144,8 +155,9 @@ def parse_args():
         description="Automated GROMACS Step 2: MD equilibration + production run",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--mode", choices=["ligand", "protein", "peptide", "protac"], required=False)
+    p.add_argument("--mode", choices=["ligand", "protein", "peptide", "protac", "biological"], required=False)
     p.add_argument("--ligand", type=str, help="3-letter ligand code (required for ligand or protac modes)")
+    p.add_argument("--cofactors", type=str, default=None, help="Comma-separated retained cofactors/context components (e.g. CLR,HEM).")
     p.add_argument("--ns", type=float, default=None, help="Production length in nanoseconds (default 50)")
     p.add_argument("--gpu", "--gpu-id", dest="gpu", type=int, help="GPU ID to expose to GROMACS when running in GPU mode.")
     p.add_argument("--gpu-ids", type=str, default=None, help="Expert override for the exact gmx mdrun -gpu_id value (for example 0 or 01).")
@@ -156,6 +168,7 @@ def parse_args():
     p.add_argument("--ntmpi", type=int, default=1, help="Number of MPI ranks passed to gmx mdrun.")
     p.add_argument("--pinoffset", type=int, default=None, help="Starting CPU core index for thread pinning")
     p.add_argument("--index-file", type=str, default=None, help="Use a user-supplied GROMACS index file instead of auto-generating index.ndx.")
+    p.add_argument("--polymer-group", choices=["auto", "Protein", "Protein_RNA", "Protein_DNA", "Protein_Nucleic", "non-Water"], default="auto", help="Override the non-water polymer coupling/index group used for biomolecule systems.")
     p.add_argument("--mdp-dir", type=str, default="MDPs", help="Directory searched for MDP templates when local copies are not present.")
     p.add_argument("--em-mdp", type=str, default="em.mdp", help="Energy-minimization MDP template.")
     p.add_argument("--nvt-mdp", type=str, default="nvt.mdp", help="NVT equilibration MDP template.")
@@ -193,8 +206,9 @@ def parse_args():
         print("  2. protein")
         print("  3. peptide")
         print("  4. protac")
-        choice = input("Enter choice (1–4): ").strip()
-        args.mode = {"1": "ligand", "2": "protein", "3": "peptide", "4": "protac"}.get(choice, "protein")
+        print("  5. biological")
+        choice = input("Enter choice (1–5): ").strip()
+        args.mode = {"1": "ligand", "2": "protein", "3": "peptide", "4": "protac", "5": "biological"}.get(choice, "protein")
         print(f"🧠 Selected mode: {args.mode}")
 
     return args
@@ -792,31 +806,41 @@ def run_command_auto(command, cwd=None, input_text=None, use_gpu=True, gpu_id=0)
 
 
 
-def modify_topology_for_ligand(topol_path, ligand_code):
-    """Ensures ligand position restraints are correctly added to topol.top (if ligand present)."""
+def modify_topology_for_components(topol_path, components):
+    """Ensure each retained component has an optional POSRES include in topol.top."""
     with open(topol_path, "r") as f:
         lines = f.readlines()
-    if ligand_code:
+    components = get_all_retained_components(None, components)
+    if not components:
+        print("ℹ️ No retained components present; no topology modifications needed.")
+        return
+
+    updated = False
+    for component_code in components:
+        include_line = f'#include "{component_code.lower()}.itp"'
+        posre_include = f'#include "posre_{component_code.lower()}.itp"'
+        if any(posre_include in line for line in lines):
+            continue
         for i, line in enumerate(lines):
-            if f'#include "{ligand_code.lower()}.itp"' in line:
-                insert_index = i + 1
+            if include_line in line:
+                block = [
+                    f"; {component_code} position restraints\n",
+                    "#ifdef POSRES\n",
+                    f'{posre_include}\n',
+                    "#endif\n",
+                ]
+                lines[i + 1:i + 1] = block
+                updated = True
                 break
         else:
-            print(f"⚠️ `#include \"{ligand_code.lower()}.itp\"` not found in topol.top. Skipping modification.")
-            return
-        posres_block = [
-            "; Ligand position restraints\n",
-            "#ifdef POSRES\n",
-            f'#include "posre_{ligand_code.lower()}.itp"\n',
-            "#endif\n"
-        ]
-        if not any(f'#include "posre_{ligand_code.lower()}.itp"' in line for line in lines):
-            lines[insert_index:insert_index] = posres_block
+            print(f"⚠️ `{include_line}` not found in topol.top. Skipping POSRES include for {component_code}.")
+
+    if updated:
         with open(topol_path, "w") as f:
             f.writelines(lines)
-        print(f"✅ Updated {topol_path} with ligand position restraints.")
+        print(f"✅ Updated {topol_path} with retained-component position restraints.")
     else:
-        print("ℹ️ No ligand present; no topology modifications needed.")
+        print("ℹ️ No new retained-component POSRES includes were needed.")
 
 
 def build_binding_pocket(directory: str, ligand_code: str, traj="Final_Trajectory.xtc",
@@ -1039,6 +1063,131 @@ def index_has_group(index_path, group_name):
                 if name == group_name:
                     return True
     return False
+
+
+def load_component_context(directory, args):
+    registry = load_component_registry(directory) or {}
+    system_registry = load_system_registry(directory) or {}
+    ligand_code = (args.ligand or registry.get("primary_ligand") or None)
+    ligand_code = ligand_code.upper() if ligand_code else None
+    cofactors = parse_component_list(args.cofactors) if args.cofactors else registry.get("cofactors", [])
+    cofactors = [code for code in cofactors if code != ligand_code]
+    all_components = get_all_retained_components(ligand_code, cofactors)
+    molecule_counts = registry.get("molecule_counts", {})
+    polymer_group_name = build_polymer_group_name(system_registry, all_components, override=args.polymer_group)
+    return {
+        "registry": registry,
+        "system_registry": system_registry,
+        "ligand_code": ligand_code,
+        "cofactors": cofactors,
+        "all_components": all_components,
+        "molecule_counts": molecule_counts,
+        "analysis_ligand": registry.get("analysis_ligand") or ligand_code,
+        "group_name": merged_component_group_name(all_components, fallback_ligand=ligand_code, protein_only=not all_components),
+        "polymer_group_name": polymer_group_name,
+    }
+
+
+def inspect_energy_minimization(directory, component_context, potential_threshold=1.0e10):
+    em_log = os.path.join(directory, "em.log")
+    if not os.path.exists(em_log):
+        raise RuntimeError("Energy minimization did not produce em.log; refusing to continue to NVT.")
+
+    with open(em_log, "r", encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+
+    lowered = text.lower()
+    failure_signatures = [
+        "fmax=         inf",
+        "maximum force     =            inf",
+        "force on at least one atom is not finite",
+        "did not reach the requested fmax",
+    ]
+    bad = any(signature in lowered for signature in failure_signatures)
+
+    pot_match = re.findall(r"potential energy\s*=\s*([\-+0-9.eE]+)", text, flags=re.IGNORECASE)
+    parsed_potentials = []
+    for value in pot_match:
+        try:
+            parsed_potentials.append(float(value))
+        except ValueError:
+            continue
+    if any(abs(value) > potential_threshold for value in parsed_potentials):
+        bad = True
+
+    atom_match = re.search(r"atom\s*=\s*(\d+)", text, flags=re.IGNORECASE)
+    atom_number = int(atom_match.group(1)) if atom_match else None
+
+    if not bad:
+        return
+
+    details = ["Energy minimization failed or produced non-finite/unsafe forces."]
+    if parsed_potentials:
+        details.append(
+            "Potential energies observed: " + ", ".join(f"{value:.6e}" for value in parsed_potentials[-3:])
+        )
+    if atom_number is not None:
+        atom_info = describe_gro_atom(
+            os.path.join(directory, "em.gro") if os.path.exists(os.path.join(directory, "em.gro")) else os.path.join(directory, "solv_ions.gro"),
+            atom_number,
+        )
+        if atom_info:
+            details.append(
+                f"Problem atom {atom_number}: {atom_info['resname']} {atom_info['resid']} {atom_info['atom_name']} "
+                f"at {atom_info['coordinate_nm']}"
+            )
+    details.append(
+        "This usually means overlapping atoms or bad retained-component geometry. Fix the component placement before NVT."
+    )
+    for line in details:
+        print(f"❌ {line}")
+        append_mdrun_log(directory, line)
+    raise RuntimeError(details[0])
+
+
+def rename_index_group(index_path, new_name):
+    with open(index_path, "r", encoding="utf-8") as handle:
+        lines = handle.readlines()
+    renamed = False
+    for i, line in enumerate(lines):
+        if line.strip().startswith("[") and line.strip().endswith("]"):
+            lines[i] = f"[ {new_name} ]\n"
+            renamed = True
+            break
+    if not renamed:
+        raise RuntimeError(f"No group header found in {index_path} to rename to {new_name}.")
+    with open(index_path, "w", encoding="utf-8") as handle:
+        handle.writelines(lines)
+
+
+def build_component_group_index(directory, components, group_name, system_registry=None):
+    run_command("gmx make_ndx -f em.gro -o index_default.ndx", cwd=directory, input_text="q\n")
+    if group_name == "non-Water":
+        selection = 'not group "Water_and_ions"'
+    else:
+        selection_terms = build_polymer_selection_terms(system_registry)
+        if not selection_terms:
+            selection_terms = ['group "Protein"']
+        for component in components:
+            selection_terms.append(f"resname {component}")
+        selection = " or ".join(selection_terms)
+    rc = run_command_check_rc(
+        f'gmx select -s em.gro -f em.gro -n index_default.ndx -select "{selection}" -on index_components.ndx',
+        cwd=directory,
+    )
+    if rc != 0 and group_name != "non-Water":
+        print("⚠️ Polymer group selection failed; falling back to non-Water.")
+        group_name = "non-Water"
+        run_command(
+            'gmx select -s em.gro -f em.gro -n index_default.ndx -select "not group \\"Water_and_ions\\"" -on index_components.ndx',
+            cwd=directory,
+        )
+    rename_index_group(os.path.join(directory, "index_components.ndx"), group_name)
+    with open(os.path.join(directory, "index.ndx"), "w", encoding="utf-8") as out:
+        for path in [os.path.join(directory, "index_default.ndx"), os.path.join(directory, "index_components.ndx")]:
+            with open(path, "r", encoding="utf-8") as handle:
+                out.write(handle.read())
+            out.write("\n")
 
 
 def standardize_mdp_groups(mdp_path, coupling_group_str):
@@ -1321,9 +1470,13 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         print(f"❌ {exc}")
         exit(1)
 
+    system_registry = component_context.get("system_registry") or {}
+    has_nucleic_acid = bool(system_registry.get("has_nucleic_acid"))
+    effective_group_name = component_context.get("polymer_group_name") if (has_nucleic_acid or all_components) else component_group_name
+
     # Decide the exact thermostat / COM groups based on system type
-    if ligand_code:
-        coupling_group_str = f"Protein_{ligand_code} Water_and_ions"
+    if has_nucleic_acid or all_components:
+        coupling_group_str = f"{effective_group_name} Water_and_ions"
     else:
         coupling_group_str = "Protein Water_and_ions"
 
@@ -1342,10 +1495,10 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     # ============================================================
     print("🧱 [STEP 2] Preparing topology ...")
     topol_path = os.path.join(directory, "topol.top")
-    if ligand_code:
-        print(f"🔧 Modifying topology to include ligand {ligand_code} ...")
-        modify_topology_for_ligand(topol_path, ligand_code)
-        print(f"✅ Ligand '{ligand_code}' integrated into topology.")
+    if all_components:
+        print(f"🔧 Modifying topology to include retained components: {', '.join(all_components)} ...")
+        modify_topology_for_components(topol_path, all_components)
+        print(f"✅ Retained components integrated into topology: {', '.join(all_components)}.")
     else:
         print("ℹ️ No ligand present; skipping topology modification.")
 
@@ -1364,6 +1517,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         ntmpi=args.ntmpi,
         gpu_id_arg=gpu_id_arg,
     )
+    inspect_energy_minimization(directory, component_context)
 
     print("✅ Energy minimization complete.\n")
 
@@ -1374,69 +1528,73 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     # ============================================================
     # 🧬 4. Ligand Restraints (generate if missing)
     # ============================================================
-    if ligand_code:
-        posre_file = f"posre_{ligand_code.lower()}.itp"
-        ligand_gro = f"{ligand_code.lower()}.gro"
-        index_file = f"index_{ligand_code.lower()}.ndx"
+    if all_components:
+        for component_code in all_components:
+            posre_file = f"posre_{component_code.lower()}.itp"
+            ligand_gro = f"{component_code.lower()}.gro"
+            index_file = f"index_{component_code.lower()}.ndx"
 
-        if not os.path.exists(os.path.join(directory, posre_file)):
-            print(f"🧪 Generating position restraints for ligand: {ligand_code}")
+            if not os.path.exists(os.path.join(directory, posre_file)):
+                print(f"🧪 Generating position restraints for retained component: {component_code}")
 
-            if os.path.exists(os.path.join(directory, ligand_gro)):
+                if os.path.exists(os.path.join(directory, ligand_gro)):
 
-                # ------------------------------
-                # TRY 1 →  H* wildcard``
-                # TRY 2 →  explicit H
-                # TRY 3 →  keep full ligand
-                # ------------------------------
+                    # ------------------------------
+                    # TRY 1 →  H* wildcard
+                    # TRY 2 →  explicit H
+                    # TRY 3 →  keep full ligand
+                    # ------------------------------
 
-                cmd1 = (
-                    f"printf \"0 & ! a H*\\nq\\n\" | "
-                    f"gmx make_ndx -f {ligand_gro} -o {index_file}"
-                )
-
-                cmd2 = (
-                    f"printf \"0 & ! a H\\nq\\n\" | "
-                    f"gmx make_ndx -f {ligand_gro} -o {index_file}"
-                )
-
-                cmd3 = (
-                    f"printf \"0\\nq\\n\" | "
-                    f"gmx make_ndx -f {ligand_gro} -o {index_file}"
-                )
-
-                print("🔹 Attempt 1: Removing hydrogens using wildcard H* ...")
-                rc1 = run_command_check_rc(cmd1, cwd=directory)
-
-                if rc1 != 0:
-                    print("⚠️ Attempt 1 failed — trying explicit hydrogen selector...")
-
-                    rc2 = run_command_check_rc(cmd2, cwd=directory)
-
-                    if rc2 != 0:
-                        print("⚠️ Attempt 2 failed — using full ligand group...")
-
-                        rc3 = run_command_check_rc(cmd3, cwd=directory)
-
-                        if rc3 != 0:
-                            print("❌ All index generation attempts failed.")
-                            index_file = None
-
-
-                # If we successfully generated an index → create restraints
-                if index_file and os.path.exists(os.path.join(directory, index_file)):
-                    print("🔧 Creating ligand position restraints (genrester)...")
-                    run_command(
-                        f"echo '3' | gmx genrestr -f {ligand_gro} -n {index_file} "
-                        f"-o {posre_file} -fc 1000 1000 1000",
-                        cwd=directory
+                    cmd1 = (
+                        f"printf \"0 & ! a H*\\nq\\n\" | "
+                        f"gmx make_ndx -f {ligand_gro} -o {index_file}"
                     )
-                    print(f"✅ Created {posre_file}")
 
+                    cmd2 = (
+                        f"printf \"0 & ! a H\\nq\\n\" | "
+                        f"gmx make_ndx -f {ligand_gro} -o {index_file}"
+                    )
+
+                    cmd3 = (
+                        f"printf \"0\\nq\\n\" | "
+                        f"gmx make_ndx -f {ligand_gro} -o {index_file}"
+                    )
+
+                    print("🔹 Attempt 1: Removing hydrogens using wildcard H* ...")
+                    rc1 = run_command_check_rc(cmd1, cwd=directory)
+
+                    if rc1 != 0:
+                        print("⚠️ Attempt 1 failed — trying explicit hydrogen selector...")
+
+                        rc2 = run_command_check_rc(cmd2, cwd=directory)
+
+                        if rc2 != 0:
+                            print("⚠️ Attempt 2 failed — using full ligand group...")
+
+                            rc3 = run_command_check_rc(cmd3, cwd=directory)
+
+                            if rc3 != 0:
+                                print(f"⚠️ All index generation attempts failed for {component_code}.")
+                                index_file = None
+
+                    # If we successfully generated an index → create restraints
+                    if index_file and os.path.exists(os.path.join(directory, index_file)):
+                        print(f"🔧 Creating position restraints for {component_code} ...")
+                        run_command(
+                            f"echo '3' | gmx genrestr -f {ligand_gro} -n {index_file} "
+                            f"-o {posre_file} -fc 1000 1000 1000",
+                            cwd=directory
+                        )
+                        print(f"✅ Created {posre_file}")
+
+                else:
+                    message = f"⚠️ Component GRO file not found ({ligand_gro}). Skipping posre generation for {component_code}."
+                    if component_code == ligand_code:
+                        print(message.replace("⚠️", "❌"))
+                        exit(1)
+                    print(message)
             else:
-                print(f"⚠️ Ligand GRO file not found ({ligand_gro}). Skipping posre generation.")
-        else:
-            print(f"✅ Using existing ligand position restraints: {posre_file}")
+                print(f"✅ Using existing component position restraints: {posre_file}")
 
 
 
@@ -1454,8 +1612,8 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     # 5A — Clean old index files
     # ------------------------------------------------------------
     cleanup_files = ["index.ndx", "index_default.ndx"]
-    if ligand_code:
-        cleanup_files.append(f"index_{ligand_code.lower()}.ndx")
+    for component_code in all_components:
+        cleanup_files.append(f"index_{component_code.lower()}.ndx")
 
     if not custom_index_in_use:
         for f in cleanup_files:
@@ -1466,8 +1624,8 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     # ------------------------------------------------------------
     # 5B — Ensure ligand restraint file exists if ligand is present
     # ------------------------------------------------------------
-    if ligand_code:
-        lig = ligand_code.upper()
+    for component_code in all_components:
+        lig = component_code.upper()
         posre = os.path.join(directory, f"posre_{lig.lower()}.itp")
         lig_gro = os.path.join(directory, f"{lig.lower()}.gro")
 
@@ -1504,8 +1662,10 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
                 print(f"✅ Wrote fallback restraint file: {posre}")
             else:
                 print("⚠️ No heavy atoms found — posre will be empty.")
+                if component_code == ligand_code:
+                    exit(1)
         else:
-            print(f"✔ Using existing ligand restraints: {posre}")
+            print(f"✔ Using existing component restraints: {posre}")
 
     # ------------------------------------------------------------
     # 5C — MODE-SPECIFIC INDEX BUILD
@@ -1513,14 +1673,14 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     simtype = simulation_type.upper().strip()
 
     if custom_index_in_use:
-        if (not ligand_code) and (simtype != "PROTAC"):
+        if (not all_components) and (simtype != "PROTAC"):
             expected_group = "Protein"
             expected_water_group = "Water_and_ions"
         else:
-            expected_group = f"Protein_{ligand_code.upper()}"
+            expected_group = component_group_name
             expected_water_group = "Water_and_ions"
         print("📋 Skipping index auto-generation because --index-file was provided.")
-    elif (not ligand_code) and (simtype != "PROTAC"):
+    elif (not all_components) and (simtype != "PROTAC") and not has_nucleic_acid:
         # ========================================================
         # PROTEIN-ONLY MODE
         # ========================================================
@@ -1551,51 +1711,27 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
             print("❌ FATAL: atomIndex.txt missing for PROTAC mode.")
             exit(1)
 
-        run_command(
-            "gmx make_ndx -f em.gro -o index.ndx",
-            cwd=directory,
-            input_text=(
-                "1 | 13\n"
-                f"name 21 Protein_{ligand_code.upper()}\n"
-                + "".join(
-                    f"{line.strip()}\nname {22+i} "
-                    f"{['Ligase','Target_A','Target_B','Target_C','Target_D'][i] if i < 5 else f'Target_{i}'}\n"
-                    for i, line in enumerate(open(atom_file))
-                    if line.strip()
-                )
-                + "q\n"
-            )
-        )
-
-        expected_group = f"Protein_{ligand_code.upper()}"
+        build_component_group_index(directory, all_components, effective_group_name, system_registry=system_registry)
+        expected_group = effective_group_name
         expected_water_group = "Water_and_ions"
         print(f"✅ PROTAC index.ndx built with merged group: {expected_group}")
 
-    elif ligand_code:
+    elif has_nucleic_acid or all_components:
         # ========================================================
-        # LIGAND MODE
-        # KEEP OLD LOGIC THAT PREVIOUSLY WORKED
+        # BIOMOLECULE / LIGAND MODE
         # ========================================================
-        expected_group = f"Protein_{ligand_code.upper()}"
+        expected_group = effective_group_name
         expected_water_group = "Water_and_ions"
-
-        print(f"💊 Ligand-bound system → building merged index group {expected_group}")
-
-        ndx_input = (
-            "1 | 13\n"
-            f"name 21 {expected_group}\n"
-            "q\n"
-        )
-
-        run_command(
-            "gmx make_ndx -f em.gro -o index.ndx",
-            cwd=directory,
-            input_text=ndx_input
-        )
+        if has_nucleic_acid:
+            print(f"🧬 Detected nucleic acid system: {system_registry.get('system_class', 'unknown')}")
+            print(f"🧬 Using coupling/index group: {expected_group} Water_and_ions")
+        else:
+            print(f"💊 Ligand-bound system → building merged index group {expected_group}")
+        build_component_group_index(directory, all_components, expected_group, system_registry=system_registry)
 
         print(f"✅ index.ndx built cleanly: {expected_group}")
-        print("   ✔ Old ligand merge preserved")
-        print("   ✔ Protein-only logic kept separate")
+        if all_components:
+            print("   ✔ Retained cofactors are included in the non-water coupling group")
         print("   ✔ tc-grps can safely use this group")
 
     else:
@@ -1635,8 +1771,8 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     # ============================================================
     # 🌡️ 6–7. Equilibration
     # ============================================================
-    if ligand_code:
-        expected_group = f"Protein_{ligand_code.upper()}"
+    if has_nucleic_acid or all_components:
+        expected_group = effective_group_name
         coupling_group_str = f"{expected_group} Water_and_ions"
     else:
         expected_group = "Protein"
@@ -1852,7 +1988,8 @@ if __name__ == "__main__":
         "2": "Protein:Protein",
         "3": "Peptide:Protein",
         "4": "PROTAC",
-        "5": "Just Protein"
+        "5": "Just Protein",
+        "6": "Biological System",
     }
 
     if args.mode:
@@ -1860,7 +1997,8 @@ if __name__ == "__main__":
             "ligand": "Ligand:Protein",
             "protein": "Just Protein",
             "peptide": "Peptide:Protein",
-            "protac": "PROTAC"
+            "protac": "PROTAC",
+            "biological": "Biological System",
         }
         simulation_type = mode_map.get(args.mode.lower(), args.mode)
 
@@ -1871,8 +2009,9 @@ if __name__ == "__main__":
         print("  3. Peptide:Protein")
         print("  4. PROTAC")
         print("  5. Just Protein")
-        sim_choice = input("Enter choice (1-5): ").strip()
-        if sim_choice not in ["1", "2", "3", "4", "5"]:
+        print("  6. Biological System (Protein:RNA/DNA or RNA/DNA)")
+        sim_choice = input("Enter choice (1-6): ").strip()
+        if sim_choice not in ["1", "2", "3", "4", "5", "6"]:
             print("❌ Invalid selection. Exiting.")
             exit(1)
         simulation_type = sim_map[sim_choice]
@@ -1905,16 +2044,31 @@ if __name__ == "__main__":
             print("   • shortest chain logic to identify peptide")
             exit(1)
 
+    component_context = load_component_context(simulation_directory, args)
+    ligand_code = component_context["ligand_code"]
+    cofactors = component_context["cofactors"]
+    all_components = component_context["all_components"]
+    if component_context["registry"]:
+        print(f"🧾 Loaded component registry: primary={component_context['registry'].get('primary_ligand')} cofactors={component_context['registry'].get('cofactors', [])}")
+    if component_context["system_registry"]:
+        print(f"🧾 Loaded system registry: class={component_context['system_registry'].get('system_class')} polymer_chains={component_context['system_registry'].get('polymer_chains', {})}")
+        if simulation_type.lower() in ["just protein", "protein"] and (
+            component_context["system_registry"].get("has_rna")
+            or component_context["system_registry"].get("has_dna")
+        ):
+            print("🧬 Registry indicates a nucleic-acid-containing system; Step 2 will treat this as a biological system automatically.")
+        if simulation_type.lower() in ["biological system", "biological", "protein:rna/dna", "rna/dna"]:
+            print(
+                "🧬 Biological system mode enabled for "
+                f"{component_context['system_registry'].get('system_class', 'mixed_or_unknown')}."
+            )
+
     # ─── Ligand code (auto-detect + confirm) ──────────────────
-    ligand_code = None
 
     if simulation_type.lower() in ["ligand:protein", "ligand", "protac"]:
 
-        # CLI always wins
-        if args.ligand:
-            ligand_code = args.ligand.upper()
+        if ligand_code:
             print(f"🧬 Using ligand from CLI: {ligand_code}")
-
         else:
             detected = detect_ligand_from_cgenff()
 
@@ -1940,7 +2094,11 @@ if __name__ == "__main__":
             print("❌ Ligand code is required for this simulation type.")
             exit(1)
 
+    all_components = get_all_retained_components(ligand_code, cofactors)
+    component_group_name = merged_component_group_name(all_components, fallback_ligand=ligand_code, protein_only=not all_components)
+    component_context["polymer_group_name"] = build_polymer_group_name(component_context.get("system_registry"), all_components, override=args.polymer_group)
     print(f"🧬 Final ligand selection: {ligand_code}")
+    print(f"🧬 Retained cofactors: {', '.join(cofactors) if cofactors else 'None'}")
 
 
     # Production length
