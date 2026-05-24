@@ -508,6 +508,7 @@ cp ../../1_AutomateGromacs.py .
 cp ../../2_AutomateGromacs.py .
 cp ../../3A_AutomateGromacs.py .
 cp ../../3B_NETWORX.py .
+cp ../../3_PROTAC_Analysis.py .
 cp ../../4PDF4MD.py .
 cp ../../4_MDfigs.txt .
 cp ../../cgenff_charmm2gmx_py3_nx2.py .
@@ -542,9 +543,6 @@ python 2_AutomateGromacs.py
 conda activate mdanalysis
 python 3A_AutomateGromacs.py
 
-# Optional network analysis
-python 3B_NETWORX.py
-
 # Step 4: figurebook PDF
 python 4PDF4MD.py
 ```
@@ -567,6 +565,7 @@ cp ../../3_PROTAC_Analysis_MPI.py .
 cp ../../3B_NETWORX.py .
 cp ../../4PDF4MD.py .
 cp ../../4_MDfigs.txt .
+cp ../../4_GraphNotes.txt .
 cp ../../cgenff_charmm2gmx_py3_nx2.py .
 
 # Copy MDP templates
@@ -838,6 +837,9 @@ Typical actions, workflow-dependent:
 - additional structure and interaction analyses depending on installed tools
 - configurable binding-pocket extraction through `--pocket-cutoff`
 - configurable interaction reporting through `--contact_cutoff`, `--hbond-distance-cutoff`, and `--hbond-angle-cutoff`
+- in **PROTAC mode**, `3A_AutomateGromacs.py` automatically dispatches to `3_PROTAC_Analysis.py`
+- in **ligand** and **protein:protein/peptide** partner-style analyses, `3A_AutomateGromacs.py` will call `3B_NETWORX.py` automatically when that helper script is present in the run directory
+- in **protein-only / biological-system** analyses, ligand-style NETWORX rendering is skipped by design
 
 ---
 
@@ -849,7 +851,13 @@ Script:
 3B_NETWORX.py
 ```
 
-Optional residue / contact network utilities.
+Helper network renderer used by ligand- and peptide-style `3A` analyses.
+
+Important behavior:
+
+- for small-molecule ligand analyses, `3A_AutomateGromacs.py` can invoke `3B_NETWORX.py` automatically to render the ligand-interaction network figure
+- for protein-only jobs, `3B_NETWORX.py` is not part of the normal workflow
+- for PROTAC jobs, network generation is handled inside `3_PROTAC_Analysis.py` or `3_PROTAC_Analysis_MPI.py` rather than through `3B_NETWORX.py`
 
 ---
 
@@ -861,10 +869,21 @@ Script:
 4PDF4MD.py
 ```
 
-Compiles analysis outputs into a PDF report ordered through:
+`4PDF4MD.py` has two figure-selection modes:
+
+- **Standard ligand / protein / peptide / biological mode:** compiles figures into a PDF report ordered through `4_MDfigs.txt`
+- **PROTAC manifest mode:** if `Analysis_Results/PROTAC/QC/protac_figure_manifest.csv` exists, the PDF builder switches automatically to the PROTAC manifest and uses that file list instead of `4_MDfigs.txt`
+
+Standard figure ordering is controlled by:
 
 ```text
 4_MDfigs.txt
+```
+
+Optional custom figure notes can also be supplied through:
+
+```text
+4_GraphNotes.txt
 ```
 
 ### 🔧 Common customization examples
@@ -920,8 +939,10 @@ cp ../../1_AutomateGromacs.py .
 cp ../../2_AutomateGromacs.py .
 cp ../../3A_AutomateGromacs.py .
 cp ../../3B_NETWORX.py .
+cp ../../3_PROTAC_Analysis.py .
 cp ../../4PDF4MD.py .
 cp ../../4_MDfigs.txt .
+cp ../../4_GraphNotes.txt .
 cp ../../cgenff_charmm2gmx_py3_nx2.py .
 
 # Copy MDP templates
@@ -1026,6 +1047,12 @@ Detected 24 CPU threads available
 Enter number of threads to use [ENTER = auto]:
 ```
 
+Important analysis-mode behavior:
+
+- if you select **PROTAC** inside `3A_AutomateGromacs.py`, the script hands off automatically to `3_PROTAC_Analysis.py`
+- if you run a **ligand** or **protein:protein/peptide** analysis and `3B_NETWORX.py` is present, `3A_AutomateGromacs.py` will call it automatically to build the ligand interaction network figure
+- if you run a **protein-only** or **biological-system** analysis, ligand-style NETWORX rendering is skipped because it is not needed for that workflow
+
 ---
 
 ### 📄 Step 4 — PDF figurebook
@@ -1035,11 +1062,25 @@ conda activate mdanalysis
 python 4PDF4MD.py
 ```
 
-Figure ordering is controlled by:
+For standard ligand / protein / peptide / biological jobs, figure ordering is controlled by:
 
 ```text
 4_MDfigs.txt
 ```
+
+Optional custom notes for individual figures can be supplied with:
+
+```text
+4_GraphNotes.txt
+```
+
+For PROTAC jobs, `4PDF4MD.py` detects the generated manifest automatically:
+
+```text
+Analysis_Results/PROTAC/QC/protac_figure_manifest.csv
+```
+
+In that case, the PDF builder uses the manifest rather than `4_MDfigs.txt`.
 
 ---
 
@@ -1086,6 +1127,7 @@ cp ../../3A_AutomateGromacs.py .
 cp ../../3B_NETWORX.py .
 cp ../../4PDF4MD.py .
 cp ../../4_MDfigs.txt .
+cp ../../4_GraphNotes.txt .
 cp ../../cgenff_charmm2gmx_py3_nx2.py .
 cp ../../em.mdp .
 cp ../../MDPs/ions.mdp .
