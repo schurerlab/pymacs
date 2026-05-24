@@ -325,6 +325,90 @@ def format_polymer_chain_report(polymer_info):
     return "\n".join(lines)
 
 
+def build_polymer_chain_selection_map(polymer_info):
+    index_lookup = OrderedDict()
+    for index, entry in enumerate(polymer_info.get("chains", []), start=1):
+        index_lookup[str(index)] = entry["chain_id"]
+    return index_lookup
+
+
+def render_polymer_chain_selection_table(polymer_info):
+    index_lookup = build_polymer_chain_selection_map(polymer_info)
+    lines = ["Selectable polymer chains:"]
+    for entry in polymer_info.get("chains", []):
+        chain_id = entry["chain_id"]
+        row_token = next((idx for idx, cid in index_lookup.items() if cid == chain_id), "-")
+        lines.append(
+            f"  [{row_token}] chain {chain_id}: {polymer_type_label(entry['chain_type'])} | "
+            f"residues={entry['residue_count']} | "
+            f"first={entry.get('first_resname')}{entry.get('first_resid')} | "
+            f"last={entry.get('last_resname')}{entry.get('last_resid')}"
+        )
+    return "\n".join(lines), index_lookup
+
+
+def resolve_polymer_chain_selection(raw_value, chain_index_lookup, allowed_chain_ids):
+    value = (raw_value or "").strip()
+    if not value:
+        return []
+    if value.lower() == "none":
+        return []
+    allowed_ids = ordered_unique_resnames(allowed_chain_ids)
+    if value.lower() == "all":
+        return list(allowed_ids)
+
+    allowed_upper = {chain_id.upper(): chain_id for chain_id in allowed_ids}
+    chosen = []
+    for token in value.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        token_upper = token.upper()
+        if token in chain_index_lookup:
+            chain_id = chain_index_lookup[token]
+        elif token_upper in allowed_upper:
+            chain_id = allowed_upper[token_upper]
+        else:
+            raise ValueError(f"Unknown polymer chain selection token: {token}")
+        if chain_id not in chosen:
+            chosen.append(chain_id)
+    return chosen
+
+
+def write_pdb_with_selected_polymer_chains(input_pdb, output_pdb, selected_chain_ids):
+    selected_chain_ids = set(selected_chain_ids or [])
+    removed_counts = OrderedDict()
+    written_lines = []
+
+    with open(input_pdb, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith(("ATOM", "HETATM", "ANISOU", "TER")):
+                chain_id = _record_chain_id(line)
+                is_polymer_record = line.startswith("ATOM") or (
+                    line.startswith("HETATM") and _record_resname(line) in STANDARD_PROTEIN_AND_NA
+                )
+                if is_polymer_record and chain_id not in selected_chain_ids:
+                    if line.startswith(("ATOM", "HETATM")):
+                        removed_counts[chain_id] = removed_counts.get(chain_id, 0) + 1
+                    continue
+                written_lines.append(line)
+            elif line.startswith("CONECT"):
+                continue
+            else:
+                written_lines.append(line)
+
+    if not written_lines or not any(line.startswith(("ATOM", "HETATM")) for line in written_lines):
+        raise RuntimeError(f"No coordinate records remained after polymer-chain filtering of {input_pdb}")
+
+    with open(output_pdb, "w", encoding="utf-8") as handle:
+        for line in written_lines:
+            handle.write(line)
+        if not written_lines[-1].startswith("END"):
+            handle.write("END\n")
+
+    return removed_counts
+
+
 def polymer_chain_type_list(polymer_info):
     ordered = []
     for entry in polymer_info.get("chains", []):
@@ -521,6 +605,52 @@ def selectable_component_resnames(component_summary):
     return ordered
 
 
+def format_instance_selector_label(instance_key):
+    _resname, chain_id, resid, icode = instance_key
+    return f"{chain_id}:{resid}{'' if icode == '_' else icode}"
+
+
+def _component_instance_suffix(index):
+    index = int(index)
+    if index < 0:
+        raise ValueError("Instance suffix index must be non-negative")
+    letters = []
+    while True:
+        index, remainder = divmod(index, 26)
+        letters.append(chr(ord("A") + remainder))
+        if index == 0:
+            break
+        index -= 1
+    return "".join(reversed(letters))
+
+
+def build_component_selection_maps(component_summary):
+    selectable = selectable_component_resnames(component_summary)
+    species_index_lookup = {}
+    instance_token_lookup = {}
+    resname_to_instance_keys = OrderedDict()
+    row_index = 1
+
+    for resname, entry in component_summary.items():
+        if resname not in selectable:
+            continue
+        row_token = str(row_index)
+        species_index_lookup[row_token] = resname
+        resname_to_instance_keys[resname] = list(entry.get("instances", {}).keys())
+        for instance_index, instance_key in enumerate(entry.get("instances", {})):
+            label = format_instance_selector_label(instance_key)
+            row_instance_token = f"{row_token}{_component_instance_suffix(instance_index)}"
+            qualified_at = f"{resname}@{label}"
+            qualified_colon = f"{resname}:{label}"
+            instance_token_lookup[row_instance_token.upper()] = instance_key
+            instance_token_lookup[qualified_at.upper()] = instance_key
+            instance_token_lookup[qualified_colon.upper()] = instance_key
+            instance_token_lookup[label.upper()] = instance_key
+        row_index += 1
+
+    return species_index_lookup, instance_token_lookup, resname_to_instance_keys
+
+
 def render_detected_component_table(component_summary):
     total_species = len(component_summary)
     total_instances = sum(int(entry.get("copies", 0)) for entry in component_summary.values())
@@ -528,28 +658,26 @@ def render_detected_component_table(component_summary):
         f"Detected non-protein component species: {total_species} unique residue name(s), {total_instances} total instance(s)."
     ]
     selectable = selectable_component_resnames(component_summary)
-    index_lookup = {}
-    row_index = 1
+    index_lookup, _instance_token_lookup, _resname_to_instance_keys = build_component_selection_maps(component_summary)
     for resname, entry in component_summary.items():
         locations = ",".join(entry.get("instance_labels", [])) or "n/a"
         status = "excluded" if entry.get("excluded_by_default") else entry.get("recommended_role", "candidate")
-        prefix = f"[{row_index}] " if resname in selectable else "[-] "
+        row_token = next((idx for idx, code in index_lookup.items() if code == resname), "-")
+        prefix = f"[{row_token}] " if resname in selectable else "[-] "
         lines.append(
             f"  {prefix}{resname} | instances: {entry.get('copies', 0)} | atoms total: {entry.get('atom_count_raw_pdb', 0)} "
             f"| chains/resids: {locations} | suggested: {status}"
         )
-        for instance_key, instance_data in entry.get("instances", {}).items():
+        for instance_index, (instance_key, instance_data) in enumerate(entry.get("instances", {}).items()):
             insertion_code = instance_data["insertion_code"]
             icode_suffix = "" if insertion_code == "_" else insertion_code
+            row_instance_token = f"{row_token}{_component_instance_suffix(instance_index)}"
             lines.append(
-                f"      - instance {instance_data['chain_id']}:{instance_data['resid']}{icode_suffix} "
-                f"| atoms: {instance_data['atom_count']}"
+                f"      - [{row_instance_token}] instance {instance_data['chain_id']}:{instance_data['resid']}{icode_suffix} "
+                f"| atoms: {instance_data['atom_count']} | select with: {row_instance_token} or {resname}@{instance_data['chain_id']}:{instance_data['resid']}{icode_suffix}"
             )
         if entry.get("warning"):
             lines.append(f"      warning: {entry['warning']}")
-        if resname in selectable:
-            index_lookup[str(row_index)] = resname
-            row_index += 1
     return "\n".join(lines), index_lookup
 
 
@@ -580,6 +708,51 @@ def resolve_component_selection(raw_value, index_lookup, allowed_resnames):
     return chosen
 
 
+def resolve_component_instance_selection(raw_value, species_index_lookup, instance_token_lookup, allowed_instance_keys_by_resname):
+    value = (raw_value or "").strip()
+    if not value:
+        return []
+    if value.lower() == "none":
+        return []
+    allowed_by_resname = OrderedDict(
+        (resname.upper(), list(instance_keys))
+        for resname, instance_keys in (allowed_instance_keys_by_resname or {}).items()
+    )
+    all_allowed_instances = []
+    for instance_keys in allowed_by_resname.values():
+        for instance_key in instance_keys:
+            if instance_key not in all_allowed_instances:
+                all_allowed_instances.append(instance_key)
+    if value.lower() == "all":
+        return list(all_allowed_instances)
+
+    chosen = []
+    allowed_resnames = set(allowed_by_resname)
+    allowed_instance_keys = set(all_allowed_instances)
+    for token in value.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        token_upper = token.upper()
+        if token in species_index_lookup:
+            for instance_key in allowed_by_resname.get(species_index_lookup[token].upper(), []):
+                if instance_key not in chosen:
+                    chosen.append(instance_key)
+            continue
+        if token_upper in allowed_resnames:
+            for instance_key in allowed_by_resname.get(token_upper, []):
+                if instance_key not in chosen:
+                    chosen.append(instance_key)
+            continue
+        instance_key = instance_token_lookup.get(token_upper)
+        if instance_key and instance_key in allowed_instance_keys:
+            if instance_key not in chosen:
+                chosen.append(instance_key)
+            continue
+        raise ValueError(f"Unknown component/instance selection token: {token}")
+    return chosen
+
+
 def write_protein_pdb_without_components(input_pdb, output_pdb, remove_resnames):
     remove_set = set(ordered_unique_resnames(remove_resnames))
     removed_counts = OrderedDict((resname, 0) for resname in remove_set)
@@ -602,6 +775,41 @@ def write_protein_pdb_without_components(input_pdb, output_pdb, remove_resnames)
 
     if not written_lines or not any(line.startswith(("ATOM", "HETATM")) for line in written_lines):
         raise RuntimeError(f"No coordinate records remained after removing {sorted(remove_set)} from {input_pdb}")
+
+    with open(output_pdb, "w", encoding="utf-8") as handle:
+        for line in written_lines:
+            handle.write(line)
+        if not written_lines[-1].startswith("END"):
+            handle.write("END\n")
+
+    return dict(removed_counts)
+
+
+def write_pdb_with_selected_component_instances(input_pdb, output_pdb, managed_resnames, selected_instance_keys):
+    managed_resnames = set(ordered_unique_resnames(managed_resnames))
+    selected_instance_keys = set(selected_instance_keys or [])
+    removed_counts = OrderedDict()
+    written_lines = []
+
+    with open(input_pdb, "r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if line.startswith(("ATOM", "HETATM")):
+                resname = _record_resname(line)
+                if resname in managed_resnames:
+                    instance_key = residue_instance_key(line)
+                    if instance_key not in selected_instance_keys:
+                        removed_counts[format_instance_selector_label(instance_key)] = removed_counts.get(format_instance_selector_label(instance_key), 0) + 1
+                        continue
+                written_lines.append(line)
+            elif line.startswith("CONECT"):
+                continue
+            elif line.startswith(("TER", "END", "ENDMDL")):
+                written_lines.append(line)
+            else:
+                written_lines.append(line)
+
+    if not written_lines or not any(line.startswith(("ATOM", "HETATM")) for line in written_lines):
+        raise RuntimeError(f"No coordinate records remained after instance-level filtering of {input_pdb}")
 
     with open(output_pdb, "w", encoding="utf-8") as handle:
         for line in written_lines:

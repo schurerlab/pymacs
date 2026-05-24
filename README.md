@@ -115,6 +115,15 @@ PyMACS supports:
 - **Protein–protein systems**
 - **PROTAC / multi-component workflows**
 
+PyMACS Step 1 now supports flexible structure intake for real-world medicinal chemistry workflows:
+
+- **Local PDB inputs**
+- **Local CIF / mmCIF inputs**
+- **Interactive download from the RCSB PDB directly into the working directory**
+- **Headless fetch via PDB ID for scripted runs**
+- **Interactive polymer-chain pruning to isolate a single asymmetric unit when needed**
+- **Instance-level ligand and cofactor selection when multiple copies are present**
+
 Core goals:
 
 - reproducible MD setup and execution
@@ -148,6 +157,7 @@ Core goals:
 - [System requirements](#system-requirements)
 - [Environment setup](#environment-setup)
 - [Force fields included](#force-fields)
+- [Supported structure inputs](#supported-structure-inputs)
 - [Ligand parameterization and CGenFF support](#ligand-parameterization)
 - [The 3 CGenFF modes](#cgenff-modes)
 - [Quick start templates](#quick-start-templates)
@@ -258,6 +268,44 @@ Use the MPI-compatible scripts when:
 - you want explicit binary control through `--gmx-bin` or `PYMACS_GMX_BIN`
 
 The standard scripts remain appropriate for local workstations where `gmx` is already the expected executable name.
+
+---
+
+<a id="supported-structure-inputs"></a>
+
+## 🧾 Supported structure inputs
+
+Step 1 can now begin from several different structure sources:
+
+- local `.pdb` files already present in the working directory
+- local `.cif` files from the PDB or other structural workflows
+- local `.mmcif` files
+- structures fetched directly from the **RCSB PDB** during the interactive Step 1 structure picker
+- structures fetched in headless mode with `--fetch-pdb`
+
+Important Step 1 intake behavior:
+
+- `.cif` and `.mmcif` inputs are converted automatically into a setup-ready PDB before the workflow continues
+- fetched structures are downloaded into the current working directory and then processed exactly like local files
+- optional crystallographic waters, ions, and common buffer/solvent components can be removed before setup
+- polymer chains can be retained or dropped before ligand processing, which is useful for selecting one asymmetric unit from a deposited structure
+- ligand-like non-protein residues can be selected by exact instance, not only by residue name
+
+Example commands:
+
+```bash
+# Use a local mmCIF file
+python 1_AutomateGromacs.py --pdb model.mmcif
+
+# Fetch directly from the PDB in CIF format (default)
+python 1_AutomateGromacs.py --fetch-pdb 9UWJ
+
+# Fetch directly from the PDB in PDB format
+python 1_AutomateGromacs.py --fetch-pdb 9UWJ --fetch-format pdb
+
+# MPI-compatible equivalent
+python 1_AutomateGromacs_MPI.py --gmx-bin gmx_mpi --fetch-pdb 9UWJ
+```
 
 ---
 
@@ -625,11 +673,13 @@ Script:
 
 Typical actions:
 
-- reads the input PDB
+- reads a local PDB, CIF, or mmCIF file, or fetches a structure directly from the RCSB PDB
+- converts CIF/mmCIF inputs into a setup-ready PDB automatically
 - runs a novice-friendly PDB preflight check for coordinate formatting, residue names, chain IDs, and ligand ambiguity
-- detects protein chains
+- detects polymer chains and can optionally prune the system to selected chains before setup
 - runs `pdb2gmx` for protein topology generation
 - detects non-water `HETATM` residues as ligand candidates
+- supports instance-level selection of the primary ligand and any retained cofactors/context molecules
 - integrates ligand parameters using one of the supported CGenFF modes
 - solvates and ionizes the system
 - writes helper maps such as `atomIndex.txt`, workflow-dependent
@@ -901,16 +951,33 @@ python 1_AutomateGromacs.py
 Typical prompt flow:
 
 ```text
-Available PDB files:
-1) input.pdb
-Select a PDB file by number: 1
+Available structure files:
+1. input.pdb
+2. model.cif
+3. Fetch a structure directly from the RCSB PDB
+Select a structure file by number, or choose the fetch option: 3
+Enter a 4-character PDB ID to download (for example 9UWJ): 9UWJ
 ```
 
-Ligand detection, if present:
+If multiple polymer chains are present:
 
 ```text
-Detected ligand candidates: A1D
-Use A1D as ligand? [Y/n]: Y
+Selectable polymer chains:
+  [1] chain A: protein
+  [2] chain B: protein
+Keep all detected polymer chains for this setup? [Y/n]: n
+Which polymer chains should be retained? [numbers/IDs like 1 or A, comma-separated, default: 1]: 1
+```
+
+Ligand/cofactor detection, if present:
+
+```text
+Detected non-protein component species: ...
+Keep all detected small-molecule residues for this setup? [Y/n]: y
+All detected ligands/cofactors will be kept for now.
+Which one should be treated as the PRIMARY ligand for analysis? [species number/name or instance label like 1A, default: 1A]: 1A
+Optional: choose which ADDITIONAL cofactors/context molecules to keep besides the primary ligand.
+Press ENTER to keep all additional cofactors/context molecules, or enter labels like 2A, 2B, "all", or "none":
 ```
 
 Chain naming / mapping:

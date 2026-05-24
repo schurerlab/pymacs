@@ -137,6 +137,7 @@ import shutil
 import os
 import json
 import shlex
+import math
 from pymacs_component_utils import (
     build_polymer_group_name,
     build_polymer_selection_terms,
@@ -1364,6 +1365,115 @@ def set_md_nsteps(md_path, simulation_time_ns):
     return nsteps
 
 
+def measure_component_span_nm(gro_path, component_code):
+    if not os.path.exists(gro_path):
+        return None
+
+    heavy_atoms = []
+    all_atoms = []
+
+    with open(gro_path, "r", encoding="utf-8") as handle:
+        lines = handle.readlines()[2:-1]
+
+    for line in lines:
+        if len(line) < 44:
+            continue
+        resname = line[5:10].strip()
+        if resname.upper() != component_code.upper():
+            continue
+        atom_name = line[10:15].strip()
+        try:
+            x = float(line[20:28])
+            y = float(line[28:36])
+            z = float(line[36:44])
+        except ValueError:
+            continue
+        atom_record = (atom_name, x, y, z)
+        all_atoms.append(atom_record)
+        if not atom_name.upper().startswith("H"):
+            heavy_atoms.append(atom_record)
+
+    atoms = heavy_atoms or all_atoms
+    if len(atoms) < 2:
+        return None
+
+    max_dist2 = 0.0
+    for idx, (_, x1, y1, z1) in enumerate(atoms[:-1]):
+        for _, x2, y2, z2 in atoms[idx + 1:]:
+            dx = x1 - x2
+            dy = y1 - y2
+            dz = z1 - z2
+            dist2 = dx * dx + dy * dy + dz * dz
+            if dist2 > max_dist2:
+                max_dist2 = dist2
+
+    return math.sqrt(max_dist2)
+
+
+def estimate_required_component_cutoff_nm(directory, components, padding_nm=0.10, minimum_nm=1.50):
+    largest_span = 0.0
+    span_by_component = {}
+
+    for component_code in components:
+        gro_path = os.path.join(directory, f"{component_code.lower()}.gro")
+        span_nm = measure_component_span_nm(gro_path, component_code)
+        if span_nm is None:
+            continue
+        span_by_component[component_code] = span_nm
+        largest_span = max(largest_span, span_nm)
+
+    if largest_span <= 0.0:
+        return None, span_by_component
+
+    required_cutoff_nm = max(minimum_nm, largest_span + padding_nm)
+    return round(required_cutoff_nm, 3), span_by_component
+
+
+def standardize_mdp_cutoffs(mdp_path, minimum_cutoff_nm):
+    if not minimum_cutoff_nm or not os.path.exists(mdp_path):
+        return False
+
+    with open(mdp_path, "r", encoding="utf-8") as handle:
+        lines = handle.readlines()
+
+    updated = []
+    found = {"rlist": False, "rcoulomb": False, "rvdw": False}
+    changed = False
+
+    for line in lines:
+        stripped = line.strip()
+        replaced = False
+        for key in ("rlist", "rcoulomb", "rvdw"):
+            if stripped.startswith(key):
+                found[key] = True
+                current_value = None
+                rhs = line.split("=", 1)[1].strip() if "=" in line else ""
+                if rhs:
+                    token = rhs.split()[0]
+                    try:
+                        current_value = float(token)
+                    except ValueError:
+                        current_value = None
+                final_value = minimum_cutoff_nm if current_value is None else max(current_value, minimum_cutoff_nm)
+                updated.append(f"{key:<24}= {final_value:.3f}\n")
+                changed = changed or (current_value is None or abs(final_value - current_value) > 1e-9)
+                replaced = True
+                break
+        if not replaced:
+            updated.append(line)
+
+    for key in ("rlist", "rcoulomb", "rvdw"):
+        if not found[key]:
+            updated.append(f"{key:<24}= {minimum_cutoff_nm:.3f}\n")
+            changed = True
+
+    if changed:
+        with open(mdp_path, "w", encoding="utf-8") as handle:
+            handle.writelines(updated)
+
+    return changed
+
+
 def maybe_use_custom_index(directory, args):
     if not args.index_file:
         return False
@@ -1383,10 +1493,12 @@ def maybe_use_custom_index(directory, args):
 
 def run_equilibration_stage(stage_name, mdp_path, start_gro, ref_gro, prev_cpt, directory,
                             pin_offset, available_threads, gpu_id, use_gpu, ntmpi, gpu_id_arg,
-                            coupling_group_str, external_mpi=False, mpi_launcher=""):
+                            coupling_group_str, external_mpi=False, mpi_launcher="", minimum_cutoff_nm=None):
     local_name = f"{stage_name}.mdp"
     local_mdp = prepare_local_mdp_template(directory, mdp_path, local_name)
     standardize_mdp_groups(local_mdp, coupling_group_str)
+    if minimum_cutoff_nm:
+        standardize_mdp_cutoffs(local_mdp, minimum_cutoff_nm)
     append_mdrun_log(directory, f"Equilibration stage {stage_name}: mdp={mdp_path} local={local_mdp}")
 
     grompp_cmd = gmx_cmd(
@@ -1882,6 +1994,27 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         expected_group = "Protein"
         coupling_group_str = "Protein Water_and_ions"
 
+    component_cutoff_nm = None
+    if all_components:
+        component_cutoff_nm, component_spans = estimate_required_component_cutoff_nm(directory, all_components)
+        if component_cutoff_nm:
+            for component_code, span_nm in component_spans.items():
+                print(f"📏 Retained component {component_code} span ≈ {span_nm:.3f} nm")
+            adjusted_files = []
+            for mdp_key in ("nvt.mdp", "npt.mdp", "md.mdp"):
+                mdp_path = mdp_files[mdp_key]
+                if standardize_mdp_cutoffs(mdp_path, component_cutoff_nm):
+                    adjusted_files.append(os.path.basename(mdp_path))
+            if adjusted_files:
+                print(
+                    f"🛠️ Increased nonbonded cutoffs to {component_cutoff_nm:.3f} nm for large retained components: "
+                    + ", ".join(adjusted_files)
+                )
+            append_mdrun_log(
+                directory,
+                f"Retained-component cutoff floor: {component_cutoff_nm:.3f} nm ({component_spans})",
+            )
+
     print(f"🧭 Expected equilibration coupling/index group: {expected_group}")
 
     index_path = os.path.join(directory, "index.ndx")
@@ -1950,6 +2083,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
                 coupling_group_str=coupling_group_str,
                 external_mpi=args.external_mpi,
                 mpi_launcher=mpi_launcher,
+                minimum_cutoff_nm=component_cutoff_nm,
             )
         print("✅ Custom equilibration plan complete.\n")
     else:

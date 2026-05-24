@@ -151,7 +151,9 @@ import pty
 import shutil  # For file operations
 import sys
 import time
-from collections import deque
+import urllib.error
+import urllib.request
+from collections import OrderedDict, deque
 
 import re
 
@@ -159,6 +161,7 @@ import re
 import argparse
 from pymacs_component_utils import (
     apply_chain_type_overrides,
+    build_component_selection_maps,
     build_component_all_copies_from_template,
     classify_polymer_chains,
     count_component_instances,
@@ -167,6 +170,7 @@ from pymacs_component_utils import (
     detect_component_clashes,
     extract_component_instance_from_pdb,
     format_polymer_chain_report,
+    render_polymer_chain_selection_table,
     format_clash_report,
     extract_component_instances_from_pdb,
     format_component_validation_report,
@@ -178,6 +182,8 @@ from pymacs_component_utils import (
     polymer_type_label,
     render_detected_component_table,
     resolve_component_selection,
+    resolve_component_instance_selection,
+    resolve_polymer_chain_selection,
     select_representative_component_instance,
     selectable_component_resnames,
     summarize_detected_hetero_components,
@@ -185,6 +191,8 @@ from pymacs_component_utils import (
     validate_single_instance_template,
     validate_complex_against_topology_components,
     write_component_registry,
+    write_pdb_with_selected_component_instances,
+    write_pdb_with_selected_polymer_chains,
     write_system_registry,
     write_protein_pdb_without_components,
 )
@@ -202,6 +210,10 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--mode", choices=["ligand", "protein"], help="Skip interactive mode selection (headless mode).")
 parser.add_argument("--chain-names", type=str, help="Comma-separated custom chain names (e.g. Rap1B,Rap1GAP)")
 parser.add_argument("--chain-map", type=str, help="Explicit chainID:name pairs (e.g. A:Rap1B,B:Rap1GAP)")
+parser.add_argument("--keep-chains", type=str, help='Comma-separated polymer chains to retain from the input structure (e.g. "A" or "1,A").')
+parser.add_argument("--drop-chains", type=str, help='Comma-separated polymer chains to remove from the input structure (e.g. "B" or "2,B").')
+parser.add_argument("--fetch-pdb", type=str, help="Fetch a structure directly from the RCSB PDB before setup (e.g. 9UWJ).")
+parser.add_argument("--fetch-format", choices=["pdb", "cif", "mmcif"], default="cif", help="File format to download when using --fetch-pdb or the interactive fetch option.")
 parser.add_argument("--ligand", "-l", type=str, help="Ligand residue code used for non-covalent ligand workflows.")
 parser.add_argument("--cofactors", type=str, default=None, help="Comma-separated retained non-protein components (e.g. CLR,HEM).")
 parser.add_argument("--auto-keep-hetero", action="store_true", help="When multiple ligand-like residues are detected, keep non-primary residues as cofactors automatically.")
@@ -209,9 +221,13 @@ parser.add_argument("--component-mode", choices=["selected", "all", "none"], def
 parser.add_argument("--component-clash-check", dest="component_clash_check", action="store_true", default=True, help="Run retained-component clash checks before solvation.")
 parser.add_argument("--no-component-clash-check", dest="component_clash_check", action="store_false", help="Skip retained-component clash checks.")
 parser.add_argument("--drop-clashing-cofactors", action="store_true", help="Drop non-primary cofactors automatically if severe clashes are detected.")
-parser.add_argument("--pdb", type=str, help="Input PDB filename (e.g., Model_2.pdb)")
+parser.add_argument("--pdb", type=str, help="Input structure filename (.pdb, .cif, or .mmcif)")
 parser.add_argument("--show-generated-pdbs", action="store_true", help="Include generated intermediate PDB files in the interactive PDB picker.")
 parser.add_argument("--allow-generated-inputs", action="store_true", help="Alias for --show-generated-pdbs.")
+parser.add_argument("--remove-input-waters", action="store_true", help="Remove crystallographic waters from the selected input structure before setup.")
+parser.add_argument("--remove-input-ions", action="store_true", help="Remove ordinary ions from the selected input structure before setup.")
+parser.add_argument("--remove-input-solvents", action="store_true", help="Remove common solvents/buffers from the selected input structure before setup.")
+parser.add_argument("--remove-input-resnames", type=str, default=None, help="Comma-separated residue names to remove from the selected input structure before setup.")
 parser.add_argument("--nucleic-acid-termini", choices=["auto", "5ter-3ter", "none"], default="auto", help="How RNA/DNA termini should be selected for pdb2gmx.")
 parser.add_argument("--protein-nterm", choices=["NH2", "NH3+", "None"], default="NH2", help="Default protein N-terminus selection passed to pdb2gmx.")
 parser.add_argument("--protein-cterm", choices=["COO-", "COOH", "None"], default="COO-", help="Default protein C-terminus selection passed to pdb2gmx.")
@@ -257,11 +273,15 @@ parser.add_argument(
 args = parser.parse_args()
 if args.box_distance <= 0:
     parser.error("--box-distance must be greater than 0.0 nm.")
+if args.keep_chains and args.drop_chains:
+    parser.error("--keep-chains and --drop-chains cannot be used together.")
+if args.pdb and args.fetch_pdb:
+    parser.error("--pdb and --fetch-pdb cannot be used together.")
 
 # ============================================================
 # 🚀 Runtime Summary Banner
 # ============================================================
-if args.mode or args.ligand or args.chain_names or args.chain_map:
+if args.mode or args.ligand or args.chain_names or args.chain_map or args.fetch_pdb:
     chain_display = ""
     if args.chain_map:
         # Convert "A:Rap1B,B:Rap1GAP" → "Rap1B–Rap1GAP"
@@ -711,6 +731,50 @@ def fix_missing_atoms(input_pdb, output_pdb, ph=7.4):
         print(f"❌ Failed to fix atoms in {input_pdb}: {str(e)}")
         return False
 
+
+def sanitize_pdb_for_pdbfixer(input_pdb, output_pdb):
+    """
+    Remove leading/orphan TER records and stale hetero annotations that can leave
+    PDBFixer in an invalid parser state after ligand stripping.
+    """
+    allowed_header_records = {
+        "HEADER", "TITLE", "COMPND", "SOURCE", "KEYWDS", "EXPDTA",
+        "AUTHOR", "REMARK", "MODEL", "ENDMDL", "END",
+    }
+    dropped_records = []
+    seen_atom = False
+
+    with open(input_pdb, "r", encoding="utf-8", errors="replace") as fin, open(output_pdb, "w", encoding="utf-8") as fout:
+        for raw in fin:
+            record = raw[:6].strip().upper()
+            if record in {"ATOM", "HETATM"}:
+                seen_atom = True
+                fout.write(raw)
+                continue
+            if record == "TER":
+                if seen_atom:
+                    fout.write(raw)
+                else:
+                    dropped_records.append("leading_TER")
+                continue
+            if record in {"HETNAM", "HETSYN", "FORMUL", "CONECT", "MASTER"}:
+                dropped_records.append(record)
+                continue
+            if record in allowed_header_records:
+                fout.write(raw)
+                continue
+            if not seen_atom:
+                fout.write(raw)
+            else:
+                dropped_records.append(record or "BLANK")
+
+    if dropped_records:
+        summary = ", ".join(sorted(set(dropped_records)))
+        print(f"🧹 Sanitized PDB for PDBFixer: removed problematic records ({summary})")
+    else:
+        print("🧹 Sanitized PDB for PDBFixer: no problematic records found")
+    return output_pdb
+
 def modify_topology_file_multi(topol_path, components, molecule_counts):
     """Insert component includes and molecule counts while preserving GROMACS-safe ordering."""
     with open(topol_path, "r") as f:
@@ -849,11 +913,12 @@ def detect_forcefield(directory):
     print("❗ CHARMM forcefield not found in the current directory. User must select manually.")
     return None
 
-def select_pdb_file(directory):
-    """Prompts the user to select a PDB file from available options."""
+def _is_generated_structure_file(lower_name):
     generated_names = {
         "protein.pdb",
         "protein_fixed.pdb",
+        "selected_input_source.pdb",
+        "selected_input_cleaned.pdb",
     }
     generated_suffixes = (
         "_raw.pdb",
@@ -865,28 +930,262 @@ def select_pdb_file(directory):
         "_from_pdb.pdb",
         "_template_raw.pdb",
     )
+    return lower_name in generated_names or lower_name.endswith(generated_suffixes)
+
+
+def select_structure_file(directory):
+    """Prompts the user to select a supported structure file from available options."""
     show_generated = args.show_generated_pdbs or args.allow_generated_inputs
-    pdb_files = []
+    structure_files = []
     for f in os.listdir(directory):
-        if not f.endswith(".pdb"):
-            continue
         lower = f.lower()
-        if not show_generated and (lower in generated_names or lower.endswith(generated_suffixes)):
+        if not lower.endswith((".pdb", ".cif", ".mmcif")):
             continue
-        pdb_files.append(f)
-    pdb_files.sort()
-    if not pdb_files:
-        print("❌ No PDB files found in the current directory.")
-        exit(1)
-    print("\n📁 Available PDB files:")
-    for idx, file in enumerate(pdb_files, 1):
-        print(f"{idx}. {file}")
+        if not show_generated and _is_generated_structure_file(lower):
+            continue
+        structure_files.append(f)
+    structure_files.sort()
+
+    if structure_files:
+        print("\n📁 Available structure files:")
+        for idx, file in enumerate(structure_files, 1):
+            print(f"{idx}. {file}")
+    else:
+        print("\n📁 No supported local structure files (.pdb/.cif/.mmcif) were found in the current directory.")
+
+    fetch_option = len(structure_files) + 1
+    print(f"{fetch_option}. Fetch a structure directly from the RCSB PDB")
+
     while True:
-        selection = input("\n🔍 Select a PDB file by number (e.g., 1): ").strip()
-        if selection.isdigit() and 1 <= int(selection) <= len(pdb_files):
-            return pdb_files[int(selection) - 1]
-        else:
-            print("❗ Invalid selection. Please enter a valid number.")
+        selection = input("\n🔍 Select a structure file by number, or choose the fetch option: ").strip()
+        if selection.isdigit():
+            selected_index = int(selection)
+            if 1 <= selected_index <= len(structure_files):
+                return structure_files[selected_index - 1]
+            if selected_index == fetch_option:
+                return fetch_structure_from_rcsb_interactive(directory)
+        print("❗ Invalid selection. Please enter a valid number.")
+
+
+def _normalize_pdb_id(raw_value):
+    pdb_id = (raw_value or "").strip().upper()
+    if len(pdb_id) != 4 or not pdb_id.isalnum():
+        raise ValueError("PDB IDs must be 4 alphanumeric characters, for example 9UWJ.")
+    return pdb_id
+
+
+def fetch_structure_from_rcsb(directory, pdb_id, requested_format="cif"):
+    pdb_id = _normalize_pdb_id(pdb_id)
+    requested_format = (requested_format or "cif").strip().lower()
+    if requested_format not in {"pdb", "cif", "mmcif"}:
+        raise ValueError(f"Unsupported fetch format: {requested_format}")
+
+    remote_extension = "pdb" if requested_format == "pdb" else "cif"
+    local_extension = "mmcif" if requested_format == "mmcif" else requested_format
+    output_filename = f"{pdb_id}.{local_extension}"
+    output_path = os.path.join(directory, output_filename)
+    url = f"https://files.rcsb.org/download/{pdb_id}.{remote_extension}"
+
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        print(f"📥 Using existing local copy: {output_filename}")
+        return output_filename
+
+    try:
+        with urllib.request.urlopen(url, timeout=45) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"RCSB returned HTTP {exc.code} for {pdb_id} ({requested_format}).") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not reach the RCSB PDB for {pdb_id}: {exc.reason}") from exc
+
+    if not payload:
+        raise RuntimeError(f"Downloaded file for {pdb_id} was empty.")
+
+    with open(output_path, "wb") as handle:
+        handle.write(payload)
+
+    print(f"📥 Downloaded {pdb_id} from the RCSB PDB as {output_filename}")
+    return output_filename
+
+
+def fetch_structure_from_rcsb_interactive(directory):
+    while True:
+        raw_pdb_id = input("\n🌐 Enter a 4-character PDB ID to download (for example 9UWJ): ").strip()
+        try:
+            pdb_id = _normalize_pdb_id(raw_pdb_id)
+            break
+        except ValueError as exc:
+            print(f"❗ {exc}")
+
+    raw_format = input(
+        f"Choose download format for {pdb_id} [pdb/cif/mmcif, default: {args.fetch_format}]: "
+    ).strip().lower() or args.fetch_format
+    try:
+        return fetch_structure_from_rcsb(directory, pdb_id, raw_format)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to fetch {pdb_id} from the RCSB PDB: {exc}") from exc
+
+
+def prepare_input_structure_pdb(input_path, output_pdb):
+    lower = input_path.lower()
+    if lower.endswith(".pdb"):
+        if os.path.abspath(input_path) != os.path.abspath(output_pdb):
+            shutil.copyfile(input_path, output_pdb)
+        return output_pdb, "pdb"
+
+    if lower.endswith((".cif", ".mmcif")):
+        try:
+            from openmm.app import PDBFile, PDBxFile
+        except Exception as exc:
+            raise RuntimeError(
+                "CIF/MMCIF support requires OpenMM's PDBxFile reader."
+            ) from exc
+        structure = PDBxFile(input_path)
+        with open(output_pdb, "w", encoding="utf-8") as handle:
+            PDBFile.writeFile(structure.topology, structure.positions, handle, keepIds=True)
+        return output_pdb, "cif"
+
+    raise RuntimeError(f"Unsupported input structure format: {input_path}")
+
+
+def summarize_input_cleanup_candidates(component_summary):
+    categories = {
+        "water": [],
+        "ordinary_ion": [],
+        "common_solvent_or_buffer": [],
+    }
+    for resname, entry in component_summary.items():
+        category = entry.get("category")
+        if category in categories:
+            categories[category].append(resname)
+    return categories
+
+
+def _render_input_cleanup_summary(component_summary, cleanup_candidates):
+    lines = []
+    labels = {
+        "water": "crystallographic waters",
+        "ordinary_ion": "ordinary ions",
+        "common_solvent_or_buffer": "common solvents/buffers",
+    }
+    for key, label in labels.items():
+        resnames = cleanup_candidates.get(key) or []
+        if not resnames:
+            continue
+        instance_count = sum(int(component_summary[resname].get("copies", 0)) for resname in resnames)
+        lines.append(f"  {label}: {', '.join(resnames)} ({instance_count} instance(s))")
+    return "\n".join(lines)
+
+
+def resolve_input_cleanup_resnames(component_summary):
+    cleanup_candidates = summarize_input_cleanup_candidates(component_summary)
+    selected = set(parse_component_list(args.remove_input_resnames))
+
+    if args.remove_input_waters:
+        selected.update(cleanup_candidates["water"])
+    if args.remove_input_ions:
+        selected.update(cleanup_candidates["ordinary_ion"])
+    if args.remove_input_solvents:
+        selected.update(cleanup_candidates["common_solvent_or_buffer"])
+
+    explicit_cleanup_requested = bool(
+        args.remove_input_waters
+        or args.remove_input_ions
+        or args.remove_input_solvents
+        or args.remove_input_resnames
+    )
+
+    if not explicit_cleanup_requested and not getattr(args, "headless", False):
+        cleanup_summary = _render_input_cleanup_summary(component_summary, cleanup_candidates)
+        if cleanup_summary:
+            print("\n🧹 Optional input cleanup candidates detected:")
+            print(cleanup_summary)
+        if cleanup_candidates["water"]:
+            choice = input("Remove crystallographic waters before setup? [y/N]: ").strip().lower()
+            if choice in ("y", "yes"):
+                selected.update(cleanup_candidates["water"])
+        if cleanup_candidates["ordinary_ion"]:
+            choice = input("Remove ordinary ions before setup? [y/N]: ").strip().lower()
+            if choice in ("y", "yes"):
+                selected.update(cleanup_candidates["ordinary_ion"])
+        if cleanup_candidates["common_solvent_or_buffer"]:
+            choice = input("Remove common solvents/buffers before setup? [y/N]: ").strip().lower()
+            if choice in ("y", "yes"):
+                selected.update(cleanup_candidates["common_solvent_or_buffer"])
+
+    return ordered_unique_resnames(selected)
+
+
+def prepare_selected_input_structure(directory, selected_filename):
+    input_path = selected_filename if os.path.isabs(selected_filename) else os.path.join(directory, selected_filename)
+    source_pdb_path = os.path.join(directory, "selected_input_source.pdb")
+    prepared_pdb_path, source_format = prepare_input_structure_pdb(input_path, source_pdb_path)
+
+    if source_format == "cif":
+        print(f"🔄 Converted {selected_filename} to PDB for setup: {os.path.basename(prepared_pdb_path)}")
+
+    component_summary = summarize_detected_hetero_components(prepared_pdb_path)
+    cleanup_resnames = resolve_input_cleanup_resnames(component_summary)
+    if cleanup_resnames:
+        cleaned_pdb_path = os.path.join(directory, "selected_input_cleaned.pdb")
+        removed_counts = write_protein_pdb_without_components(prepared_pdb_path, cleaned_pdb_path, cleanup_resnames)
+        print(f"🧹 Removed input cleanup residues before setup: {', '.join(cleanup_resnames)}")
+        print(f"🧹 Removed atom counts by residue: {removed_counts}")
+        return cleaned_pdb_path, cleanup_resnames
+
+    return prepared_pdb_path, []
+
+
+def _format_instance_key(instance_key):
+    resname, chain_id, resid, icode = instance_key
+    return f"{resname}@{chain_id}:{resid}{'' if icode == '_' else icode}"
+
+
+def curate_selected_component_instances(directory, pdb_path, managed_resnames, selected_instance_keys):
+    curated_pdb_path = os.path.join(directory, "selected_input_curated.pdb")
+    removed_counts = write_pdb_with_selected_component_instances(
+        pdb_path,
+        curated_pdb_path,
+        managed_resnames,
+        selected_instance_keys,
+    )
+    return curated_pdb_path, removed_counts
+
+
+def curate_selected_polymer_chains(directory, pdb_path, selected_chain_ids):
+    curated_pdb_path = os.path.join(directory, "selected_input_chain_curated.pdb")
+    removed_counts = write_pdb_with_selected_polymer_chains(
+        pdb_path,
+        curated_pdb_path,
+        selected_chain_ids,
+    )
+    return curated_pdb_path, removed_counts
+
+
+def resolve_input_chain_selection(polymer_info):
+    chain_entries = polymer_info.get("chains", [])
+    chain_ids = [entry.get("chain_id") for entry in chain_entries if entry.get("chain_id")]
+    if len(chain_ids) <= 1:
+        return chain_ids
+
+    chain_table_text, chain_index_lookup = render_polymer_chain_selection_table(polymer_info)
+    if args.keep_chains:
+        return resolve_polymer_chain_selection(args.keep_chains, chain_index_lookup, chain_ids)
+    if args.drop_chains:
+        dropped_chain_ids = resolve_polymer_chain_selection(args.drop_chains, chain_index_lookup, chain_ids)
+        return [chain_id for chain_id in chain_ids if chain_id not in dropped_chain_ids]
+    if len(os.sys.argv) != 1:
+        return chain_ids
+
+    print("\n" + chain_table_text)
+    keep_all_choice = input("\nKeep all detected polymer chains for this setup? [Y/n]: ").strip().lower()
+    if keep_all_choice in ("", "y", "yes"):
+        return chain_ids
+
+    raw_keep = input(
+        "Which polymer chains should be retained? [numbers/IDs like 1 or A, comma-separated, default: 1]: "
+    ).strip() or "1"
+    return resolve_polymer_chain_selection(raw_keep, chain_index_lookup, chain_ids)
 
 def get_ligand_code():
     """Prompts user to enter ligand 3-letter code or use default."""
@@ -944,6 +1243,27 @@ def _chain_summary_lookup(chain_summaries):
         for entry in (chain_summaries or [])
         if entry.get("chain_id") is not None
     }
+
+
+def _next_expected_chain_id(chain_summaries, answered_prompts, prompt_kind=None):
+    for entry in chain_summaries or []:
+        chain_id = entry.get("chain_id")
+        if chain_id is None:
+            continue
+        state = answered_prompts.get(chain_id, {})
+        if prompt_kind == "start":
+            if not state.get("start"):
+                return chain_id
+            continue
+        if prompt_kind == "end":
+            if state.get("start") and not state.get("end"):
+                return chain_id
+            if not state.get("start"):
+                return chain_id
+            continue
+        if not (state.get("start") and state.get("end")):
+            return chain_id
+    return None
 
 
 def _lookup_menu_option(available_options, preferred_labels):
@@ -1147,7 +1467,7 @@ def normalize_nucleic_phosphate_atom_names_for_forcefield(input_pdb, output_pdb,
     }
 
 
-def _maybe_send_menu_selection(master_fd, menu_state, chain_lookup, answered_prompts):
+def _maybe_send_menu_selection(master_fd, menu_state, chain_lookup, chain_summaries, answered_prompts):
     menu_text = _extract_current_menu_text(menu_state.get("buffer", ""), menu_state["kind"])
     available_options = _parse_menu_options(menu_text)
     if not available_options:
@@ -1157,6 +1477,10 @@ def _maybe_send_menu_selection(master_fd, menu_state, chain_lookup, answered_pro
         return False
 
     chain_id = menu_state.get("chain_id")
+    if chain_id is None:
+        chain_id = _next_expected_chain_id(chain_summaries, answered_prompts, menu_state.get("kind"))
+        if chain_id is not None:
+            menu_state["chain_id"] = chain_id
     chain_summary = chain_lookup.get(chain_id)
     if chain_summary is None:
         raise RuntimeError(
@@ -1273,14 +1597,16 @@ def automate_pdb2gmx(directory, polymer_info=None):
     current_chain_id = None
     recent_output = deque(maxlen=80)
     last_output_time = time.time()
-    idle_timeout_seconds = 20.0
+    first_prompt_timeout_seconds = 180.0
+    prompt_idle_timeout_seconds = 45.0
+    saw_terminus_prompt = False
 
     while True:
         ready, _, _ = select.select([master_fd], [], [], 0.25)
         if not ready:
             if menu_state is not None:
                 try:
-                    sent = _maybe_send_menu_selection(master_fd, menu_state, chain_lookup, answered_prompts)
+                    sent = _maybe_send_menu_selection(master_fd, menu_state, chain_lookup, chain_summaries, answered_prompts)
                 except RuntimeError as exc:
                     process.kill()
                     print(f"\n❌ {exc}")
@@ -1289,6 +1615,7 @@ def automate_pdb2gmx(directory, polymer_info=None):
                     menu_state = None
             if process.poll() is not None:
                 break
+            idle_timeout_seconds = prompt_idle_timeout_seconds if saw_terminus_prompt else first_prompt_timeout_seconds
             if time.time() - last_output_time > idle_timeout_seconds:
                 process.kill()
                 print("\n❌ pdb2gmx became idle before PyMACS could finish prompt automation.")
@@ -1333,13 +1660,19 @@ def automate_pdb2gmx(directory, polymer_info=None):
             current_chain_id = next_chain_id
 
         if menu_state is None:
-            prompt_state = _detect_latest_terminus_prompt(transcript[max(0, len(transcript) - 800):])
+            prompt_state = _detect_latest_terminus_prompt(transcript[max(0, len(transcript) - 4000):])
             if prompt_state:
+                inferred_chain_id = current_chain_id or _next_expected_chain_id(
+                    chain_summaries,
+                    answered_prompts,
+                    prompt_state.get("kind"),
+                )
                 menu_state = {
                     **prompt_state,
-                    "chain_id": current_chain_id,
+                    "chain_id": inferred_chain_id,
                     "last_update": time.time(),
                 }
+                saw_terminus_prompt = True
             continue
 
         menu_state["buffer"] += chunk
@@ -1348,13 +1681,21 @@ def automate_pdb2gmx(directory, polymer_info=None):
         if prompt_state:
             menu_state["kind"] = prompt_state["kind"]
             menu_state["buffer"] = prompt_state["buffer"]
-            menu_state["chain_id"] = current_chain_id
+            menu_state["chain_id"] = current_chain_id or _next_expected_chain_id(
+                chain_summaries,
+                answered_prompts,
+                prompt_state.get("kind"),
+            )
         elif menu_state.get("chain_id") is None:
-            menu_state["chain_id"] = current_chain_id
+            menu_state["chain_id"] = current_chain_id or _next_expected_chain_id(
+                chain_summaries,
+                answered_prompts,
+                menu_state.get("kind"),
+            )
         buffer_text = menu_state["buffer"]
         if ("Select start terminus type for" in buffer_text or "Select end terminus type for" in buffer_text) and _parse_menu_options(buffer_text):
             try:
-                sent = _maybe_send_menu_selection(master_fd, menu_state, chain_lookup, answered_prompts)
+                sent = _maybe_send_menu_selection(master_fd, menu_state, chain_lookup, chain_summaries, answered_prompts)
             except RuntimeError as exc:
                 process.kill()
                 print(f"\n❌ {exc}")
@@ -1923,17 +2264,17 @@ def graft_coords_onto_ini(ini_pdb, pose_pdb, out_pdb):
     return True
 
 
-def prepare_component_topology(directory, component_code, pdb_filename, role, molecule_count):
+def prepare_component_topology(directory, component_code, pdb_filename, role, molecule_count, source_pdb_path=None):
     """Prepare topology for one retained component and return single/all-copy coordinate paths."""
     print(f"\n🛠️ Preparing {role.replace('_', ' ')} topology for {component_code}...")
     forcefield_path = detect_forcefield(directory)
     if forcefield_path is None:
         return None
 
-    source_pdb_path = os.path.join(directory, pdb_filename)
+    source_pdb_path = os.path.abspath(source_pdb_path) if source_pdb_path else os.path.join(directory, pdb_filename)
     representative = select_representative_component_instance(source_pdb_path, component_code)
     if representative is None:
-        print(f"❌ No residue instances found for {component_code} in {pdb_filename}.")
+        print(f"❌ No residue instances found for {component_code} in {os.path.basename(source_pdb_path)}.")
         return None
     representative_key = representative["instance_key"]
     representative_label = f"{representative['chain_id']}:{representative['resid']}"
@@ -2078,7 +2419,7 @@ def prepare_component_topology(directory, component_code, pdb_filename, role, mo
     else:
         try:
             build_result = build_component_all_copies_from_template(
-                os.path.join(directory, pdb_filename),
+                source_pdb_path,
                 component_code,
                 template_pdb,
                 all_pdb_file,
@@ -2795,6 +3136,7 @@ def process_directory(
     directory,
     pdb_filename,
     ligand_code,
+    source_pdb_path=None,
     cofactors=None,
     dropped_components=None,
     strip_components=None,
@@ -2803,7 +3145,7 @@ def process_directory(
 ):
     """Process Step 1 setup for protein plus optional retained non-protein components."""
     print(f"\n🔄 Processing directory: {directory}")
-    pdb_path = os.path.join(directory, pdb_filename)
+    pdb_path = os.path.abspath(source_pdb_path) if source_pdb_path else os.path.join(directory, pdb_filename)
     print(f"\n🔍 Checking for {pdb_filename} in the working directory...")
     if not os.path.exists(pdb_path):
         print(f"⚠️ Skipping {directory}: {pdb_filename} not found.")
@@ -2855,8 +3197,10 @@ def process_directory(
     # Step 1.5: Clean up missing atoms and sidechains
     protein_pdb_path = os.path.join(directory, "protein.pdb")
     fixed_pdb_path = os.path.join(directory, "protein_fixed.pdb")
+    pdbfixer_ready_path = os.path.join(directory, "protein_pdbfixer_ready.pdb")
     print(f"🧼 Fixing missing atoms and adding hydrogens with PDBFixer...")
-    if not fix_missing_atoms(protein_pdb_path, fixed_pdb_path):
+    sanitize_pdb_for_pdbfixer(protein_pdb_path, pdbfixer_ready_path)
+    if not fix_missing_atoms(pdbfixer_ready_path, fixed_pdb_path):
         return False
     os.replace(fixed_pdb_path, protein_pdb_path)
     original_chain_ids = [entry.get("chain_id") for entry in (polymer_info or {}).get("chains", [])]
@@ -2933,6 +3277,7 @@ def process_directory(
                 pdb_filename,
                 role,
                 molecule_count=molecule_counts.get(component_code, 0),
+                source_pdb_path=pdb_path,
             )
             if not info:
                 return False
@@ -3150,13 +3495,25 @@ if __name__ == "__main__":
 
     base_directory = os.getcwd()
     print("\n📂 Base Directory:", base_directory)
-    if args.pdb:
+    if args.fetch_pdb:
+        try:
+            pdb_filename = fetch_structure_from_rcsb(base_directory, args.fetch_pdb, args.fetch_format)
+        except Exception as exc:
+            print(f"❌ Failed to fetch structure from the RCSB PDB: {exc}")
+            exit(1)
+        print(f"✅ Using fetched structure file: {pdb_filename}")
+    elif args.pdb:
         pdb_filename = args.pdb
-        print(f"✅ Using specified PDB file: {pdb_filename}")
+        print(f"✅ Using specified structure file: {pdb_filename}")
     else:
-        pdb_filename = select_pdb_file(base_directory)
+        pdb_filename = select_structure_file(base_directory)
 
-    pdb_path = os.path.join(base_directory, pdb_filename)
+    try:
+        pdb_path, input_cleanup_resnames = prepare_selected_input_structure(base_directory, pdb_filename)
+    except Exception as exc:
+        print(f"❌ Failed to prepare selected input structure: {exc}")
+        exit(1)
+
     try:
         validate_input_pdb(
             pdb_path,
@@ -3165,7 +3522,7 @@ if __name__ == "__main__":
             allow_covalent=args.allow_covalent_ligand,
         )
     except Exception as exc:
-        print(f"❌ PDB preflight failed: {exc}")
+        print(f"❌ Structure preflight failed: {exc}")
         exit(1)
 
     try:
@@ -3179,10 +3536,43 @@ if __name__ == "__main__":
     )
     print("\n🧬 Detected polymer chains:")
     print(format_polymer_chain_report(polymer_info))
+    try:
+        selected_polymer_chain_ids = resolve_input_chain_selection(polymer_info)
+    except ValueError as exc:
+        print(f"❌ Invalid polymer chain selection: {exc}")
+        exit(1)
+
+    original_polymer_chain_ids = [entry.get("chain_id") for entry in polymer_info.get("chains", [])]
+    removed_polymer_chain_counts = {}
+    if selected_polymer_chain_ids and set(selected_polymer_chain_ids) != set(original_polymer_chain_ids):
+        try:
+            pdb_path, removed_polymer_chain_counts = curate_selected_polymer_chains(
+                base_directory,
+                pdb_path,
+                selected_polymer_chain_ids,
+            )
+        except Exception as exc:
+            print(f"❌ Failed to curate selected polymer chains: {exc}")
+            exit(1)
+        polymer_info = apply_chain_type_overrides(
+            classify_polymer_chains(pdb_path),
+            chain_type_overrides,
+        )
+        print("✅ Retained polymer chains: " + ", ".join(selected_polymer_chain_ids))
+        if removed_polymer_chain_counts:
+            print(
+                "✅ Dropped polymer chains: "
+                + ", ".join(f"{chain_id} ({count} atoms)" for chain_id, count in removed_polymer_chain_counts.items())
+            )
+        print("🧬 Polymer chains after selection:")
+        print(format_polymer_chain_report(polymer_info))
+    else:
+        selected_polymer_chain_ids = original_polymer_chain_ids
 
     component_summary = summarize_detected_hetero_components(pdb_path)
     detected_ligs = selectable_component_resnames(component_summary)
     component_table_text, component_index_lookup = render_detected_component_table(component_summary)
+    _species_index_lookup, instance_token_lookup, resname_to_instance_keys = build_component_selection_maps(component_summary)
     detected_component_registry = {
         resname: {
             "copies": entry.get("copies", 0),
@@ -3198,10 +3588,13 @@ if __name__ == "__main__":
 
     ligand_code = None  # default
     selected_cofactors = parse_component_list(args.cofactors)
+    selected_instance_keys = []
+    primary_instance_key = None
 
     if args.ligand:
         ligand_code = args.ligand.upper()
         print(f"\n✅ Ligand mode detected from CLI: {ligand_code}")
+        selected_instance_keys = list(resname_to_instance_keys.get(ligand_code, []))
 
     elif args.mode == "protein":
         ligand_code = None
@@ -3217,25 +3610,83 @@ if __name__ == "__main__":
                 choice = input(f"\nUse detected ligand '{detected_ligs[0]}'? [Y/n]: ").strip().lower()
                 if choice in ("", "y", "yes"):
                     ligand_code = detected_ligs[0]
+                    selected_instance_keys = list(resname_to_instance_keys.get(ligand_code, []))
                 else:
                     ligand_code = input("Enter 3-letter ligand code manually: ").strip().upper()
             else:
-                raw_primary = input(
-                    "\nSelect the PRIMARY ligand for analysis [number or residue name]: "
-                ).strip()
-                if not raw_primary:
-                    raw_primary = "1"
-                ligand_code = resolve_component_selection(raw_primary, component_index_lookup, detected_ligs)[0]
-                remaining = [code for code in detected_ligs if code != ligand_code]
-                if remaining:
-                    raw_cofactors = input(
-                        "Select retained cofactors/context components from the remaining residues.\n"
-                        "Enter comma-separated numbers/names, \"all\", or \"none\" [default: none]: "
+                keep_all_choice = input(
+                    "\nKeep all detected small-molecule residues for this setup? [Y/n]: "
+                ).strip().lower()
+                if keep_all_choice in ("", "y", "yes"):
+                    raw_primary = input(
+                        "All detected ligands/cofactors will be kept for now.\n"
+                        "Which one should be treated as the PRIMARY ligand for analysis? [species number/name or instance label like 1A, default: 1A]: "
+                    ).strip() or "1A"
+                    primary_instances = resolve_component_instance_selection(
+                        raw_primary,
+                        component_index_lookup,
+                        instance_token_lookup,
+                        resname_to_instance_keys,
+                    )
+                    if not primary_instances:
+                        raise ValueError("No primary ligand selection was made.")
+                    primary_instance_key = primary_instances[0]
+                    ligand_code = primary_instance_key[0]
+                    selected_instance_keys = []
+                    for resname in detected_ligs:
+                        selected_instance_keys.extend(resname_to_instance_keys.get(resname, []))
+                    remaining_pool = OrderedDict()
+                    for resname, instance_keys in resname_to_instance_keys.items():
+                        remaining_pool[resname] = [key for key in instance_keys if key not in primary_instances]
+                    raw_extra = input(
+                        "Optional: choose which ADDITIONAL cofactors/context molecules to keep besides the primary ligand.\n"
+                        'Press ENTER to keep all additional cofactors/context molecules, or enter labels like 2A, 2B, "all", or "none": '
+                    ).strip()
+                    if raw_extra:
+                        extra_instances = resolve_component_instance_selection(
+                            raw_extra,
+                            component_index_lookup,
+                            instance_token_lookup,
+                            remaining_pool,
+                        )
+                        selected_instance_keys = []
+                        for instance_key in primary_instances + extra_instances:
+                            if instance_key not in selected_instance_keys:
+                                selected_instance_keys.append(instance_key)
+                else:
+                    raw_primary = input(
+                        "Which ligand are we keeping as the PRIMARY ligand? [species number/name or instance label like 1A, 1B, 2A]\n"
+                        "Cofactors/context residues are selected in the next step: "
+                    ).strip()
+                    if not raw_primary:
+                        raw_primary = "1A"
+                    primary_instances = resolve_component_instance_selection(
+                        raw_primary,
+                        component_index_lookup,
+                        instance_token_lookup,
+                        resname_to_instance_keys,
+                    )
+                    if not primary_instances:
+                        raise ValueError("No primary ligand selection was made.")
+                    primary_instance_key = primary_instances[0]
+                    ligand_code = primary_instance_key[0]
+                    selected_instance_keys = list(primary_instances)
+                    remaining_pool = OrderedDict()
+                    for resname, instance_keys in resname_to_instance_keys.items():
+                        remaining_pool[resname] = [key for key in instance_keys if key not in selected_instance_keys]
+                    raw_extra = input(
+                        "Select any ADDITIONAL cofactors/context molecules to keep with the primary ligand.\n"
+                        'Enter comma-separated species numbers/names or instance labels like 2A,2B, "all", or "none" [default: none]: '
                     ).strip() or "none"
-                    if raw_cofactors.lower() == "all":
-                        selected_cofactors = remaining
-                    else:
-                        selected_cofactors = resolve_component_selection(raw_cofactors, component_index_lookup, remaining)
+                    extra_instances = resolve_component_instance_selection(
+                        raw_extra,
+                        component_index_lookup,
+                        instance_token_lookup,
+                        remaining_pool,
+                    )
+                    for instance_key in extra_instances:
+                        if instance_key not in selected_instance_keys:
+                            selected_instance_keys.append(instance_key)
         else:
             polymer_labels = polymer_chain_type_list(polymer_info)
             print("\nℹ️ No small-molecule ligand/cofactor was selected.")
@@ -3252,14 +3703,24 @@ if __name__ == "__main__":
 
     if args.component_mode == "all" and ligand_code and detected_ligs:
         selected_cofactors = [code for code in detected_ligs if code != ligand_code]
+        if not selected_instance_keys:
+            for resname in detected_ligs:
+                selected_instance_keys.extend(resname_to_instance_keys.get(resname, []))
         if selected_cofactors:
             print(f"⚠️ Auto-retained cofactors: {', '.join(selected_cofactors)}")
     elif args.auto_keep_hetero and ligand_code and detected_ligs:
         selected_cofactors = [code for code in detected_ligs if code != ligand_code]
+        if not selected_instance_keys:
+            for resname in detected_ligs:
+                selected_instance_keys.extend(resname_to_instance_keys.get(resname, []))
         if selected_cofactors:
             print(f"⚠️ Auto-retained cofactors: {', '.join(selected_cofactors)}")
     elif args.component_mode == "selected":
         selected_cofactors = [code for code in selected_cofactors if code in detected_ligs and code != ligand_code]
+        if ligand_code and not selected_instance_keys:
+            selected_instance_keys = list(resname_to_instance_keys.get(ligand_code, []))
+            for code in selected_cofactors:
+                selected_instance_keys.extend(resname_to_instance_keys.get(code, []))
         if args.ligand and detected_ligs and len(detected_ligs) > 1 and not args.cofactors:
             dropped_preview = [code for code in detected_ligs if code != ligand_code]
             if dropped_preview:
@@ -3271,20 +3732,53 @@ if __name__ == "__main__":
                 )
     elif args.component_mode == "none":
         selected_cofactors = []
+        selected_instance_keys = []
 
+    selected_instance_resnames = ordered_unique_resnames(instance_key[0] for instance_key in selected_instance_keys)
+    selected_cofactors = [code for code in selected_instance_resnames if code != ligand_code]
     selected_components = get_all_retained_components(ligand_code, selected_cofactors)
     dropped_components = [code for code in detected_ligs if code not in selected_components]
     strip_components = list(detected_ligs)
+
+    if detected_ligs and selected_instance_keys:
+        try:
+            pdb_path, instance_removed_counts = curate_selected_component_instances(
+                base_directory,
+                pdb_path,
+                detected_ligs,
+                selected_instance_keys,
+            )
+        except Exception as exc:
+            print(f"❌ Failed to curate selected component instances: {exc}")
+            exit(1)
+    else:
+        instance_removed_counts = {}
 
     # Final report
     if ligand_code:
         print(f"\n✅ Using ligand: {ligand_code}")
     else:
         print("\n✅ No ligand selected for this simulation.")
+    if input_cleanup_resnames:
+        print(f"✅ Input cleanup removed: {', '.join(input_cleanup_resnames)}")
+    else:
+        print("✅ Input cleanup removed: None")
+    if selected_polymer_chain_ids:
+        print(f"✅ Retained polymer chains: {', '.join(selected_polymer_chain_ids)}")
+    else:
+        print("✅ Retained polymer chains: None")
+    if removed_polymer_chain_counts:
+        print("✅ Dropped polymer chains: " + ", ".join(f"{chain_id} ({count} atoms)" for chain_id, count in removed_polymer_chain_counts.items()))
     if selected_cofactors:
         print(f"✅ Retained cofactors: {', '.join(selected_cofactors)}")
     else:
         print("✅ Retained cofactors: None")
+    if selected_instance_keys:
+        print("✅ Retained component instances: " + ", ".join(_format_instance_key(key) for key in selected_instance_keys))
+    else:
+        print("✅ Retained component instances: None")
+    if instance_removed_counts:
+        print("✅ Dropped component instances: " + ", ".join(f"{label} ({count} atoms)" for label, count in instance_removed_counts.items()))
     print(f"✅ Dropped hetero components: {', '.join(dropped_components) if dropped_components else 'None'}")
 
     try:
@@ -3295,13 +3789,13 @@ if __name__ == "__main__":
             allow_covalent=args.allow_covalent_ligand,
         )
     except Exception as exc:
-        print(f"❌ PDB validation failed for the selected workflow: {exc}")
+        print(f"❌ Structure validation failed for the selected workflow: {exc}")
         exit(1)
 
 
 
     # Display chosen options
-    print(f"\n✅ Selected PDB file: {pdb_filename}")
+    print(f"\n✅ Selected structure file: {pdb_filename}")
     if ligand_code:
         print(f"✅ Using ligand code: {ligand_code}")
     else:
@@ -3313,6 +3807,7 @@ if __name__ == "__main__":
         base_directory,
         pdb_filename,
         ligand_code,
+        source_pdb_path=pdb_path,
         cofactors=selected_cofactors,
         dropped_components=dropped_components,
         strip_components=strip_components,
