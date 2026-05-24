@@ -197,9 +197,11 @@ PyMACs/
 ├── 4PDF4MD.py
 ├── 4_MDfigs.txt
 ├── docs/
+│   ├── README.md
 │   ├── OUTPUT_GALLERY.md
 │   ├── SOFTWARE_AND_CITATIONS.md
-│   └── USE_CASE_WALKTHROUGH.md
+│   ├── USE_CASE_WALKTHROUGH.md
+│   └── equilibration_plan_example.json
 ├── cgenff_charmm2gmx_py3_nx2.py
 ├── charmm36.ff/
 ├── charmm36_ljpme-jul2022.ff/
@@ -1180,11 +1182,13 @@ If the PDF is missing sections:
 
 Additional repository documents that complement the README:
 
+- [`docs/README.md`](docs/README.md) — index of repository documentation in the `docs/` folder
 - [`docs/USE_CASE_WALKTHROUGH.md`](docs/USE_CASE_WALKTHROUGH.md) — step-by-step commands, expected inputs, and expected outputs based on the files currently present in this repository
 - [`docs/SOFTWARE_AND_CITATIONS.md`](docs/SOFTWARE_AND_CITATIONS.md) — software roles, script locations, and citation placeholders to verify
 - [`docs/OUTPUT_GALLERY.md`](docs/OUTPUT_GALLERY.md) — current example outputs plus expected analysis figure types and where they are generated
+- [`docs/equilibration_plan_example.json`](docs/equilibration_plan_example.json) — minimal example of a multi-stage equilibration plan accepted by Step 2
 
-These files complement the README with walkthroughs, output examples, and software-role summaries.
+These files complement the README with walkthroughs, output examples, software-role summaries, and configuration examples.
 
 ---
 

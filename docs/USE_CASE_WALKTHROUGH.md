@@ -4,19 +4,20 @@ This walkthrough documents a reviewer-visible PyMACS workflow using only files t
 
 ## Available example inputs in this repo
 
+The repository currently includes:
+
 - `Example/CPD32_9G94.pdb`
 - `Example/A1D/A1D.cgenff.mol2`
 - `Example/A1D/A1D.str`
 - `Example/MD_ANALYSIS_FIGUREBOOK.pdf`
 
+The `Example/` directory also contains additional structure files such as `1URN.pdb`, `5T35.pdb`, and `9UWJ.pdb`. These are useful representative inputs for supported workflow branches, but they are not packaged here as full reproducible walkthroughs with complete associated ligand/cofactor parameter bundles and finished output trees.
+
 ## Scope and limitations
 
-- The repository currently contains one example PDB plus example ligand parameter inputs and a reference figurebook PDF.
-- A fully packaged receptor-cofactor-dimer example requested by reviewers is not currently present in the repository.
-- TODO for a future expanded example:
-  - add a complete run folder with prepared MD outputs
-  - add a dedicated RNA-containing example
-  - add a covalent-ligand expert example if that workflow is explicitly implemented
+- The primary packaged reproducible walkthrough in this repository is the `CPD32_9G94` plus `A1D` protein-ligand example.
+- Additional representative cofactor-aware, RNA-containing, and PROTAC/ternary-complex execution traces are described in the supplementary information associated with the manuscript. These examples demonstrate supported workflow branches, while the packaged repository walkthrough focuses on the included protein-ligand example.
+- The repository does support cofactor-aware selection, CIF/mmCIF intake, polymer-chain pruning, biological-system analysis branches, and PROTAC analysis code paths, but those branches are not all distributed here as complete runnable example folders with every required companion input.
 
 ## Recommended run-directory setup
 
@@ -28,8 +29,10 @@ cp ../../1_AutomateGromacs.py .
 cp ../../2_AutomateGromacs.py .
 cp ../../3A_AutomateGromacs.py .
 cp ../../3B_NETWORX.py .
+cp ../../3_PROTAC_Analysis.py .
 cp ../../4PDF4MD.py .
 cp ../../4_MDfigs.txt .
+cp ../../4_GraphNotes.txt .
 cp ../../cgenff_charmm2gmx_py3_nx2.py .
 
 cp ../../em.mdp .
@@ -146,6 +149,8 @@ Expected Step 3A outputs depend on mode and installed libraries, but commonly in
 - contact frequency outputs
 - NETWORX-ready tables and figures
 
+For this included protein-ligand walkthrough, `3A_AutomateGromacs.py` is the main analysis entry point. When the required inputs are present, it can automatically dispatch to `3B_NETWORX.py` for ligand/peptide-style interaction-network rendering. In PROTAC mode, it dispatches to the dedicated PROTAC analysis script instead.
+
 ## Step 3B: network rendering
 
 ```bash
@@ -173,6 +178,8 @@ Expected Step 4 output:
 Compare the result against:
 
 - `../../Example/MD_ANALYSIS_FIGUREBOOK.pdf`
+
+If a run is analyzed in PROTAC mode and `Analysis_Results/PROTAC/QC/protac_figure_manifest.csv` exists, `4PDF4MD.py` switches automatically into its PROTAC figurebook path and writes `PROTAC_MD_ANALYSIS_FIGUREBOOK.pdf` instead of the standard report.
 
 ## Where logs are written
 
