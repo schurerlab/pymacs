@@ -93,6 +93,34 @@ By integrating these orthogonal analyses, this report delivers a mechanistic por
 This document is intended as a rigorous, standalone reference for evaluating protein stability, comparing apo and bound states, interpreting domain motions, supporting manuscript-quality mechanistic discussion, and guiding subsequent modeling or experimental follow-up.
 """
 
+TITLE_PAGE_DESCRIPTION_PEPTIDE_INTERFACE = """
+Molecular Dynamics Analysis of the Protein:Peptide Interface in {Protein}
+
+Trajectory Generated with GROMACS and the Customized PyMACS Analysis Framework
+
+This report presents a specialized molecular dynamics (MD) analysis of a protein–peptide interface system, integrating global structural stability, peptide-associated chain dynamics, secondary-structure evolution, and residue-residue interface persistence into a unified, publication-ready dataset. The simulation was performed using GROMACS, where the peptide is parameterized as a protein-like polymer chain for topology generation, while PyMACS treats the system as a distinct protein–peptide interface workflow for interpretation, analysis, and reporting.
+
+Unlike an apo protein report, this figurebook is designed to evaluate how a short peptide partner remains associated with, adapts to, or disengages from a larger protein surface over the trajectory. The PyMACS pipeline quantifies global and chain-resolved RMSD/RMSF, compactness by radius of gyration, secondary-structure stability, and residue-level flexibility, then extends the analysis with interface-specific residue interaction networks generated from chain-to-chain contact persistence.
+
+Across this report, each figure provides a distinct analytical lens:
+
+Global and chain-resolved RMSD/RMSF reveal whether the protein scaffold and peptide partner remain structurally stable or undergo asymmetric motion.
+
+Radius of gyration reports on overall compactness and large-scale breathing motions of the protein–peptide assembly.
+
+Secondary-structure analyses (DSSP) identify whether the protein and peptide retain stable structural elements or transition into more flexible conformations during the simulation.
+
+Interface contact fractions, contact-count timelines, and minimum-distance traces quantify whether the peptide remains persistently engaged with the protein surface or samples transient binding states.
+
+Residue-pair heatmaps and ranked contact plots identify the specific protein–peptide residue pairs that dominate interface stability.
+
+Residue-level and chain-level interaction networks provide an interpretable map of the anchoring contacts that maintain the protein–peptide complex.
+
+By integrating these orthogonal analyses, this report delivers a mechanistic portrait of the protein–peptide interface: how stable the peptide-bound assembly remains, which residues anchor the interaction, whether the peptide maintains persistent contacts or samples alternative interface states, and which regions of the protein scaffold respond dynamically to peptide engagement.
+
+This document is intended as a rigorous, standalone reference for evaluating peptide-binding stability, prioritizing interface residues for mutagenesis, comparing peptide variants, interpreting protein–peptide recognition mechanisms, and supporting manuscript-quality mechanistic discussion.
+"""
+
 TITLE_PAGE_DESCRIPTION_BIOLOGICAL = """
 Molecular Dynamics Analysis of {Protein}
 
@@ -118,6 +146,7 @@ This document is intended as a rigorous, standalone reference for evaluating bio
 """
 
 PROTAC_MANIFEST_CSV = os.path.join("Analysis_Results", "PROTAC", "QC", "protac_figure_manifest.csv")
+INTERFACE_RIN_DIR = os.path.join("Analysis_Results", "Interface_RIN")
 
 
 GENERIC_CATEGORY_NOTES = {
@@ -134,12 +163,35 @@ GENERIC_CATEGORY_NOTES = {
 }
 
 
+def interface_rin_outputs_present(interface_dir: str = INTERFACE_RIN_DIR) -> bool:
+    if not os.path.isdir(interface_dir):
+        return False
+    expected = [
+        "Interface_ChainPair_ContactFractions.png",
+        "Interface_ContactCount_Timeseries.png",
+        "Interface_MinDistance_Timeseries.png",
+        "Interface_ResiduePair_ContactHeatmap.png",
+        "Interface_RIN_Network.png",
+        "Interface_ChainLevel_Network.png",
+        "Interface_TopResiduePairs_Barplot.png",
+    ]
+    return any(os.path.exists(os.path.join(interface_dir, name)) for name in expected)
+
+
 def safe_input(prompt: str, default: str = "") -> str:
     try:
         value = input(prompt).strip()
         return value if value else default
     except EOFError:
         return default
+
+
+def peptide_metadata_present() -> bool:
+    candidates = [
+        ".chainmap.peptide.json",
+        os.path.join("Analysis_Results", ".chainmap.peptide.json"),
+    ]
+    return any(os.path.exists(candidate) for candidate in candidates)
 
 
 def prepare_image_for_pdf(img_path: str, max_width_px: int = 1600) -> Optional[str]:
@@ -163,14 +215,32 @@ def prepare_image_for_pdf(img_path: str, max_width_px: int = 1600) -> Optional[s
 
 
 def detect_report_mode() -> str:
+    peptide_detected = peptide_metadata_present()
+    peptide_interface_detected = (
+        peptide_detected and os.path.isdir(INTERFACE_RIN_DIR)
+    )
+
+    if peptide_detected or peptide_interface_detected:
+        print(
+            "🧬 Detected peptide metadata from .chainmap.peptide.json. "
+            "Recommended report type: Protein:Peptide interface."
+        )
+
     print("\nSelect report type:")
-    print("  1. Ligand-bound / small-molecule / peptide-bound")
-    print("  2. Ligandless / protein-centric / peptide:peptide / protein:protein")
-    print("  3. Biological system / protein:RNA / protein:DNA / RNA:DNA")
-    choice = safe_input("Enter choice [1/2/3, default 2]: ", "2")
+    print("  1. Ligand-bound / small-molecule-bound protein")
+    print("  2. Protein:Peptide interface")
+    print("  3. Protein:Protein / peptide:peptide interface")
+    print("  4. Apo / protein-only")
+    print("  5. Biological system / protein:RNA / protein:DNA / RNA:DNA")
+    default_choice = "2" if peptide_detected else "4"
+    choice = safe_input("Enter choice [1/2/3/4/5]: ", default_choice)
     if choice == "1":
         return "ligand"
+    if choice == "2":
+        return "peptide_interface"
     if choice == "3":
+        return "protein_interface"
+    if choice == "5":
         return "biological"
     return "protein"
 
@@ -371,6 +441,9 @@ def build_title_page(flow, styles, mode: str, pretty_ligand: Optional[str], prot
     if mode == "ligand":
         title_text = f"MD ANALYSIS REPORT — {pretty_ligand} Bound to {protein_title}"
         description = TITLE_PAGE_DESCRIPTION_LIGAND.format(LIG=pretty_ligand, Protein=protein_title)
+    elif mode == "peptide_interface":
+        title_text = f"MD ANALYSIS REPORT — Protein:Peptide Interface: {protein_title}"
+        description = TITLE_PAGE_DESCRIPTION_PEPTIDE_INTERFACE.format(Protein=protein_title)
     elif mode == "biological":
         title_text = f"MD ANALYSIS REPORT — Biological System: {protein_title}"
         description = TITLE_PAGE_DESCRIPTION_BIOLOGICAL.format(Protein=protein_title)
@@ -576,6 +649,81 @@ def load_biological_system_captions(chains: List[str], proteins: List[str]):
     return out
 
 
+def load_interface_rin_captions(interface_label: str = "protein-protein / protein-peptide"):
+    return [
+        {
+            "type": "single",
+            "filename": "Interface_ChainPair_ContactFractions.png",
+            "title": "Figure 12. Chain-Pair Interface Contact Persistence",
+            "caption": (
+                f"This figure summarizes the fraction of analyzed frames in which each {interface_label} chain pair "
+                "maintained at least one residue-residue interface contact under the configured cutoff. Higher values indicate "
+                "a persistent association between the chains, whereas lower values suggest weaker, transient, or intermittently sampled interfaces."
+            ),
+        },
+        {
+            "type": "single",
+            "filename": "Interface_ContactCount_Timeseries.png",
+            "title": "Figure 13. Interface Contact Count Over Time",
+            "caption": (
+                "This time series reports how many inter-chain residue-residue contacts were present in each analyzed frame. "
+                "Stable plateaus indicate a persistent interface, while strong oscillations or drops can reflect breathing motions, "
+                "partial disengagement, or transient rearrangements at the chain interface."
+            ),
+        },
+        {
+            "type": "single",
+            "filename": "Interface_MinDistance_Timeseries.png",
+            "title": "Figure 14. Minimum Inter-Chain Distance Over Time",
+            "caption": (
+                "This figure tracks the minimum heavy-atom distance observed between each analyzed chain pair over the trajectory. "
+                "Sustained short distances are consistent with stable association, whereas increasing or highly variable distances "
+                f"can indicate loosening, interface breathing, or partial separation of the {interface_label} assembly."
+            ),
+        },
+        {
+            "type": "single",
+            "filename": "Interface_ResiduePair_ContactHeatmap.png",
+            "title": "Figure 15. Residue-Pair Interface Contact Heatmap",
+            "caption": (
+                "This heatmap summarizes which residue-residue pairs across the chain interface remained in contact and how persistently "
+                "they were sampled. High-intensity regions highlight the most stable cross-interface residue contacts, while sparse or weak "
+                "regions point to transient interactions or a more diffuse binding surface."
+            ),
+        },
+        {
+            "type": "single",
+            "filename": "Interface_RIN_Network.png",
+            "title": "Figure 16. Residue-Level Interface Interaction Network",
+            "caption": (
+                f"This network graph represents persistent {interface_label} residue-residue contacts across the interface as edges connecting residue nodes. "
+                "Edge thickness reflects contact persistence, allowing rapid identification of the dominant anchor residues and the most "
+                "structurally important interaction pathways stabilizing the interface."
+            ),
+        },
+        {
+            "type": "single",
+            "filename": "Interface_ChainLevel_Network.png",
+            "title": "Figure 17. Chain-Level Interface Network",
+            "caption": (
+                "This chain-level network compresses the residue-resolved interface into a simpler overview of which polymer chains interact "
+                "most strongly and persistently. It is especially useful for multichain assemblies, where it clarifies the dominant interface "
+                "architecture without residue-level visual clutter."
+            ),
+        },
+        {
+            "type": "single",
+            "filename": "Interface_TopResiduePairs_Barplot.png",
+            "title": "Figure 18. Top Persistent Residue-Pair Contacts",
+            "caption": (
+                "This bar plot ranks the highest-persistence residue-residue contacts across the interface. It highlights the specific residue pairs "
+                "that contribute most consistently to chain association and provides a concise shortlist of candidate anchor contacts for mechanistic interpretation, "
+                "mutagenesis, or interface-focused design work."
+            ),
+        },
+    ]
+
+
 def add_figure_and_caption(flow, styles, image_path: str, title: str, caption: str):
     img = prepare_image_for_pdf(image_path)
     if not img:
@@ -691,7 +839,26 @@ def build_pdf():
     else:
         captions = load_protein_centric_captions(chains, proteins)
 
-    output_name = safe_input("Output PDF name [default MD_ANALYSIS_FIGUREBOOK.pdf]: ", "MD_ANALYSIS_FIGUREBOOK.pdf")
+    if mode == "peptide_interface":
+        if interface_rin_outputs_present():
+            captions.extend(load_interface_rin_captions(interface_label="protein-peptide"))
+        else:
+            print(
+                "⚠️ Protein:Peptide report selected, but Analysis_Results/Interface_RIN outputs were not found. "
+                "The report will include global protein/peptide stability figures only. Run 3A interface analysis first "
+                "to include residue-residue interface networks."
+            )
+    elif mode in {"protein", "protein_interface", "biological"} and interface_rin_outputs_present():
+        captions.extend(load_interface_rin_captions())
+
+    default_output_name = "MD_ANALYSIS_FIGUREBOOK.pdf"
+    if mode == "peptide_interface":
+        default_output_name = "PROTEIN_PEPTIDE_INTERFACE_MD_ANALYSIS_FIGUREBOOK.pdf"
+
+    output_name = safe_input(
+        f"Output PDF name [default {default_output_name}]: ",
+        default_output_name,
+    )
     if not output_name.lower().endswith(".pdf"):
         output_name += ".pdf"
 
