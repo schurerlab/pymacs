@@ -162,7 +162,7 @@ def parse_args():
     p.add_argument("--ns", type=float, default=None, help="Production length in nanoseconds (default 50)")
     p.add_argument("--gpu", "--gpu-id", dest="gpu", type=int, help="GPU ID to expose to GROMACS when running in GPU mode.")
     p.add_argument("--gpu-ids", type=str, default=None, help="Expert override for the exact gmx mdrun -gpu_id value (for example 0 or 01).")
-    p.add_argument("--compute", choices=["CPU", "GPU"], default="CPU", help="Computation mode")
+    p.add_argument("--compute", choices=["auto", "CPU", "GPU"], default="auto", help="Computation mode")
     p.add_argument("--no-gpu", action="store_true", help="Force CPU-only execution even if GPUs are available.")
     p.add_argument("--threads", type=int, default=None, help="Legacy alias for OpenMP thread count (same role as --ntomp).")
     p.add_argument("--ntomp", type=int, default=None, help="Number of OpenMP threads for gmx mdrun.")
@@ -218,6 +218,95 @@ def parse_args():
 def append_mdrun_log(directory, message):
     with open(os.path.join(directory, "mdrun.log"), "a", encoding="utf-8") as handle:
         handle.write(f"{message}\n")
+
+
+def detect_gpus():
+    try:
+        raw = subprocess.check_output(
+            "nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv,noheader,nounits",
+            shell=True,
+            text=True,
+        ).strip()
+    except Exception:
+        return []
+
+    gpu_list = []
+    for line in raw.splitlines():
+        parts = [part.strip() for part in line.split(",")]
+        if len(parts) != 5:
+            continue
+        try:
+            gpu_list.append(
+                {
+                    "index": int(parts[0]),
+                    "name": parts[1],
+                    "memory_total_mb": int(parts[2]),
+                    "memory_used_mb": int(parts[3]),
+                    "memory_free_mb": int(parts[4]),
+                }
+            )
+        except ValueError:
+            continue
+    return gpu_list
+
+
+def select_gpu(args, gpu_list, headless_mode):
+    if not gpu_list:
+        return -1
+
+    if getattr(args, "gpu", None) is not None and args.gpu >= 0:
+        if args.gpu >= len(gpu_list):
+            print(f"❌ Requested GPU {args.gpu} is out of range. Detected GPUs: 0-{len(gpu_list) - 1}.")
+            exit(1)
+        return args.gpu
+
+    if getattr(args, "gpu_ids", None):
+        return 0
+
+    if len(gpu_list) == 1:
+        return 0
+
+    if headless_mode:
+        return 0
+
+    print(f"\n🧠 Detected {len(gpu_list)} GPU(s):")
+    for gpu in gpu_list:
+        print(f"  [{gpu['index']}] {gpu['name']}")
+    gpu_choice = input(f"\nSelect GPU number (0-{len(gpu_list) - 1}) [default 0]: ").strip()
+    if gpu_choice == "":
+        return 0
+    if gpu_choice.isdigit() and int(gpu_choice) in range(len(gpu_list)):
+        return int(gpu_choice)
+    print("⚠️ Invalid GPU selection. Defaulting to GPU 0.")
+    return 0
+
+
+def resolve_compute_mode(args, gpu_list):
+    compute_mode = str(getattr(args, "compute", "auto")).lower()
+    if getattr(args, "no_gpu", False) or compute_mode == "cpu":
+        return False, -1, "Compute mode selected: CPU-only by user request"
+
+    if compute_mode == "gpu":
+        if not gpu_list:
+            return False, -1, "Compute mode selected: CPU-only because no GPU was detected"
+        return True, select_gpu(args, gpu_list, getattr(args, "headless", False)), "Compute mode selected: GPU-accelerated by user request"
+
+    if gpu_list:
+        return True, select_gpu(args, gpu_list, getattr(args, "headless", False)), "Compute mode selected: AUTO → GPU-accelerated on GPU 0"
+    return False, -1, "Compute mode selected: AUTO → CPU-only because no GPU was detected"
+
+
+def infer_stage_name(base_cmd):
+    match = re.search(r"-deffnm\s+(\S+)", base_cmd)
+    return match.group(1) if match else None
+
+
+def format_gpu_preflight(gpu_info):
+    return (
+        f"Selected GPU memory status: GPU {gpu_info['index']} ({gpu_info['name']}) "
+        f"free={gpu_info['memory_free_mb']} MiB used={gpu_info['memory_used_mb']} MiB "
+        f"total={gpu_info['memory_total_mb']} MiB"
+    )
 
 
 def resolve_existing_path(base_directory, candidate):
@@ -334,18 +423,24 @@ def system_has_virtual_sites(tpr_path: str) -> bool:
         return False
 
 GPU_PROFILES = [
-    # 🚀 SAFE for ALL systems (virtual sites OK)
-    {
-        "name": "gpu_safe",
-        "flags": "-nb gpu -pme gpu -bonded gpu -update cpu"
-    },
-
-    # 🚀 FULL GPU (ONLY if no virtual sites)
     {
         "name": "gpu_full",
-        "flags": "-nb gpu -pme gpu -bonded gpu -update gpu"
+        "flags": "-nb gpu -pme gpu -bonded gpu -update gpu",
+    },
+    {
+        "name": "gpu_safe",
+        "flags": "-nb gpu -pme gpu -bonded gpu -update cpu",
+    },
+    {
+        "name": "gpu_nb_only",
+        "flags": "-nb gpu -pme cpu -bonded cpu -update cpu",
     },
 ]
+
+EM_GPU_PROFILE = {
+    "name": "gpu_em_mixed",
+    "flags": "-nb gpu -pme cpu -bonded cpu -update cpu",
+}
 
 
 
@@ -359,12 +454,12 @@ def run_mdrun_with_fallback(
     tpr_check=None,
     ntmpi=1,
     gpu_id_arg=None,
+    stage_name=None,
 ):
     """
-    Try best GPU profile first; if virtual sites exist, force CPU update.
-    Fall back to CPU-only if all GPU attempts fail.
+    Run stage-aware mdrun with GPU profiles when available and safe.
     """
-
+    stage_name = stage_name or infer_stage_name(base_cmd) or "unknown"
     has_vs = False
     if tpr_check:
         tpr_path = os.path.join(cwd, tpr_check)
@@ -373,64 +468,69 @@ def run_mdrun_with_fallback(
             if has_vs:
                 print("⚠️ Virtual sites detected → forcing -update cpu (no GPU update).")
 
-    # Profile order:
-    #   - virtual sites: only safe
-    #   - no virtual sites: full first, then safe
-    if has_vs:
-        profiles = [p for p in GPU_PROFILES if "-update cpu" in p["flags"]]
-    else:
-        profiles = []
-        # prefer full if available
-        for p in GPU_PROFILES:
-            if "-update gpu" in p["flags"]:
-                profiles.append(p)
-        for p in GPU_PROFILES:
-            if "-update cpu" in p["flags"]:
-                profiles.append(p)
-
-    # --------------------
-    # GPU attempts
-    # --------------------
-    if use_gpu and gpu_id is not None and gpu_id >= 0:
-        for profile in profiles:
-            gpu_selector = gpu_id_arg if gpu_id_arg else "0"
-            cmd = (
-                f"{base_cmd} "
-                f"-pin on -pinoffset {pin_offset} "
-                f"-ntmpi {ntmpi} -ntomp {threads} "
-                f"-gpu_id {gpu_selector} {profile['flags']}"
-            )
-
-            print(f"\n🚀 Trying {profile['name']} → {cmd}")
-            append_mdrun_log(cwd, f"mdrun attempt ({profile['name']}): {cmd}")
-            rc = run_command_check_rc(cmd, cwd=cwd)
-
-            if rc == 0:
-                print(f"✅ Success using {profile['name']}")
-                append_mdrun_log(cwd, f"mdrun success ({profile['name']}): {cmd}")
-                return
-
-            print(f"⚠️ {profile['name']} failed, trying next fallback...")
-            append_mdrun_log(cwd, f"mdrun failed ({profile['name']}): {cmd}")
-
-    # --------------------
-    # CPU fallback
-    # --------------------
-    print("\n🧯 Falling back to CPU-only execution")
     cpu_cmd = (
         f"{base_cmd} "
         f"-pin on -pinoffset {pin_offset} "
         f"-ntmpi {ntmpi} -ntomp {threads}"
     )
 
-    append_mdrun_log(cwd, f"mdrun CPU fallback: {cpu_cmd}")
+    if not use_gpu or gpu_id is None or gpu_id < 0:
+        print(f"\n💻 Running {stage_name} in CPU-only mode.")
+        append_mdrun_log(cwd, f"mdrun CPU-only ({stage_name}): {cpu_cmd}")
+        rc = run_command_check_rc(cpu_cmd, cwd=cwd)
+        if rc != 0:
+            print("❌ CPU execution failed. Aborting.")
+            exit(rc)
+        append_mdrun_log(cwd, f"mdrun CPU success ({stage_name}): {cpu_cmd}")
+        return
+
+    if stage_name == "em":
+        em_note = (
+            "Energy minimization uses a non-dynamical integrator, so PyMACS will not use PME on GPU during EM. "
+            "GPU acceleration will resume for NVT/NPT/production."
+        )
+        print(em_note)
+        append_mdrun_log(cwd, em_note)
+        profiles = [EM_GPU_PROFILE]
+    elif has_vs:
+        profiles = [profile for profile in GPU_PROFILES if "-update cpu" in profile["flags"]]
+    else:
+        profiles = list(GPU_PROFILES)
+
+    gpu_selector = gpu_id_arg if gpu_id_arg else "0"
+    attempted_gpu = False
+    for profile in profiles:
+        attempted_gpu = True
+        cmd = (
+            f"{base_cmd} "
+            f"-pin on -pinoffset {pin_offset} "
+            f"-ntmpi {ntmpi} -ntomp {threads} "
+            f"-gpu_id {gpu_selector} {profile['flags']}"
+        )
+
+        print(f"\n🚀 Trying {profile['name']} for {stage_name} → {cmd}")
+        append_mdrun_log(cwd, f"mdrun attempt ({stage_name}/{profile['name']}): {cmd}")
+        rc = run_command_check_rc(cmd, cwd=cwd)
+        if rc == 0:
+            print(f"✅ Success using {profile['name']}")
+            append_mdrun_log(cwd, f"mdrun success ({stage_name}/{profile['name']}): {cmd}")
+            return
+
+        print(f"⚠️ {profile['name']} failed for {stage_name}, trying next option...")
+        append_mdrun_log(cwd, f"mdrun failed ({stage_name}/{profile['name']}): {cmd}")
+
+    if attempted_gpu:
+        print("All GPU profiles failed for this stage. Falling back to CPU-only execution.")
+        append_mdrun_log(cwd, f"All GPU profiles failed for {stage_name}. Falling back to CPU-only execution.")
+
+    append_mdrun_log(cwd, f"mdrun CPU fallback ({stage_name}): {cpu_cmd}")
     rc = run_command_check_rc(cpu_cmd, cwd=cwd)
     if rc != 0:
         print("❌ CPU fallback also failed. Aborting.")
         exit(rc)
 
     print("✅ CPU-only execution successful")
-    append_mdrun_log(cwd, f"mdrun CPU success: {cpu_cmd}")
+    append_mdrun_log(cwd, f"mdrun CPU success ({stage_name}): {cpu_cmd}")
 
 
 
@@ -745,6 +845,7 @@ def maybe_resume_production_only(directory, args, gpu_id, pin_offset, threads, u
         tpr_check=f"{md_deffnm}.tpr",
         ntmpi=ntmpi,
         gpu_id_arg=gpu_id_arg,
+        stage_name=md_deffnm,
     )
 
 
@@ -1415,11 +1516,23 @@ def run_equilibration_stage(stage_name, mdp_path, start_gro, ref_gro, prev_cpt, 
         use_gpu=use_gpu,
         ntmpi=ntmpi,
         gpu_id_arg=gpu_id_arg,
+        stage_name=stage_name,
     )
     return os.path.join(directory, f"{stage_name}.gro"), os.path.join(directory, f"{stage_name}.cpt")
 
 
-def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns, use_gpu, args, peptide_info=None):
+def setup_md(
+    directory,
+    gpu_id,
+    ligand_code,
+    simulation_type,
+    simulation_time_ns,
+    use_gpu,
+    args,
+    peptide_info=None,
+    compute_reason=None,
+    gpu_inventory=None,
+):
     """
     Runs full MD simulation setup on a specified GPU, with dynamic MDP configuration.
     Includes automatic tc-grps update, nsteps scaling, ligand topology handling,
@@ -1432,35 +1545,32 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     print("\n🧩 [STEP 0] Configuring environment and CPU/GPU threading ...")
 
     available_cores = multiprocessing.cpu_count()
+    gpu_list = gpu_inventory or []
+    gpu_count = len(gpu_list)
+    gpu_id_arg = None
+    selected_gpu = gpu_list[gpu_id] if use_gpu and 0 <= gpu_id < gpu_count else None
+
     print(f"🧠 Detected {available_cores} total CPU cores on system.")
-    gpu_id_arg = args.gpu_ids if getattr(args, "gpu_ids", None) else ("0" if gpu_id is not None and gpu_id >= 0 else None)
-
-    # --- Detect GPUs ---
-    try:
-        gpu_list = subprocess.check_output(
-            "nvidia-smi --query-gpu=name --format=csv,noheader",
-            shell=True, text=True
-        ).strip().splitlines()
-        gpu_list = [g.strip() for g in gpu_list if g.strip()]
-        gpu_count = len(gpu_list)
-    except Exception:
-        gpu_list, gpu_count = [], 0
-
-    # --- Interactive GPU selection ---
-    headless_mode = getattr(args, "headless", False)
-    if not headless_mode and gpu_count > 0:
-        print(f"\n🧠 Detected {gpu_count} GPU(s):")
-        for i, name in enumerate(gpu_list):
-            print(f"  [{i}] {name}")
-        gpu_choice = input(f"\nSelect GPU number (0–{gpu_count-1}) [default 0]: ").strip()
-        gpu_id = int(gpu_choice) if gpu_choice.isdigit() and int(gpu_choice) < gpu_count else 0
-        print(f"🎯 Selected GPU {gpu_id}: {gpu_list[gpu_id]}")
-    elif gpu_count > 0:
-        gpu_id = args.gpu if getattr(args, "gpu", None) is not None else 0
-        print(f"🤖 Headless mode: using GPU {gpu_id} ({gpu_list[gpu_id]})")
+    if compute_reason:
+        print(f"⚙️ {compute_reason}")
+    if use_gpu and selected_gpu:
+        print(f"🎯 Selected GPU {gpu_id}: {selected_gpu['name']}")
+        preflight_line = format_gpu_preflight(selected_gpu)
+        print(f"🧪 {preflight_line}")
+        append_mdrun_log(directory, preflight_line)
+        if selected_gpu["memory_free_mb"] < 2048:
+            vram_warning = (
+                "Selected GPU has low free VRAM. PyMACS will still try GPU, "
+                "but GROMACS may fall back or fail if memory is insufficient."
+            )
+            print(f"⚠️ {vram_warning}")
+            append_mdrun_log(directory, vram_warning)
+        gpu_id_arg = args.gpu_ids if getattr(args, "gpu_ids", None) else "0"
     else:
-        gpu_id = -1
-        print("⚠️ No GPUs detected — running in CPU mode.")
+        if gpu_count > 0:
+            print("💻 GPU-capable hardware is present, but CPU-only mode is active.")
+        else:
+            print("⚠️ No GPUs detected — running in CPU mode.")
 
     # --- NUMA-aware core detection ---
     try:
@@ -1476,11 +1586,13 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
 
     suggested_threads = len(cores)
     suggested_offset = cores[0]
-    print(f"📊 Suggested NUMA mapping for GPU {gpu_id}: cores {suggested_offset}–{cores[-1]} ({suggested_threads} cores)")
+    headless_mode = getattr(args, "headless", False)
+    mapping_target = f"GPU {gpu_id}" if use_gpu and gpu_id >= 0 else "CPU mode"
+    print(f"📊 Suggested NUMA mapping for {mapping_target}: cores {suggested_offset}–{cores[-1]} ({suggested_threads} cores)")
 
     # --- Interactive override ---
     if not headless_mode:
-        accept = input(f"Use this mapping for GPU {gpu_id}? [Y/n]: ").strip().lower()
+        accept = input(f"Use this mapping for {mapping_target}? [Y/n]: ").strip().lower()
         if accept in ["n", "no"]:
             try:
                 threads_in = input(f"Enter number of threads [default {suggested_threads}]: ").strip()
@@ -1507,8 +1619,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
     available_threads = max(1, threads)
 
     # --- Environment setup (GPU isolation like 2A_AutoGMXrestart.py) ---
-    if gpu_id is not None and gpu_id >= 0:
-        # Map the chosen physical GPU (e.g., 1 or 2) into a single visible device (index 0)
+    if use_gpu and gpu_id is not None and gpu_id >= 0:
         os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         if args.gpu_ids:
             os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_ids)
@@ -1519,17 +1630,9 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
             os.environ["GMX_FORCE_GPU_ID"] = "0"  # GROMACS now always sees it as device 0
             print(f"🎯 Forcing isolation: physical GPU {gpu_id} → visible GPU 0")
     else:
-        # No GPU explicitly chosen: expose all GPUs
-        try:
-            visible = subprocess.check_output(
-                "nvidia-smi --query-gpu=index --format=csv,noheader",
-                shell=True, text=True
-            ).strip().replace("\n", ",")
-            os.environ["CUDA_VISIBLE_DEVICES"] = visible
-            print(f"💻 No GPU ID specified; exposing all GPUs: {visible}")
-        except Exception:
-            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-            print("⚠️ Could not query nvidia-smi; defaulting to GPU 0")
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        os.environ.pop("GMX_FORCE_GPU_ID", None)
+        os.environ.pop("CUDA_DEVICE_ORDER", None)
 
     # Set thread binding
     os.environ["OMP_NUM_THREADS"] = str(available_threads)
@@ -1538,18 +1641,18 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
 
     print(f"\n🧠 Environment configured:")
     print(f"   • Detected total cores: {available_cores}")
-    if gpu_id >= 0:
-        print(f"   • GPU {gpu_id}: {gpu_list[gpu_id]} (cores {suggested_offset}–{cores[-1]})")
+    if use_gpu and selected_gpu:
+        print(f"   • GPU {gpu_id}: {selected_gpu['name']} (cores {suggested_offset}–{cores[-1]})")
     else:
         print("   • CPU-only mode active.")
     print(f"   • Using {available_threads} OpenMP thread(s), pin offset {pin_offset}")
     print(f"   • Using {args.ntmpi} MPI rank(s)")
-    print(f"   • CUDA_VISIBLE_DEVICES={gpu_id if gpu_id >= 0 else 'None'}")
+    print(f"   • CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'None')}")
     print(f"   • OMP_NUM_THREADS={available_threads}")
     if gpu_id_arg:
         print(f"   • gmx mdrun -gpu_id {gpu_id_arg}")
 
-    append_mdrun_log(directory, f"Compute mode: {'GPU' if use_gpu else 'CPU'}")
+    append_mdrun_log(directory, compute_reason or f"Compute mode: {'GPU' if use_gpu else 'CPU'}")
     append_mdrun_log(directory, f"Resources: ntmpi={args.ntmpi} ntomp={available_threads} pinoffset={pin_offset} gpu_id={gpu_id} gpu_id_arg={gpu_id_arg}")
 
 
@@ -1628,6 +1731,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         use_gpu=use_gpu,
         ntmpi=args.ntmpi,
         gpu_id_arg=gpu_id_arg,
+        stage_name="em",
     )
     inspect_energy_minimization(directory, component_context)
 
@@ -1996,6 +2100,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
             use_gpu=use_gpu,
             ntmpi=args.ntmpi,
             gpu_id_arg=gpu_id_arg,
+            stage_name="nvt",
         )
         print("✅ NVT equilibration complete.\n")
 
@@ -2014,6 +2119,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
             use_gpu=use_gpu,
             ntmpi=args.ntmpi,
             gpu_id_arg=gpu_id_arg,
+            stage_name="npt",
         )
         equilibration_start_gro = os.path.join(directory, "npt.gro")
         equilibration_cpt = os.path.join(directory, "npt.cpt")
@@ -2062,6 +2168,7 @@ def setup_md(directory, gpu_id, ligand_code, simulation_type, simulation_time_ns
         tpr_check=f"{md_deffnm}.tpr",
         ntmpi=args.ntmpi,
         gpu_id_arg=gpu_id_arg,
+        stage_name=md_deffnm,
     )
 
     print("✅ Production MD complete.\n")
@@ -2076,45 +2183,14 @@ if __name__ == "__main__":
     args = parse_args()
     print_numa_summary()
 
-    # GPU selection
-    try:
-        gpu_list = subprocess.check_output(
-            "nvidia-smi --query-gpu=name --format=csv,noheader", shell=True
-        ).decode().strip().split('\n')
-        gpu_list = [g for g in gpu_list if g]
-        gpu_count = len(gpu_list)
-    except Exception:
-        gpu_list = []
-        gpu_count = 0
-
-    if args.compute.upper() == "GPU":
-        if args.gpu is not None:
-            gpu_id = args.gpu
-        elif args.headless:
-            # Headless GPU but no gpu id given -> default 0 if available, else fail to CPU
-            gpu_id = 0 if gpu_count > 0 else -1
-        else:
-            if gpu_count == 0:
-                print("❌ No GPU detected. Ensure NVIDIA drivers and CUDA are properly installed.")
-                exit(1)
-            elif gpu_count == 1:
-                print("\n🎯 Detected 1 GPU. Automatically selecting GPU 0.")
-                gpu_id = 0
-            else:
-                print(f"\n🧠 Detected {gpu_count} GPUs:")
-                for idx, name in enumerate(gpu_list):
-                    print(f"  [{idx}] {name}")
-                gpu_choice = input(f"\nEnter GPU number (0-{gpu_count - 1}): ").strip()
-                if not gpu_choice.isdigit() or int(gpu_choice) not in range(gpu_count):
-                    print("❌ Invalid GPU selection.")
-                    exit(1)
-                gpu_id = int(gpu_choice)
-    else:
-        gpu_id = -1  # CPU mode
-
+    gpu_inventory = detect_gpus()
+    use_gpu, gpu_id, compute_reason = resolve_compute_mode(args, gpu_inventory)
+    if compute_reason == "Compute mode selected: AUTO → GPU-accelerated on GPU 0" and use_gpu and gpu_id != 0:
+        compute_reason = f"Compute mode selected: AUTO → GPU-accelerated on GPU {gpu_id}"
 
     simulation_directory = os.getcwd()
-    print(f"\n📂 Running MD setup in: {simulation_directory} on GPU {gpu_id}")
+    target_label = f"GPU {gpu_id}" if use_gpu and gpu_id >= 0 else "CPU-only mode"
+    print(f"\n📂 Running MD setup in: {simulation_directory} using {target_label}")
 
     # Simulation type
     sim_map = {
@@ -2251,11 +2327,6 @@ if __name__ == "__main__":
     if simulation_time_ns <= 0:
         print("ℹ️ Non-positive simulation time provided. Defaulting to 50 ns.")
         simulation_time_ns = 50.0
-    # Determine compute mode
-    use_gpu = (args.compute.upper() == "GPU")
-    print(f"⚙️ Compute mode selected: {'GPU-accelerated' if use_gpu else 'CPU-only'}")
-
-
     setup_md(
         simulation_directory,
         gpu_id,
@@ -2264,7 +2335,9 @@ if __name__ == "__main__":
         simulation_time_ns,
         use_gpu,
         args,
-        peptide_info=peptide_info
+        peptide_info=peptide_info,
+        compute_reason=compute_reason,
+        gpu_inventory=gpu_inventory,
     )
 
 

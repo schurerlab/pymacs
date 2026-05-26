@@ -102,6 +102,134 @@ For questions about PyMACS, molecular dynamics workflow support, CGenFF setup, G
 
 ---
 
+<a id="super-quick-start-install"></a>
+
+## ⚡ Super Quick Start Install (lightweight)
+
+Same idea as the full Quick Start below, except this version skips the heavy example assets and avoids Git LFS downloads. Use it when you want the core PyMACS scripts, templates, force fields, docs, and environment files without copying large trajectories or completed example outputs.
+
+<details>
+<summary><strong>Show lightweight installer command</strong></summary>
+
+```bash
+bash <<'EOF'
+set -e
+
+REPO_URL="https://github.com/schurerlab/pymacs.git"
+TMP_DIR="$(mktemp -d)"
+TARGET_DIR="$(pwd)"
+
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+
+trap cleanup EXIT
+
+echo "======================================"
+echo " PyMACS Super Quick Start Install"
+echo "======================================"
+echo
+echo "This will copy a lightweight PyMACS instance into:"
+echo "  $TARGET_DIR"
+echo
+echo "This version skips Example_Choices and common heavy MD output files."
+echo
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "ERROR: git is not installed or not available in PATH."
+  echo "Please install git first, then run this command again."
+  exit 1
+fi
+
+if [ "$(find "$TARGET_DIR" -mindepth 1 -maxdepth 1 | wc -l)" -gt 0 ]; then
+  echo "WARNING: This directory is not empty."
+  echo "Files with the same names as PyMACS files may be overwritten."
+  echo
+  printf "Continue copying lightweight PyMACS files into this directory? [y/N]: "
+  read -r answer
+  case "$answer" in
+    y|Y|yes|YES) ;;
+    *)
+      echo "Install cancelled."
+      exit 0
+      ;;
+  esac
+fi
+
+echo
+echo "Cloning PyMACS into a temporary folder without Git LFS payloads..."
+GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 "$REPO_URL" "$TMP_DIR/pymacs"
+
+cd "$TMP_DIR/pymacs"
+
+echo "Removing large example/output assets from the temporary copy..."
+rm -rf Example_Choices
+find . -type f \( \
+  -name "*.xtc" -o \
+  -name "*.trr" -o \
+  -name "*.tpr" -o \
+  -name "*.cpt" -o \
+  -name "*.edr" -o \
+  -name "*.xvg" -o \
+  -name "*.log" -o \
+  -name "*.pdf" -o \
+  -name "*.zip" -o \
+  -name "*.tar" -o \
+  -name "*.tar.gz" \
+\) -delete
+
+echo
+echo "Copying lightweight PyMACS files into your current directory..."
+
+shopt -s dotglob nullglob
+for item in "$TMP_DIR/pymacs"/*; do
+  base="$(basename "$item")"
+  case "$base" in
+    .git|Example_Choices)
+      continue
+      ;;
+  esac
+
+  if [ -e "$TARGET_DIR/$base" ]; then
+    printf "Overwrite existing %s? [y/N]: " "$base"
+    read -r overwrite
+    case "$overwrite" in
+      y|Y|yes|YES)
+        rm -rf "$TARGET_DIR/$base"
+        ;;
+      *)
+        echo "Skipping $base"
+        continue
+        ;;
+    esac
+  fi
+
+  cp -R "$item" "$TARGET_DIR/"
+done
+
+echo "Cleaning up temporary clone..."
+cleanup
+trap - EXIT
+
+cd "$TARGET_DIR"
+
+echo
+echo "Done. Lightweight PyMACS has been copied into:"
+echo "  $TARGET_DIR"
+echo
+echo "Next recommended steps:"
+echo "  conda env create -f environment_cgenff.yml"
+echo "  conda env create -f environment_mdanalysis.yml"
+echo
+echo "Then follow the Step 1 / Step 2 / Step 3 workflow in this README."
+echo "Use the full Quick Start below if you also need the curated example datasets."
+EOF
+```
+
+</details>
+
+---
+
 <a id="quick-start-install"></a>
 
 ## ⚡ Quick Start Install
@@ -178,6 +306,21 @@ for item in "$TMP_DIR/pymacs"/*; do
   if [ "$base" = ".git" ]; then
     continue
   fi
+
+  if [ -e "$TARGET_DIR/$base" ]; then
+    printf "Overwrite existing %s? [y/N]: " "$base"
+    read -r overwrite
+    case "$overwrite" in
+      y|Y|yes|YES)
+        rm -rf "$TARGET_DIR/$base"
+        ;;
+      *)
+        echo "Skipping $base"
+        continue
+        ;;
+    esac
+  fi
+
   cp -R "$item" "$TARGET_DIR/"
 done
 
@@ -236,8 +379,11 @@ Core goals:
 ## 🧭 Repository Navigation
 
 <p align="center">
+  <a href="#super-quick-start-install">
+    <img src="https://img.shields.io/badge/Install-Super%20Quick%20Lightweight-yellow?style=for-the-badge&logo=gnubash" alt="Super Quick Start Install">
+  </a>
   <a href="#quick-start-install">
-    <img src="https://img.shields.io/badge/Install-Quick%20Start-yellow?style=for-the-badge&logo=gnubash" alt="Quick Start Install">
+    <img src="https://img.shields.io/badge/Install-Full%20Quick%20Start-yellow?style=for-the-badge&logo=gnubash" alt="Full Quick Start Install">
   </a>
   <a href="#quick-start-templates">
     <img src="https://img.shields.io/badge/Get%20Started-Quick%20Start-orange?style=for-the-badge&logo=gnubash" alt="Get started with PyMACS">
@@ -253,7 +399,8 @@ Core goals:
   </a>
 </p>
 
-- [Quick Start Install](#quick-start-install)
+- [Super Quick Start Install (lightweight)](#super-quick-start-install)
+- [Full Quick Start Install](#quick-start-install)
 - [What’s in this repo](#repository-layout)
 - [System requirements](#system-requirements)
 - [Environment setup](#environment-setup)
@@ -353,7 +500,7 @@ The repository may include additional helper scripts or files as the project evo
 - **Python:** managed through conda environments.
 - **Conda / Mamba:** recommended for reproducibility.
 - **tmux:** optional but strongly recommended for long simulations.
-- **GPU:** optional but recommended for production MD.
+- **GPU:** optional but recommended for production MD. Step 2 can auto-select an available NVIDIA GPU and fall back to CPU when needed.
 
 ---
 
@@ -486,20 +633,45 @@ python 2_AutomateGromacs.py --mdp-dir MDPs --md-mdp md.mdp
 
 ### 5. CPU, GPU, and MPI resource flags
 
+Step 2 is designed to use the best available hardware automatically. In the current GPU-adaptive workflow, `--compute auto` is the intended default behavior: PyMACS checks for NVIDIA GPUs, selects GPU 0 automatically when only one GPU is available, and falls back to CPU-only execution if no usable GPU is detected. Use `--no-gpu` or `--compute CPU` when you intentionally want CPU-only behavior.
+
 | Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
 |---|---|---|---|---|---|---|---|
-| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--compute` | Whether MD runs on CPU-only or tries to use a GPU. | Verified options: `CPU`, `GPU` | `CPU` is slower but often simpler for first runs. | Choosing `GPU` can make runs much faster if your hardware and drivers are compatible. | Choosing `CPU` is slower, but often easier to troubleshoot. | Great first troubleshooting switch when GPU mode is unstable. |
-| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--gpu`, `--gpu-id`, `--gpu-ids`, `--no-gpu` | Which GPU to use, or whether to disable GPU use entirely. | Single GPU ID like `0`, or exact ID string like `01` | Leave this alone unless you have multiple GPUs or a GPU problem. | More explicit GPU selection can help on multi-GPU systems. | Disabling GPU is slower but simpler. | `--gpu` and `--gpu-id` are aliases in Step 2. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--compute` | Whether MD uses automatic hardware selection, CPU-only execution, or forced GPU mode. | `auto`, `CPU`, `GPU` | Leave this at `auto` for normal use. | `GPU` forces a GPU attempt when a GPU is available. | `CPU` disables GPU acceleration and is slower, but simpler for troubleshooting. | `auto` chooses GPU when possible and CPU when needed. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--gpu`, `--gpu-id`, `--gpu-ids`, `--no-gpu` | Which GPU to use, or whether to disable GPU use entirely. | Single GPU ID like `0`, exact ID string like `01`, or `--no-gpu` | Leave this alone unless you have multiple GPUs or a GPU problem. | More explicit GPU selection helps on multi-GPU workstations and cluster nodes. | `--no-gpu` forces CPU-only mode and avoids GPU troubleshooting. | `--gpu` and `--gpu-id` are aliases in Step 2. |
 | `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py`, `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--threads`, `--ntomp` | CPU thread count used for MD or analysis work. | Positive integer | Beginners should usually let PyMACS auto-detect or use a modest thread count. | More threads can speed things up until the computer is saturated. Too many can make performance worse. | Fewer threads may be slower, but usually safer for laptops and shared systems. | `--threads` in Step 2 is a legacy alias for `--ntomp`. |
-| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--ntmpi` | Number of GROMACS MPI ranks for local MD commands. | Verified default: `1` | Most laptop and workstation users should leave this alone. | More ranks can help on the right hardware and build, but can also complicate performance tuning. | Keeping it at `1` is simpler and often best locally. | Beginners should usually avoid MPI tuning unless instructed. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--ntmpi` | Number of GROMACS thread-MPI ranks for local MD commands. | Default usually `1` | Most laptop and workstation users should leave this alone. | More ranks can help on the right hardware and build, but can also complicate performance tuning. | Keeping it at `1` is simpler and often best locally. | Beginners should usually avoid MPI tuning unless instructed. |
 | `2_AutomateGromacs_MPI.py` | `--mpi-ranks`, `--mpi-launcher`, `--external-mpi` | Controls external MPI launching in the MPI-compatible Step 2 script. | Rank counts; launcher strings such as `mpirun -np 4` or `srun -n 4` | Most beginners should skip these entirely. | More ranks may improve throughput on HPC systems when configured correctly. | Fewer ranks simplify debugging and avoid overcomplicating local runs. | Advanced/HPC-only area. |
 | `1_AutomateGromacs_MPI.py`, `2_AutomateGromacs_MPI.py`, `3A_AutomateGromacs_MPI.py`, `3_PROTAC_Analysis_MPI.py` | `--gmx-bin` | Selects the GROMACS executable explicitly. | `auto`, `gmx`, `gmx_mpi`, `gmx-mpi`, or full path | Leave `auto` unless your environment needs a specific binary. | Not numeric. A more explicit choice gives more control on clusters or unusual installs. | Not numeric. `auto` is simpler and often works. | Related environment variable: `PYMACS_GMX_BIN`. |
 | MPI-compatible scripts | `PYMACS_GMX_BIN` | Environment-variable override for the GROMACS executable. | Shell variable such as `export PYMACS_GMX_BIN=gmx_mpi` | Only use this if your environment consistently needs a non-default binary. | Not numeric. A different binary choice can make MPI-compatible scripts work on HPC systems. | Not numeric. Leaving it unset preserves auto-detection. | Useful when you want the same binary choice across many commands. |
 
-Quick example:
+#### Step 2 automatic GPU behavior
+
+When `--compute auto` is active, PyMACS tries to maximize available hardware without requiring beginners to remember GPU flags:
+
+- **one NVIDIA GPU detected:** PyMACS selects GPU 0 automatically
+- **multiple NVIDIA GPUs detected:** interactive mode asks which GPU to use; headless mode defaults to GPU 0 unless `--gpu` or `--gpu-ids` is supplied
+- **no NVIDIA GPU detected:** PyMACS runs CPU-only
+- **GPU memory is low:** PyMACS warns, still tries GPU, and falls back if needed
+- **energy minimization:** PyMACS avoids PME-on-GPU because EM uses a non-dynamical minimizer such as steepest descent
+- **NVT, NPT, and production:** PyMACS tries GPU-accelerated profiles first, then safer mixed CPU/GPU profiles, then CPU fallback if needed
+
+This means a normal run can usually be started as:
+
+```bash
+python 2_AutomateGromacs.py --ns 0.25
+```
+
+For an explicit CPU-only run:
 
 ```bash
 python 2_AutomateGromacs.py --compute CPU --ns 0.25
+```
+
+For an explicit GPU run on GPU 0:
+
+```bash
+python 2_AutomateGromacs.py --compute GPU --gpu-id 0 --ns 0.25
 ```
 
 ### 6. Restart and checkpoint flags
@@ -640,8 +812,8 @@ If a plot is missing from the PDF:
 | Run a short test | `--ns` | `python 2_AutomateGromacs.py --ns 0.25` |
 | Use a compact water box | `--box-type` | `python 1_AutomateGromacs.py --box-type dodecahedron` |
 | Add more water padding | `--box-distance` | `python 1_AutomateGromacs.py --box-distance 1.2` |
-| Run on CPU | `--compute CPU` | `python 2_AutomateGromacs.py --compute CPU` |
-| Run on GPU 0 | `--compute GPU --gpu-id 0` | `python 2_AutomateGromacs.py --compute GPU --gpu-id 0` |
+| Force CPU-only Step 2 | `--compute CPU` or `--no-gpu` | `python 2_AutomateGromacs.py --compute CPU --ns 0.25` |
+| Use GPU automatically | default `--compute auto` | `python 2_AutomateGromacs.py --ns 0.25` |
 | Resume an interrupted run | `--resume --production_only` | `python 2_AutomateGromacs.py --resume --production_only --ns 50` |
 | Make analysis stricter | lower contact or pocket cutoffs | `python 3A_AutomateGromacs.py --contact_cutoff 3.5` |
 | Make analysis broader | higher contact or pocket cutoffs | `python 3A_AutomateGromacs.py --pocket-cutoff 6.0` |
@@ -659,6 +831,8 @@ Recommended first test:
 ```bash
 python 2_AutomateGromacs.py --ns 0.25
 ```
+
+On a GPU workstation, this now attempts GPU acceleration automatically. Add `--no-gpu` only when you intentionally want CPU-only testing.
 
 Once the short run works, repeat the workflow with a longer production length and only one or two changes at a time.
 
@@ -930,6 +1104,7 @@ conda activate cgenff
 python 1_AutomateGromacs.py
 
 # Step 2: equilibration and production
+# By default, Step 2 auto-selects a usable GPU when available.
 conda activate mdanalysis
 python 2_AutomateGromacs.py
 
@@ -1096,12 +1271,37 @@ Typical actions:
 - NVT equilibration
 - NPT equilibration
 - production MD
-- GPU-ready execution if available
+- automatic GPU selection when a usable NVIDIA GPU is available
+- CPU fallback when no GPU is available or when a GPU profile fails
+- energy-minimization handling that avoids PME-on-GPU for non-dynamical EM integrators
+- GPU-accelerated NVT, NPT, and production stages with safer mixed CPU/GPU fallback profiles
 - thread tuning through environment variables and script prompts
 - supports custom MDP templates through `--mdp-dir`, `--em-mdp`, `--nvt-mdp`, `--npt-mdp`, and `--md-mdp`
 - supports user-supplied `index.ndx` files through `--index-file`
-- supports explicit resource controls through `--ntomp`, `--ntmpi`, `--gpu-id`, `--gpu-ids`, and `--no-gpu`
+- supports explicit resource controls through `--compute`, `--ntomp`, `--ntmpi`, `--gpu-id`, `--gpu-ids`, and `--no-gpu`
 - supports optional multi-stage equilibration through `--equilibration-plan`
+
+<a id="step-2-gpu-behavior"></a>
+
+#### Step 2 GPU / CPU behavior in plain language
+
+PyMACS treats energy minimization differently from true MD stages.
+
+- **Energy minimization (`em`)** relaxes bad contacts using a non-dynamical minimizer. Because GROMACS may reject PME-on-GPU for this stage, PyMACS avoids PME-on-GPU during EM and uses a CPU-safe or mixed CPU/GPU path.
+- **NVT, NPT, and production MD** are normal time-integration stages. PyMACS tries GPU acceleration first and falls back only if needed.
+- **PME** is the long-range electrostatics method used by many solvated biomolecular simulations. It is not triggered by a single special atom; it comes from the MDP electrostatics settings and the periodic solvated system.
+
+For most users, the recommended command remains simple:
+
+```bash
+python 2_AutomateGromacs.py --ns 0.25
+```
+
+Use CPU-only mode only when troubleshooting or when running on a machine without a usable GPU:
+
+```bash
+python 2_AutomateGromacs.py --compute CPU --ns 0.25
+```
 
 ---
 
@@ -1130,9 +1330,9 @@ Optional but common:
 
 ---
 
-### 🚀 Resume production only — GPU
+### 🚀 Resume production only — GPU / auto GPU
 
-Use this to skip EM / NVT / NPT and continue production only.
+Use this to skip EM / NVT / NPT and continue production only. On a GPU workstation, `--compute auto` selects a usable GPU automatically. You can still add `--compute GPU --gpu 0` when you want to force a specific GPU.
 
 ```bash
 conda activate mdanalysis
@@ -1140,8 +1340,6 @@ conda activate mdanalysis
 python 2_AutomateGromacs.py \
   --mode ligand \
   --ligand UNK \
-  --compute GPU \
-  --gpu 0 \
   --production_only \
   --resume \
   --headless \
@@ -1390,8 +1588,8 @@ Interface RIN figures are written to `Analysis_Results/Interface_RIN/`. If you w
 python 1_AutomateGromacs.py --pdb complex.pdb --box-type dodecahedron --box-distance 1.0
 
 # Step 2: run with custom MDP templates and explicit resource controls
+# GPU is selected automatically when available; --gpu-id is optional on single-GPU systems.
 python 2_AutomateGromacs.py \
-  --compute GPU \
   --gpu-id 0 \
   --ntomp 8 \
   --ntmpi 1 \
@@ -1518,10 +1716,11 @@ python 2_AutomateGromacs.py
 
 Typical flow:
 
-- energy minimization
-- NVT equilibration
-- NPT equilibration
-- production MD
+- energy minimization using EM-safe settings
+- NVT equilibration with GPU acceleration when available
+- NPT equilibration with GPU acceleration when available
+- production MD with GPU acceleration when available
+- CPU fallback if no usable GPU is detected
 - duration selected interactively or through CLI arguments
 
 For interrupted production runs, use the checkpoint-safe restart commands above.
@@ -1746,6 +1945,14 @@ If a run fails early:
 - ensure **CGenFF 4.6** is used when generating new `.str` / `.mol2` files
 - inspect `topol.top` for duplicated ligand includes
 - confirm `gmx` is available in the active environment
+
+Step 2 GPU / EM troubleshooting:
+
+- if Step 2 reports that PME cannot run on GPU during energy minimization, update to the GPU-adaptive Step 2 scripts or run EM in CPU-safe mode
+- energy minimization is allowed to run without PME-on-GPU; this does not mean NVT, NPT, or production cannot use the GPU
+- `nvidia-smi` may show low GPU use during `grompp`, index generation, or CPU-safe EM; check again during NVT, NPT, or production `mdrun`
+- add `--no-gpu` or `--compute CPU` when you intentionally want CPU-only troubleshooting
+- use `--gpu-id 0` or another explicit ID when multiple GPUs are present
 
 MPI / GROMACS-binary troubleshooting:
 
