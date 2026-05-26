@@ -160,6 +160,7 @@ Core goals:
 - [Supported structure inputs](#supported-structure-inputs)
 - [Ligand parameterization and CGenFF support](#ligand-parameterization)
 - [The 3 CGenFF modes](#cgenff-modes)
+- [Configurable parameters and command-line flags](#configurable-parameters-and-flags)
 - [Quick start templates](#quick-start-templates)
 - [Pipeline stages](#pipeline-stages)
 - [Restarting / resuming production MD](#restart-production-md)
@@ -271,6 +272,204 @@ Use the MPI-compatible scripts when:
 - you want explicit binary control through `--gmx-bin` or `PYMACS_GMX_BIN`
 
 The standard scripts remain appropriate for local workstations where `gmx` is already the expected executable name.
+
+---
+
+<a id="configurable-parameters-and-flags"></a>
+
+## 🛠️ Configurable parameters and command-line flags
+
+PyMACS can be run interactively, where the scripts ask questions one at a time, or in command-line mode, where users provide settings directly using flags.
+
+A flag is an extra instruction added after a command. For example:
+
+```bash
+python 1_AutomateGromacs.py --box-type dodecahedron --box-distance 1.0
+```
+
+In that command, `--box-type` and `--box-distance` are flags.
+
+For beginners, the safest choice is usually to run the scripts interactively first and press Enter to accept defaults. After that works, users can modify one setting at a time.
+
+### 1. Structure input and setup flags
+
+| Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
+|---|---|---|---|---|---|---|---|
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--pdb` | Which local structure file to start from. | `.pdb`, `.cif`, `.mmcif` file name | Use this when you already have a local structure file. | Not a larger/smaller setting. Different file choices change the whole starting system. | Not a larger/smaller setting. Choosing the wrong file usually leads to wrong chains, missing ligands, or setup errors. | Safe and common. Good first explicit flag. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--fetch-pdb` | Downloads a structure directly from the PDB before setup. | PDB ID such as `9UWJ` | Very useful if you do not already have a local file. | Not numeric. Different PDB IDs give different systems. | Not numeric. If omitted, PyMACS looks for local files instead. | Fetches into the current working directory. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--fetch-format` | File format used when fetching from the PDB. | `pdb`, `cif`, `mmcif` | Leave the default unless you have a reason to prefer another format. | `cif` or `mmcif` often preserves modern structural details better than old-style PDB files. | `pdb` can be simpler to inspect manually, but sometimes carries less structural detail. | Verified default: `cif`. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--chain-names` | Simple custom names for chains in chain order. | Comma-separated names such as `Rap1B,Rap1GAP` | Leave this alone unless you want clearer labels in downstream outputs. | Not numeric. More descriptive names make reports easier to read. | Not numeric. Leaving it out keeps automatic or existing labeling. | Helpful for publication-quality naming. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--chain-map` | Explicit chain ID to name mapping. | `A:Name,B:Name` | Use this only when chain labels matter and you know the input chain IDs. | Not numeric. More explicit mapping gives you tighter control. | Not numeric. If omitted, PyMACS uses interactive/default naming behavior. | Safer than `--chain-names` when the chain order is ambiguous. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--keep-chains` | Keeps only selected polymer chains from the input structure. | Chain letters or numeric positions | Leave it alone on your first run unless you intentionally want one chain or one asymmetric unit. | Not numeric. Keeping more chains makes the system larger and more complex. | Not numeric. Keeping fewer chains simplifies the system but may remove biologically important partners. | Very useful for large deposited structures. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--drop-chains` | Removes selected polymer chains from the input structure. | Chain letters or numeric positions | Use with care. | Not numeric. Dropping more chains gives a smaller, faster system. | Not numeric. Dropping too much can remove important biology. | Easier to make mistakes here than with `--keep-chains`. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--remove-input-waters`, `--remove-input-ions`, `--remove-input-solvents`, `--remove-input-resnames` | Removes unwanted components before setup. | Boolean flags or comma-separated residue names | Keep the defaults on your first run unless you know those components should be removed. | Removing more components can make setup cleaner and simpler. | Removing less preserves the deposited context, but may leave crystallographic clutter. | Good troubleshooting tools when deposited files are messy. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--show-generated-pdbs`, `--allow-generated-inputs` | Shows generated intermediate PDB files during interactive picking. | Include the flag or omit it | Most beginners should leave this off. | Including it gives more choices, which can help advanced troubleshooting. | Omitting it keeps the file picker simpler. | Mainly a debugging convenience. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--strict-pdb-validation` | Turns selected structure warnings into hard-stop errors. | Include the flag or omit it | Useful when you want conservative setup behavior. | Including it catches possible structure problems earlier. | Omitting it is more forgiving and may let setup continue. | Safer scientifically, but more likely to stop early. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--nucleic-acid-termini`, `--protein-nterm`, `--protein-cterm`, `--chain-types` | Controls terminal handling and polymer type interpretation during setup. | Verified options include `auto`, `5ter-3ter`, `none`; `NH2`, `NH3+`, `None`; `COO-`, `COOH`, `None` | Beginners should usually leave these at default values. | More manual control can help special biomolecule cases. | Less manual control means safer defaults and fewer chances to mismatch topology choices. | These settings matter most for unusual chain chemistry and nucleic-acid systems. |
+
+Quick example:
+
+```bash
+python 1_AutomateGromacs.py --fetch-pdb 9UWJ --fetch-format cif
+```
+
+### 2. Box and solvent-padding flags
+
+| Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
+|---|---|---|---|---|---|---|---|
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--box-type` | The shape of the simulation box around your molecule. | `cubic`, `dodecahedron`, `octahedron` | `cubic` is easiest to understand. `dodecahedron` is a very common compact choice once you are comfortable. | Choosing a compact shape like `dodecahedron` or `octahedron` often uses less water and can run faster. | Choosing `cubic` often uses more water and can run a bit slower, but it is conceptually simple. | `cubic`: easy to understand. `dodecahedron`: compact and often faster. `octahedron`: another compact option. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--box-distance` | The padding distance between the solute and the box wall, in nanometers. | Verified default: `1.0` | Leave the default on a first run. Increase it only for a clear reason. | A larger box distance adds more water padding. This is usually safer physically, but slower and larger on disk. | A smaller box distance speeds things up, but risks periodic-image artifacts if the molecule gets too close to its own copy. | One of the most useful and safest tuning flags. |
+
+Quick example:
+
+```bash
+python 1_AutomateGromacs.py --box-type dodecahedron --box-distance 1.2
+```
+
+### 3. Ligand, cofactor, and system-mode flags
+
+| Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
+|---|---|---|---|---|---|---|---|
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py`, `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py`, `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py`, `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--ligand` | The residue name for the small molecule or PROTAC-like component of interest. | 3-letter or short residue code such as `A1D`, `A1E`, `PTC` | Use this when you know the ligand code and want to avoid interactive detection. | Not numeric. The main effect is choosing a different target molecule for setup or analysis. | Not numeric. Leaving it blank may trigger interactive or automatic detection. | One of the most important flags for ligand-centered workflows. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py`, `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py`, `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--cofactors` | Additional retained non-protein components kept alongside the main ligand. | Comma-separated names such as `CLR,HEM` | Leave empty for your first simple ligand run. Use it when your system has a cofactor, cholesterol, heme, or another context molecule that should stay. | More listed cofactors preserve more biological context, but make setup and analysis more complex. | Fewer listed cofactors simplify the system, but may remove important context. | Good for receptor systems with important bound helpers. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--auto-keep-hetero`, `--component-mode`, `--component-clash-check`, `--no-component-clash-check`, `--drop-clashing-cofactors` | Fine control over how non-protein components are kept, checked, or discarded during setup. | Verified `--component-mode` options: `selected`, `all`, `none` | Beginners should usually leave the defaults alone. | `all` keeps more detected non-protein pieces and can preserve more context. | `none` or aggressive dropping makes the system simpler, but may remove something important. | Useful when deposited structures contain multiple ligand-like molecules. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py`, `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--mode` | The kind of system you are running or analyzing. | Verified options: `ligand`, `protein`, `peptide`, `protac`, `biological` | If you are unsure, use interactive mode first. On later runs, set the mode explicitly so the script knows what kind of workflow you want. | Not numeric. Choosing more complex modes such as `protac` or `biological` activates more specialized behavior. | Not numeric. Choosing a simpler mode may skip important logic for complex systems. | Very important for getting the right workflow branch. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--allow-covalent-ligand` | Allows ligand workflows to continue even if the input suggests a covalent attachment. | Include the flag or omit it | Beginners should usually leave this off unless they know they are working with a covalent system and understand the consequences. | Including it is more permissive and may allow unusual systems to continue. | Omitting it is safer and more conservative. | High-risk override; use carefully. |
+| `1_AutomateGromacs.py`, `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py`, `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py`, `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--headless` or explicit mode-selection flags | Skips interactive prompts and uses only command-line values. | Include the flag or omit it | Beginners should run interactively first, then use headless mode after the workflow is understood. | Including it is faster and reproducible for repeated runs. | Omitting it gives guided prompts and is usually easier for first runs. | Excellent once you know the correct settings. |
+
+Quick example:
+
+```bash
+python 2_AutomateGromacs.py --mode ligand --ligand A1D --cofactors CLR
+```
+
+### 4. MDP and equilibration customization flags
+
+| Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
+|---|---|---|---|---|---|---|---|
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py`, `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--mdp-dir` | Where PyMACS looks for MDP parameter templates. | Verified default: `MDPs` | Leave the default unless your templates live somewhere else. | Not numeric. A different directory lets you use a different parameter set. | Not numeric. A wrong directory leads to missing-file errors. | MDP files control simulation settings such as time step and thermostat behavior. |
+| `1_AutomateGromacs.py`, `1_AutomateGromacs_MPI.py` | `--ions-mdp`, `--em-mdp` | Which setup-stage MDP files are used for ion preparation and energy minimization. | Verified defaults: `ions.mdp`, `em.mdp` | Leave these alone on a first run. | Not numeric. Different files can make setup stricter or looser depending on their contents. | Not numeric. Wrong files can break setup or produce unexpected behavior. | Good for advanced method tuning. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--em-mdp`, `--nvt-mdp`, `--npt-mdp`, `--md-mdp` | Which MDP files are used for each MD stage. | Verified defaults: `em.mdp`, `nvt.mdp`, `npt.mdp`, `md.mdp` | Leave these at default until the standard workflow is working. | Not numeric. More customized MDP files can improve a specific scientific workflow, but also add troubleshooting complexity. | Not numeric. Simpler defaults are easier to troubleshoot. | A powerful advanced feature. Change one template at a time. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--equilibration-plan` | Replaces the standard NVT then NPT sequence with a custom JSON equilibration plan. | JSON file path | Beginners should leave this alone. | Not a larger/smaller setting. A more detailed plan gives more protocol control. | Not a larger/smaller setting. Leaving it out keeps the standard default sequence. | Best for advanced users who want a custom multi-stage protocol. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--index-file`, `--polymer-group` | Controls which atom groups or custom index file are used in MD setup. | Custom `index.ndx`; verified `--polymer-group` options include `auto`, `Protein`, `Protein_RNA`, `Protein_DNA`, `Protein_Nucleic`, `non-Water` | Beginners should usually let PyMACS generate and choose these automatically. | Not numeric. More specific grouping gives tighter control for unusual systems. | Not numeric. Automatic grouping is safer and easier. | These settings mainly help biomolecule systems or advanced coupling-group troubleshooting. |
+
+Quick example:
+
+```bash
+python 2_AutomateGromacs.py --mdp-dir MDPs --md-mdp md.mdp
+```
+
+### 5. CPU, GPU, and MPI resource flags
+
+| Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
+|---|---|---|---|---|---|---|---|
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--compute` | Whether MD runs on CPU-only or tries to use a GPU. | Verified options: `CPU`, `GPU` | `CPU` is slower but often simpler for first runs. | Choosing `GPU` can make runs much faster if your hardware and drivers are compatible. | Choosing `CPU` is slower, but often easier to troubleshoot. | Great first troubleshooting switch when GPU mode is unstable. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--gpu`, `--gpu-id`, `--gpu-ids`, `--no-gpu` | Which GPU to use, or whether to disable GPU use entirely. | Single GPU ID like `0`, or exact ID string like `01` | Leave this alone unless you have multiple GPUs or a GPU problem. | More explicit GPU selection can help on multi-GPU systems. | Disabling GPU is slower but simpler. | `--gpu` and `--gpu-id` are aliases in Step 2. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py`, `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--threads`, `--ntomp` | CPU thread count used for MD or analysis work. | Positive integer | Beginners should usually let PyMACS auto-detect or use a modest thread count. | More threads can speed things up until the computer is saturated. Too many can make performance worse. | Fewer threads may be slower, but usually safer for laptops and shared systems. | `--threads` in Step 2 is a legacy alias for `--ntomp`. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--ntmpi` | Number of GROMACS MPI ranks for local MD commands. | Verified default: `1` | Most laptop and workstation users should leave this alone. | More ranks can help on the right hardware and build, but can also complicate performance tuning. | Keeping it at `1` is simpler and often best locally. | Beginners should usually avoid MPI tuning unless instructed. |
+| `2_AutomateGromacs_MPI.py` | `--mpi-ranks`, `--mpi-launcher`, `--external-mpi` | Controls external MPI launching in the MPI-compatible Step 2 script. | Rank counts; launcher strings such as `mpirun -np 4` or `srun -n 4` | Most beginners should skip these entirely. | More ranks may improve throughput on HPC systems when configured correctly. | Fewer ranks simplify debugging and avoid overcomplicating local runs. | Advanced/HPC-only area. |
+| `1_AutomateGromacs_MPI.py`, `2_AutomateGromacs_MPI.py`, `3A_AutomateGromacs_MPI.py`, `3_PROTAC_Analysis_MPI.py` | `--gmx-bin` | Selects the GROMACS executable explicitly. | `auto`, `gmx`, `gmx_mpi`, `gmx-mpi`, or full path | Leave `auto` unless your environment needs a specific binary. | Not numeric. A more explicit choice gives more control on clusters or unusual installs. | Not numeric. `auto` is simpler and often works. | Related environment variable: `PYMACS_GMX_BIN`. |
+| MPI-compatible scripts | `PYMACS_GMX_BIN` | Environment-variable override for the GROMACS executable. | Shell variable such as `export PYMACS_GMX_BIN=gmx_mpi` | Only use this if your environment consistently needs a non-default binary. | Not numeric. A different binary choice can make MPI-compatible scripts work on HPC systems. | Not numeric. Leaving it unset preserves auto-detection. | Useful when you want the same binary choice across many commands. |
+
+Quick example:
+
+```bash
+python 2_AutomateGromacs.py --compute CPU --ns 0.25
+```
+
+### 6. Restart and checkpoint flags
+
+| Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
+|---|---|---|---|---|---|---|---|
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--ns` | Production simulation length in nanoseconds. | Floating-point values such as `0.25`, `1`, `25`, `50` | Start with `0.25` or `1` for a test run. | Higher values give more sampling and can answer harder scientific questions, but take longer and create larger files. | Lower values are faster and good for testing, but may be too short for real scientific conclusions. | Production-quality run length depends on the scientific question. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--production_only` | Skips EM/NVT/NPT and runs only production MD. | Include the flag or omit it | Do not use this on your very first run. | Including it is faster when your system is already prepared and equilibrated. | Omitting it runs the full standard workflow. | Best for restarts or repeated production extensions. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--resume` | Resumes from an existing checkpoint if one is present. | Include the flag or omit it | Very useful after an interrupted run. | Including it helps continue long jobs instead of starting over. | Omitting it avoids automatic resume behavior. | Best paired with `--production_only` for interrupted long runs. |
+| `2_AutomateGromacs.py`, `2_AutomateGromacs_MPI.py` | `--force_restart` | Prevents resume behavior even if checkpoints exist. | Include the flag or omit it | Use only when you intentionally want a fresh restart path. | Including it forces a clean rerun path. | Omitting it allows normal resume logic when available. | Helpful when old checkpoint state is suspected to be bad. |
+
+Quick example:
+
+```bash
+python 2_AutomateGromacs.py --resume --production_only --ns 50
+```
+
+### 7. Analysis cutoff and interaction flags
+
+| Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
+|---|---|---|---|---|---|---|---|
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--topo`, `--gro`, `--traj`, `--pocket_pdb`, `--pocket_xtc`, `--outdir` | Which trajectory and structure files are analyzed, and where outputs go. | File paths | Leave defaults alone unless your files are named differently. | Not numeric. Different file choices change what gets analyzed. | Not numeric. Wrong file paths cause missing-file errors. | `--gro` is an alias for `--topo`. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--contact_cutoff` | Distance cutoff for counting ligand contacts. | Verified default: `4.0 Å` | Leave the default on a first run. | A larger contact cutoff counts more interactions, including weaker or more distant ones. | A smaller cutoff is stricter, but may miss flexible or transient contacts. | Good for tuning how broad contact detection feels. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--pocket-cutoff` | Radius used to define the binding pocket around the ligand. | Verified default: `5.0 Å` | Leave the default on a first run. | A larger pocket cutoff includes more residues, which can capture broader environment effects but also adds noise. | A smaller pocket cutoff focuses on the nearest residues but may miss relevant interactions. | One of the most useful analysis-tuning flags. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--hbond-distance-cutoff` | Distance threshold for hydrogen-bond-like calls. | Verified default: `3.5 Å` | Leave the default unless you have a strong reason to tune it. | A larger value is more permissive and may count weaker contacts. | A smaller value is stricter and may miss flexible hydrogen bonds. | Helpful when comparing strict versus broad interaction definitions. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--hbond-angle-cutoff` | Angular strictness for hydrogen-bond-like geometry. | Verified default: `135°` | Leave the default on a first run. | A higher angle cutoff is stricter and favors more linear hydrogen bonds. | A lower angle cutoff is more permissive and counts less ideal geometry. | Higher usually means fewer but cleaner hydrogen-bond calls. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--min_contact_frac`, `--minfrac` | Minimum fraction of frames a residue must contact the ligand to appear in outputs. | Verified default for `--min_contact_frac`: `0.10` | Leave the default on a first run. | A larger fraction shows only the most persistent contacts, giving cleaner but narrower plots. | A smaller fraction includes more transient contacts, which can be informative but noisier. | `--minfrac` is mainly a NETWORX-style compatibility flag. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--compound-name`, `--numbering-template` | Makes outputs easier to read by changing display labels and residue numbering source. | Display string or PDB file path | Optional. Use only when you want prettier labels or reference numbering. | Not numeric. More customized naming improves presentation. | Not numeric. Leaving defaults keeps raw internal naming. | Helpful for manuscripts and reviewer-friendly figures. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--lig-atom-start`, `--lig-atom-end` | Manual ligand atom-range fallback for difficult detection cases. | Integer atom indices | Beginners should avoid this unless ligand auto-detection fails and they understand atom numbering. | Larger ranges include more atoms and risk selecting the wrong region. | Smaller ranges may miss part of the ligand. | High-risk troubleshooting feature. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--net-out`, `--ellipse-rx`, `--ellipse-ry`, `--no-edges` | Fine control over NETWORX-style network figure appearance. | Output name, ellipse radii, or boolean | Most beginners should leave these alone. | Larger ellipse radii make figure layouts broader. | Smaller radii make layouts tighter and can crowd labels. | Presentation-focused rather than science-focused. |
+
+Quick example:
+
+```bash
+python 3A_AutomateGromacs.py --contact_cutoff 3.5 --pocket-cutoff 6.0
+```
+
+### 8. PROTAC-specific analysis flags
+
+| Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
+|---|---|---|---|---|---|---|---|
+| `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--topo`, `--traj`, `--pdb-reference`, `--atomindex`, `--outdir` | Input files and output folder for PROTAC analysis. | File paths | Leave defaults alone if your run directory uses the standard file names. | Not numeric. Different file choices change what gets analyzed. | Not numeric. Wrong paths cause immediate file errors. | `atomIndex.txt` is especially important in the PROTAC workflow. |
+| `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--distance-cutoff` | Main protein-ligand contact cutoff in the ternary-complex analysis. | Verified default: `4.0 Å` | Leave the default on a first run. | A larger value counts more contacts and may make the ternary interface look broader. | A smaller value is stricter and may miss weak or transient contacts. | In PROTAC work, this affects contacts to both protein partners. |
+| `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--start-frame`, `--end-frame`, `--frame-step`, `--quick-test`, `--dry-run` | How much of the trajectory is scanned, and whether the script does a smoke test or validation-only run. | Frame numbers; verified quick-test behavior defaults to `start=0`, `end=500`, `step=10` unless overridden | `--dry-run` and `--quick-test` are very beginner-friendly. | Larger frame windows and smaller frame steps analyze more data but take longer. | Smaller frame windows and larger frame steps are faster but less complete. | Excellent for checking a new PROTAC setup before a full analysis. |
+| `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--skip-pca`, `--skip-network`, `--skip-contact-map`, `--skip-rmsf`, `--contacts-only`, `--basic-only` | Turns off expensive or advanced parts of the PROTAC analysis. | Boolean flags | Beginners can safely use `--basic-only` or `--quick-test` when they just want to confirm the workflow runs. | More outputs give a richer picture of the ternary complex, but take longer. | Fewer outputs are faster and easier to inspect. | Very useful for staged troubleshooting. |
+| `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--residue-numbering`, `--network-min-contact-fraction`, `--network-max-residues`, `--contact-map-min-contact-fraction`, `--contact-map-max-residues` | Controls labeling style and how crowded the network and contact map become. | Verified numbering options: `source`, `current` | Leave defaults alone on a first run. | Larger max-residue values or lower fractions show more residues, which can reveal more detail but add clutter. | Smaller max-residue values or higher fractions make figures cleaner but may hide weaker contributors. | Useful when preparing figures for a paper or presentation. |
+| `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--skip-preprocess`, `--preprocess-only`, `--write-subset-trajectories`, `--no-write-subset-trajectories`, `--write-final-trajectory`, `--no-write-final-trajectory`, `--use-final-trajectory`, `--no-use-final-trajectory`, `--overwrite-final-trajectory`, `--overwrite-structures`, `--final-trajectory-name` | Controls how the script writes centered subset structures and whether those files are reused downstream. | Boolean flags and output base name | Beginners should usually accept defaults and avoid overwrite-related flags. | Writing more helper files makes downstream inspection easier, but uses more disk space. | Writing fewer helper files saves space, but gives you less to inspect when something goes wrong. | The centered `Final_Trajectory` compatibility files are especially useful for later analysis and figurebook building. |
+| `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--pocket-cutoff`, `--pocket-mode`, `--pocket-min-fraction` | Controls how the PROTAC binding pocket is defined. | Verified `--pocket-mode` options: `first_frame`, `any_sampled_frame`, `persistent` | Keep defaults first. | Larger pocket cutoffs and more permissive modes include more residues around the ternary interface. | Smaller cutoffs and stricter persistence focus on the most consistent pocket residues. | PROTAC pockets are often more complex than simple ligand pockets because two protein partners may contribute contacts. |
+| `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--interaction-mode`, `--plot-allprotein` | Controls how PROTAC contacts are classified and whether full-protein aggregate traces are shown. | Verified interaction modes: `residue_chemistry`, `geometry` | Leave defaults unless you have a clear analysis reason. | `geometry`-style choices may be more granular or stricter depending on the dataset. | Default chemistry-style summaries are usually easier to interpret first. | Good for advanced comparison work. |
+| `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--rmsf-contact-threshold`, `--rmsf-label-top-contacts`, `--rmsf-contact-marker-mode` | Controls RMSF contact overlays and labeling. | Verified marker modes: `vlines`, `scatter`, `both` | Leave defaults unless figures are too crowded. | Larger thresholds or fewer labels make plots cleaner. Larger label counts add detail but can clutter. | Lower thresholds or too many labels can create noisy figures. | Presentation-oriented tuning. |
+| `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--analyze-water-bridges`, `--water-bridge-cutoff`, `--water-pocket-cutoff`, `--write-water-pocket-trajectory`, `--water-names` | Optional water-mediated contact analysis. | Verified defaults include `3.5 Å` and `6.0 Å` | Beginners should skip water-bridge analysis until the main workflow works. | Larger cutoffs count more possible water-mediated events. | Smaller cutoffs are stricter and may miss weak or flexible bridges. | PROTAC systems often need more careful checking than simple protein-ligand systems because the linker, ligand, ligase, and target can all contribute to the contact picture. |
+
+### 9. Figurebook/reporting flags
+
+`4PDF4MD.py` does not expose verified command-line flags in the current script. In this repository state, the figurebook step is controlled interactively and by input files rather than by `argparse` flags.
+
+Useful reporting controls that were verified in the script:
+
+- report type prompt: ligand-bound, protein-centric, or biological-system report
+- ligand auto-detection from local `.cgenff.mol2` files
+- output PDF name prompt
+- `4_MDfigs.txt`: standard figure order and inclusion list
+- `4_GraphNotes.txt`: optional notes/captions helper file
+- `Analysis_Results/PROTAC/QC/protac_figure_manifest.csv`: when present, the script switches into PROTAC manifest mode automatically
+
+If a plot is missing from the PDF:
+
+- first confirm the plot was generated in `Analysis_Results/`
+- then check whether `4_MDfigs.txt` points to the expected figure
+- if you are in PROTAC mode, check the manifest file under `Analysis_Results/PROTAC/QC/`
+
+### Most useful beginner flags
+
+| Goal | Use this flag | Example |
+|---|---|---|
+| Run a short test | `--ns` | `python 2_AutomateGromacs.py --ns 0.25` |
+| Use a compact water box | `--box-type` | `python 1_AutomateGromacs.py --box-type dodecahedron` |
+| Add more water padding | `--box-distance` | `python 1_AutomateGromacs.py --box-distance 1.2` |
+| Run on CPU | `--compute CPU` | `python 2_AutomateGromacs.py --compute CPU` |
+| Run on GPU 0 | `--compute GPU --gpu-id 0` | `python 2_AutomateGromacs.py --compute GPU --gpu-id 0` |
+| Resume an interrupted run | `--resume --production_only` | `python 2_AutomateGromacs.py --resume --production_only --ns 50` |
+| Make analysis stricter | lower contact or pocket cutoffs | `python 3A_AutomateGromacs.py --contact_cutoff 3.5` |
+| Make analysis broader | higher contact or pocket cutoffs | `python 3A_AutomateGromacs.py --pocket-cutoff 6.0` |
+
+### Beginner safety rule
+
+If this is your first PyMACS run, do not change many settings at once.
+
+Recommended first test:
+
+```bash
+python 2_AutomateGromacs.py --ns 0.25
+```
+
+Once the short run works, repeat the workflow with a longer production length and only one or two changes at a time.
 
 ---
 
