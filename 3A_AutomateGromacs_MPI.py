@@ -311,7 +311,7 @@ parser.add_argument(
     "--numbering-template",
     type=str,
     default=None,
-    help="Optional PDB file to use as residue-numbering template."
+    help="Optional PDB/CIF/mmCIF file to use as residue-numbering template."
 )
 
 parser.add_argument(
@@ -850,33 +850,33 @@ MIN_CONTACT_FRAC = args.min_contact_frac
 
 
 
-def list_pdb_files():
+def list_numbering_template_files():
     return sorted([
         f for f in os.listdir(".")
-        if f.lower().endswith(".pdb") and os.path.isfile(f)
+        if f.lower().endswith((".pdb", ".cif", ".mmcif")) and os.path.isfile(f)
     ])
 
 
 def select_numbering_template_interactive():
-    pdbs = list_pdb_files()
+    template_files = list_numbering_template_files()
 
-    if not pdbs:
-        print("⚠️ No PDB files found in current directory.")
+    if not template_files:
+        print("⚠️ No PDB/CIF/mmCIF files found in current directory.")
         return None
 
     print("\n🧬 Residue numbering template selection")
-    print("Do you want to use a PDB file as a residue-numbering template?")
-    resp = ask("Use PDB template for residue numbering? [y/N]: ", str, default="n")
+    print("Do you want to use a structure file as a residue-numbering template?")
+    resp = ask("Use structure template for residue numbering? [y/N]: ", str, default="n")
 
     if not resp.lower().startswith("y"):
         return None
 
-    print("\n📂 Available PDB files:")
-    for i, f in enumerate(pdbs, 1):
+    print("\n📂 Available template files:")
+    for i, f in enumerate(template_files, 1):
         print(f"   {i}) {f}")
 
     choice = ask(
-        "Select a PDB by number (or press ENTER to cancel): ",
+        "Select a template file by number (or press ENTER to cancel): ",
         str,
         default=""
     )
@@ -885,8 +885,8 @@ def select_numbering_template_interactive():
         print("⏭️ No template selected — skipping residue remapping.")
         return None
 
-    if choice.isdigit() and 1 <= int(choice) <= len(pdbs):
-        selected = pdbs[int(choice) - 1]
+    if choice.isdigit() and 1 <= int(choice) <= len(template_files):
+        selected = template_files[int(choice) - 1]
         print(f"✅ Using {selected} as residue numbering template.")
         return selected
 
@@ -1299,27 +1299,22 @@ def residue_number(res):
 
 from collections import defaultdict
 
-def build_residue_number_map(template_pdb):
-    """
-    Build a simple ordered list of residue numbers
-    in the order they appear in the template PDB.
-    """
+def _parse_resseq_token(token):
+    match = re.search(r"-?\d+", str(token))
+    return int(match.group(0)) if match else None
+
+
+def _build_residue_number_map_from_pdb(template_pdb):
     resseqs = []
     last_seen = None
 
-    # Only consider ATOM records (protein atoms). This prevents HETATM
-    # entries (ligands, solvent, ions) in the template from shifting
-    # the residue ordering used for remapping.
     with open(template_pdb) as f:
         for line in f:
             if not line.startswith("ATOM"):
                 continue
-
-            # columns 23-26 are residue sequence number in PDB (1-indexed field width 4)
             try:
                 resseq = int(line[22:26])
             except ValueError:
-                # skip malformed lines
                 continue
 
             if resseq != last_seen:
@@ -1327,6 +1322,92 @@ def build_residue_number_map(template_pdb):
                 last_seen = resseq
 
     return resseqs
+
+
+def _build_residue_number_map_from_cif(template_cif):
+    resseqs = []
+    in_atom_loop = False
+    collecting_headers = False
+    atom_headers = []
+    last_seen = None
+
+    with open(template_cif) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                if in_atom_loop and atom_headers:
+                    break
+                continue
+
+            if line == "loop_":
+                in_atom_loop = False
+                collecting_headers = True
+                atom_headers = []
+                continue
+
+            if collecting_headers and line.startswith("_"):
+                atom_headers.append(line)
+                continue
+
+            if collecting_headers:
+                collecting_headers = False
+                if atom_headers and any(header.startswith("_atom_site.") for header in atom_headers):
+                    in_atom_loop = True
+                    group_idx = atom_headers.index("_atom_site.group_PDB") if "_atom_site.group_PDB" in atom_headers else None
+                    auth_seq_idx = atom_headers.index("_atom_site.auth_seq_id") if "_atom_site.auth_seq_id" in atom_headers else None
+                    label_seq_idx = atom_headers.index("_atom_site.label_seq_id") if "_atom_site.label_seq_id" in atom_headers else None
+                    auth_chain_idx = atom_headers.index("_atom_site.auth_asym_id") if "_atom_site.auth_asym_id" in atom_headers else None
+                    label_chain_idx = atom_headers.index("_atom_site.label_asym_id") if "_atom_site.label_asym_id" in atom_headers else None
+                else:
+                    in_atom_loop = False
+
+            if not in_atom_loop:
+                continue
+
+            if line.startswith("_") or line == "loop_":
+                break
+
+            parts = shlex.split(line)
+            if len(parts) < len(atom_headers):
+                continue
+
+            if group_idx is not None and parts[group_idx].upper() != "ATOM":
+                continue
+
+            seq_token = None
+            if auth_seq_idx is not None:
+                seq_token = parts[auth_seq_idx]
+            if (seq_token in {None, ".", "?"}) and label_seq_idx is not None:
+                seq_token = parts[label_seq_idx]
+
+            resseq = _parse_resseq_token(seq_token)
+            if resseq is None:
+                continue
+
+            chain_token = ""
+            if auth_chain_idx is not None:
+                chain_token = parts[auth_chain_idx]
+            if chain_token in {"", ".", "?"} and label_chain_idx is not None:
+                chain_token = parts[label_chain_idx]
+
+            current_key = (chain_token, resseq)
+            if current_key != last_seen:
+                resseqs.append(resseq)
+                last_seen = current_key
+
+    return resseqs
+
+
+def build_residue_number_map(template_path):
+    """
+    Build an ordered list of polymer residue numbers from a PDB, CIF, or mmCIF template.
+    """
+    lower = template_path.lower()
+    if lower.endswith(".pdb"):
+        return _build_residue_number_map_from_pdb(template_path)
+    if lower.endswith((".cif", ".mmcif")):
+        return _build_residue_number_map_from_cif(template_path)
+    raise RuntimeError(f"Unsupported residue-numbering template format: {template_path}")
 
 
 

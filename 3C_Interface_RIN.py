@@ -14,6 +14,7 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.cbook as mpl_cbook
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -25,6 +26,19 @@ try:
     from tqdm import tqdm
 except Exception:  # pragma: no cover
     tqdm = None
+
+
+if not hasattr(mpl_cbook, "iterable"):
+    def _mpl_iterable_compat(obj):
+        if isinstance(obj, (str, bytes)):
+            return False
+        try:
+            iter(obj)
+            return True
+        except TypeError:
+            return False
+
+    mpl_cbook.iterable = _mpl_iterable_compat
 
 
 HYDROPHOBIC = {"ALA", "VAL", "ILE", "LEU", "MET", "PRO"}
