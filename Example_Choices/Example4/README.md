@@ -1,3 +1,5 @@
+[Back to all examples](../README.md)
+
 # Example 4: 5T35 PROTAC Ternary-Complex Workflow with PTC
 
 ## What this example shows
@@ -241,3 +243,7 @@ Analysis must finish before plots appear. For PROTAC analysis, look in the outpu
 ## Next step
 
 Once this example works, try a longer simulation, rerun the dedicated PROTAC analysis without `--quick-test`, compare the outputs with your own ternary-complex system, and then adapt the workflow to your project.
+
+Previous: [Example 3](../Example3/README.md)
+
+[Back to all examples](../README.md)

@@ -4,6 +4,22 @@ This folder contains four curated example packages for PyMACS.
 
 Each example has its own README file with beginner-friendly instructions.
 
+## Open an example
+
+| Example | Best for | Click to open |
+| ------- | -------- | ------------- |
+| Example 1 | Protein-ligand beginner walkthrough | [Open Example 1](./Example1/README.md) |
+| Example 2 | Ligand plus cofactor workflow | [Open Example 2](./Example2/README.md) |
+| Example 3 | RNA-protein biological assembly workflow | [Open Example 3](./Example3/README.md) |
+| Example 4 | PROTAC ternary-complex workflow | [Open Example 4](./Example4/README.md) |
+
+## Quick links
+
+- [Example 1: Protein-ligand walkthrough](./Example1/README.md)
+- [Example 2: Ligand plus cofactor workflow](./Example2/README.md)
+- [Example 3: RNA-protein biological assembly workflow](./Example3/README.md)
+- [Example 4: PROTAC ternary-complex workflow](./Example4/README.md)
+
 If you are new to PyMACS, start with `Example1` unless another example matches your scientific system better.
 
 The packaged `completed_run/` folders are reference outputs. You do not need to create them yourself. They are there so you can compare your own results with a known successful layout.
@@ -34,7 +50,7 @@ In general:
 
 ## Example README files
 
-- `Example1/README.md`
-- `Example2/README.md`
-- `Example3/README.md`
-- `Example4/README.md`
+- [Example1/README.md](./Example1/README.md)
+- [Example2/README.md](./Example2/README.md)
+- [Example3/README.md](./Example3/README.md)
+- [Example4/README.md](./Example4/README.md)

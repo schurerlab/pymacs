@@ -1,3 +1,5 @@
+[Back to all examples](../README.md)
+
 # Example 2: 9UWJ / AVPR1A Ligand-and-Cofactor Workflow
 
 ## What this example shows
@@ -241,3 +243,7 @@ Analysis must finish before plots appear. Check `Analysis_Results/` if you ran t
 ## Next step
 
 Once this example works, compare it with Example1 to see the difference between a simple ligand workflow and a ligand-plus-cofactor workflow, then adapt the same idea to your own system if you need retained context molecules.
+
+Previous: [Example 1](../Example1/README.md) | Next: [Example 3](../Example3/README.md)
+
+[Back to all examples](../README.md)
