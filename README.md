@@ -102,6 +102,103 @@ For questions about PyMACS, molecular dynamics workflow support, CGenFF setup, G
 
 ---
 
+<a id="quick-start-install"></a>
+
+## ⚡ Quick Start Install
+
+Use this when you want to create a clean PyMACS run or working folder without manually downloading the repository or copying files yourself. First, `cd` into the folder where you want the PyMACS files to appear. Your "current working directory" simply means the folder your terminal is presently pointing at. The command below temporarily clones PyMACS, copies everything into that folder, includes hidden files such as `.gitignore` and `.gitattributes`, skips the cloned repository's `.git` folder, and then removes the temporary clone when it is finished.
+
+It also checks for `git`, warns before copying into a non-empty directory, asks for confirmation before overwriting similarly named files, and handles Git LFS when available. If Git LFS is not installed, the installer will continue and warn you that some large example assets may not be fully downloaded yet.
+
+```bash
+bash <<'EOF'
+set -e
+
+REPO_URL="https://github.com/schurerlab/pymacs.git"
+TMP_DIR="$(mktemp -d)"
+TARGET_DIR="$(pwd)"
+
+cleanup() {
+  rm -rf "$TMP_DIR"
+}
+
+trap cleanup EXIT
+
+echo "======================================"
+echo " PyMACS Quick Start Install"
+echo "======================================"
+echo
+echo "This will copy a fresh PyMACS instance into:"
+echo "  $TARGET_DIR"
+echo
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "ERROR: git is not installed or not available in PATH."
+  echo "Please install git first, then run this command again."
+  exit 1
+fi
+
+if [ "$(find "$TARGET_DIR" -mindepth 1 -maxdepth 1 | wc -l)" -gt 0 ]; then
+  echo "WARNING: This directory is not empty."
+  echo "Files with the same names as PyMACS files may be overwritten."
+  echo
+  printf "Continue copying PyMACS into this directory? [y/N]: "
+  read -r answer
+  case "$answer" in
+    y|Y|yes|YES) ;;
+    *)
+      echo "Install cancelled."
+      exit 0
+      ;;
+  esac
+fi
+
+echo
+echo "Cloning PyMACS into a temporary folder..."
+git clone "$REPO_URL" "$TMP_DIR/pymacs"
+
+cd "$TMP_DIR/pymacs"
+
+if command -v git-lfs >/dev/null 2>&1 || git lfs version >/dev/null 2>&1; then
+  echo "Git LFS detected. Pulling large tracked files..."
+  git lfs install
+  git lfs pull
+else
+  echo "WARNING: Git LFS was not detected."
+  echo "Core PyMACS files will still be copied, but large example assets may remain as LFS pointer files."
+  echo "Install Git LFS later and re-run this installer if you need the full example datasets."
+fi
+
+echo
+echo "Copying PyMACS files into your current directory..."
+
+shopt -s dotglob nullglob
+for item in "$TMP_DIR/pymacs"/*; do
+  base="$(basename "$item")"
+  if [ "$base" = ".git" ]; then
+    continue
+  fi
+  cp -R "$item" "$TARGET_DIR/"
+done
+
+echo "Cleaning up temporary clone..."
+cleanup
+trap - EXIT
+
+cd "$TARGET_DIR"
+
+echo
+echo "Done. PyMACS has been copied into:"
+echo "  $TARGET_DIR"
+echo
+echo "Next recommended steps:"
+echo "  conda env create -f environment_cgenff.yml"
+echo "  conda env create -f environment_mdanalysis.yml"
+echo
+echo "Then follow the Step 1 / Step 2 / Step 3 workflow in this README."
+EOF
+```
+
 <a id="overview"></a>
 
 ## 🚀 Overview
@@ -139,6 +236,9 @@ Core goals:
 ## 🧭 Repository Navigation
 
 <p align="center">
+  <a href="#quick-start-install">
+    <img src="https://img.shields.io/badge/Install-Quick%20Start-yellow?style=for-the-badge&logo=gnubash" alt="Quick Start Install">
+  </a>
   <a href="#quick-start-templates">
     <img src="https://img.shields.io/badge/Get%20Started-Quick%20Start-orange?style=for-the-badge&logo=gnubash" alt="Get started with PyMACS">
   </a>
@@ -153,6 +253,7 @@ Core goals:
   </a>
 </p>
 
+- [Quick Start Install](#quick-start-install)
 - [What’s in this repo](#repository-layout)
 - [System requirements](#system-requirements)
 - [Environment setup](#environment-setup)
