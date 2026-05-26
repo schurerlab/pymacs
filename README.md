@@ -262,6 +262,10 @@ Core goals:
 - [Ligand parameterization and CGenFF support](#ligand-parameterization)
 - [The 3 CGenFF modes](#cgenff-modes)
 - [Configurable parameters and command-line flags](#configurable-parameters-and-flags)
+- [Analysis modes at a glance](#analysis-modes-at-a-glance)
+- [Protein-protein / protein-peptide interface RIN analysis](#interface-rin-analysis)
+- [Interface RIN flags](#interface-rin-flags)
+- [Interface RIN outputs](#interface-rin-outputs)
 - [Quick start templates](#quick-start-templates)
 - [Pipeline stages](#pipeline-stages)
 - [Restarting / resuming production MD](#restart-production-md)
@@ -293,9 +297,10 @@ PyMACs/
 ├── 2_AutomateGromacs_MPI.py
 ├── 3A_AutomateGromacs.py
 ├── 3A_AutomateGromacs_MPI.py
+├── 3B_NETWORX.py
+├── 3C_Interface_RIN.py
 ├── 3_PROTAC_Analysis.py
 ├── 3_PROTAC_Analysis_MPI.py
-├── 3B_NETWORX.py
 ├── 4PDF4MD.py
 ├── 4_MDfigs.txt
 ├── docs/
@@ -363,6 +368,7 @@ PyMACS now ships both the original workstation-oriented scripts and MPI-compatib
 | `1_AutomateGromacs.py` | `1_AutomateGromacs_MPI.py` | setup, `pdb2gmx`, box, solvation, ions, EM prep |
 | `2_AutomateGromacs.py` | `2_AutomateGromacs_MPI.py` | EM, NVT, NPT, production MD, checkpoint resume |
 | `3A_AutomateGromacs.py` | `3A_AutomateGromacs_MPI.py` | analysis, `trjconv` preprocessing, pocket/contact/RMSD/RMSF workflows |
+| `3C_Interface_RIN.py` | same script | standalone protein-protein / protein-peptide interface RIN analysis; called by 3A for ligandless multi-chain systems |
 | `3_PROTAC_Analysis.py` | `3_PROTAC_Analysis_MPI.py` | PROTAC-specific trajectory analysis and optional GROMACS centering |
 
 Use the MPI-compatible scripts when:
@@ -373,6 +379,24 @@ Use the MPI-compatible scripts when:
 - you want explicit binary control through `--gmx-bin` or `PYMACS_GMX_BIN`
 
 The standard scripts remain appropriate for local workstations where `gmx` is already the expected executable name.
+
+`3C_Interface_RIN.py` does not require a separate MPI variant because it uses MDAnalysis-based trajectory analysis and does not call GROMACS directly.
+
+---
+
+<a id="analysis-modes-at-a-glance"></a>
+
+## 🧭 Analysis modes at a glance
+
+| System type | User mode / detection | Main script path | What PyMACS analyzes |
+|---|---|---|---|
+| Small-molecule ligand bound to protein | `--mode ligand` or explicit `--ligand` | `3A_AutomateGromacs.py` plus `3B_NETWORX.py` when available | ligand RMSD/RMSF, pocket contacts, ligand-residue contact maps, ligand interaction network |
+| Single-chain apo protein | `--mode protein` with one polymer chain | `3A_AutomateGromacs.py` | protein RMSD/RMSF, radius of gyration, secondary-structure evolution |
+| Ligandless protein-protein or protein-peptide assembly | `--mode peptide`, `--mode protein`, or multi-chain ligandless detection | `3A_AutomateGromacs.py` dispatches to `3C_Interface_RIN.py` | chain-pair contact persistence, residue-residue interface maps, interface RIN network |
+| PROTAC / ternary complex | `--mode protac` | `3A_AutomateGromacs.py` dispatches to `3_PROTAC_Analysis.py` or MPI equivalent | PROTAC component RMSD/RMSF, ternary contact analysis, component-level interaction plots |
+| Biological polymer system | `--mode biological` | `3A_AutomateGromacs.py` | protein/nucleic-acid-aware structural analysis and chain-level summaries where supported |
+
+The key distinction is whether the system has a true small-molecule ligand. Ligand workflows are pocket-centered. Ligandless multi-chain workflows are interface-centered.
 
 ---
 
@@ -513,7 +537,67 @@ Quick example:
 python 3A_AutomateGromacs.py --contact_cutoff 3.5 --pocket-cutoff 6.0
 ```
 
-### 8. PROTAC-specific analysis flags
+<a id="interface-rin-flags"></a>
+
+### 8. Protein-protein / protein-peptide interface RIN flags
+
+| Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
+|---|---|---|---|---|---|---|---|
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py` | `--skip-interface-rin` | Prevents 3A from launching 3C even when a ligandless multi-chain interface is detected. | Include the flag or omit it | Leave this off if you want automatic interface analysis. | Not numeric. Including it skips interface RIN outputs. | Omitting it allows automatic dispatch for multi-chain ligandless systems. | Useful if you only want RMSD/RMSF/SSE outputs. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py`, `3C_Interface_RIN.py` | `--interface-contact-cutoff` / `--contact-cutoff` | Distance cutoff in Å for residue-residue chain-interface contacts. | Default usually `4.0 Å` | Leave default first. | Larger cutoffs detect broader, weaker, or more distant contacts. | Smaller cutoffs focus on tighter contacts but may miss flexible interface events. | 3A passes this to 3C as `--contact-cutoff`. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py`, `3C_Interface_RIN.py` | `--interface-min-contact-frac` / `--min-contact-frac` | Minimum fraction of analyzed frames required for residue-pair edges to appear in the network. | Default `0.10` | Good first value for readable networks. | Higher values show only persistent/core interface contacts. | Lower values include transient contacts but can make networks crowded. | 3A passes this to 3C as `--min-contact-frac`. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py`, `3C_Interface_RIN.py` | `--interface-frame-step` / `--frame-step` | Frame stride for interface analysis. | `1`, `5`, `10` | Use `1` for complete analysis; use `5` or `10` for faster screening. | Larger values analyze fewer frames and run faster. | Smaller values analyze more frames and provide better temporal resolution. | 3A passes this to 3C as `--frame-step`. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py`, `3C_Interface_RIN.py` | `--interface-max-edges` / `--max-edges` | Maximum residue-residue edges shown in the final network figure. | Default `100` | Leave default unless the figure is too crowded. | Larger values show more interface detail but can clutter the graph. | Smaller values make cleaner summary figures but may hide weaker contacts. | CSV outputs still preserve full contact tables. |
+| `3A_AutomateGromacs.py`, `3A_AutomateGromacs_MPI.py`, `3C_Interface_RIN.py` | `--interface-chain-pairs` / `--chain-pairs` | Restricts analysis to specific chain pairs. | `A:B,A:C` | Omit this to analyze all chain pairs. | Not numeric. More listed pairs gives broader interface coverage. | Fewer listed pairs focuses analysis on selected interfaces. | Useful for multi-chain assemblies. |
+
+Quick examples:
+
+```bash
+python 3A_AutomateGromacs.py --mode protein --headless --interface-frame-step 10
+python 3A_AutomateGromacs.py --mode protein --headless --interface-chain-pairs A:B
+python 3A_AutomateGromacs.py --mode protein --headless --skip-interface-rin
+```
+
+<a id="interface-rin-outputs"></a>
+
+### Interface RIN outputs
+
+All interface-RIN outputs are written to:
+
+```text
+Analysis_Results/Interface_RIN/
+```
+
+CSV outputs:
+
+- `interface_chain_pair_summary.csv`
+- `interface_contact_timeseries.csv`
+- `interface_residue_pair_contacts.csv`
+- `interface_node_summary.csv`
+- `interface_runtime_summary.txt`
+
+PNG outputs:
+
+- `Interface_ChainPair_ContactFractions.png`
+- `Interface_ContactCount_Timeseries.png`
+- `Interface_MinDistance_Timeseries.png`
+- `Interface_ResiduePair_ContactHeatmap.png`
+- `Interface_RIN_Network.png`
+- `Interface_ChainLevel_Network.png`
+- `Interface_TopResiduePairs_Barplot.png`
+
+Quick interpretation guide:
+
+- Chain-pair summary tells whether two chains remain associated over time.
+- Contact time series shows how many residue-residue contacts exist at each frame.
+- Minimum-distance time series shows whether chains separate or remain close.
+- Residue-pair heatmap shows which residue contacts persist or disappear over time.
+- Residue-level RIN network shows persistent interface contacts as edges.
+- Chain-level network summarizes which chains interact most persistently.
+
+<a id="protac-specific-analysis-flags"></a>
+
+### 9. PROTAC-specific analysis flags
 
 | Script / stage | Flag | What it controls | Common options or values | Beginner recommendation | What happens if you increase it / choose a larger value | What happens if you decrease it / choose a smaller value | Notes |
 |---|---|---|---|---|---|---|---|
@@ -528,7 +612,9 @@ python 3A_AutomateGromacs.py --contact_cutoff 3.5 --pocket-cutoff 6.0
 | `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--rmsf-contact-threshold`, `--rmsf-label-top-contacts`, `--rmsf-contact-marker-mode` | Controls RMSF contact overlays and labeling. | Verified marker modes: `vlines`, `scatter`, `both` | Leave defaults unless figures are too crowded. | Larger thresholds or fewer labels make plots cleaner. Larger label counts add detail but can clutter. | Lower thresholds or too many labels can create noisy figures. | Presentation-oriented tuning. |
 | `3_PROTAC_Analysis.py`, `3_PROTAC_Analysis_MPI.py` | `--analyze-water-bridges`, `--water-bridge-cutoff`, `--water-pocket-cutoff`, `--write-water-pocket-trajectory`, `--water-names` | Optional water-mediated contact analysis. | Verified defaults include `3.5 Å` and `6.0 Å` | Beginners should skip water-bridge analysis until the main workflow works. | Larger cutoffs count more possible water-mediated events. | Smaller cutoffs are stricter and may miss weak or flexible bridges. | PROTAC systems often need more careful checking than simple protein-ligand systems because the linker, ligand, ligase, and target can all contribute to the contact picture. |
 
-### 9. Figurebook/reporting flags
+<a id="figurebook-reporting-flags"></a>
+
+### 10. Figurebook/reporting flags
 
 `4PDF4MD.py` does not expose verified command-line flags in the current script. In this repository state, the figurebook step is controlled interactively and by input files rather than by `argparse` flags.
 
@@ -559,6 +645,10 @@ If a plot is missing from the PDF:
 | Resume an interrupted run | `--resume --production_only` | `python 2_AutomateGromacs.py --resume --production_only --ns 50` |
 | Make analysis stricter | lower contact or pocket cutoffs | `python 3A_AutomateGromacs.py --contact_cutoff 3.5` |
 | Make analysis broader | higher contact or pocket cutoffs | `python 3A_AutomateGromacs.py --pocket-cutoff 6.0` |
+| Run interface RIN automatically | `--mode protein` | `python 3A_AutomateGromacs.py --mode protein` |
+| Skip interface RIN | `--skip-interface-rin` | `python 3A_AutomateGromacs.py --mode protein --skip-interface-rin` |
+| Analyze fewer frames faster | `--interface-frame-step` | `python 3A_AutomateGromacs.py --mode protein --interface-frame-step 10` |
+| Focus on one chain pair | `--interface-chain-pairs` | `python 3A_AutomateGromacs.py --mode protein --interface-chain-pairs A:B` |
 
 ### Beginner safety rule
 
@@ -811,6 +901,7 @@ cp ../../1_AutomateGromacs.py .
 cp ../../2_AutomateGromacs.py .
 cp ../../3A_AutomateGromacs.py .
 cp ../../3B_NETWORX.py .
+cp ../../3C_Interface_RIN.py .
 cp ../../3_PROTAC_Analysis.py .
 cp ../../4PDF4MD.py .
 cp ../../4_MDfigs.txt .
@@ -866,6 +957,7 @@ cp ../../2_AutomateGromacs_MPI.py .
 cp ../../3A_AutomateGromacs_MPI.py .
 cp ../../3_PROTAC_Analysis_MPI.py .
 cp ../../3B_NETWORX.py .
+cp ../../3C_Interface_RIN.py .
 cp ../../4PDF4MD.py .
 cp ../../4_MDfigs.txt .
 cp ../../4_GraphNotes.txt .
@@ -1141,8 +1233,10 @@ Typical actions, workflow-dependent:
 - configurable binding-pocket extraction through `--pocket-cutoff`
 - configurable interaction reporting through `--contact_cutoff`, `--hbond-distance-cutoff`, and `--hbond-angle-cutoff`
 - in **PROTAC mode**, `3A_AutomateGromacs.py` automatically dispatches to `3_PROTAC_Analysis.py`
-- in **ligand** and **protein:protein/peptide** partner-style analyses, `3A_AutomateGromacs.py` will call `3B_NETWORX.py` automatically when that helper script is present in the run directory
-- in **protein-only / biological-system** analyses, ligand-style NETWORX rendering is skipped by design
+- in **ligand mode** and explicit-ligand workflows (`--ligand`), `3A_AutomateGromacs.py` can call `3B_NETWORX.py` automatically when that helper script is present
+- in **ligandless multi-chain protein-protein/protein-peptide** workflows, `3A_AutomateGromacs.py` dispatches to `3C_Interface_RIN.py` unless `--skip-interface-rin` is set
+- in **single-chain apo protein** workflows, standard protein-centric analysis is run without interface-RIN dispatch
+- in **protein-peptide mode without an explicit ligand**, PyMACS treats the system as an interface-analysis workflow rather than ligand-style NETWORX
 
 ---
 
@@ -1161,6 +1255,102 @@ Important behavior:
 - for small-molecule ligand analyses, `3A_AutomateGromacs.py` can invoke `3B_NETWORX.py` automatically to render the ligand-interaction network figure
 - for protein-only jobs, `3B_NETWORX.py` is not part of the normal workflow
 - for PROTAC jobs, network generation is handled inside `3_PROTAC_Analysis.py` or `3_PROTAC_Analysis_MPI.py` rather than through `3B_NETWORX.py`
+
+---
+
+<a id="step-3c-interface-rin"></a>
+
+### 🕸 Step 3C — Interface RIN analysis
+
+Script:
+
+```text
+3C_Interface_RIN.py
+```
+
+This script is normally launched by 3A for ligandless multi-chain systems. You can also run it directly if `Final_Trajectory.pdb`, `Final_Trajectory.xtc`, and `atomIndex.txt` already exist.
+
+Step 3C characteristics:
+
+- uses MDAnalysis and NetworkX
+- does not require GROMACS directly
+- analyzes residue-residue contacts between polymer chains over time
+- writes outputs to `Analysis_Results/Interface_RIN/`
+
+---
+
+<a id="interface-rin-analysis"></a>
+
+## 🕸️ Protein-protein / protein-peptide interface RIN analysis
+
+PyMACS now includes a dedicated standalone interface analysis script:
+
+```text
+3C_Interface_RIN.py
+```
+
+This script is used for ligandless multi-chain systems, including:
+
+- protein-protein complexes
+- protein-peptide complexes
+- multi-chain assemblies
+- ligandless biological interfaces where residue-residue persistence matters
+
+3A detects this workflow automatically when:
+
+- no ligand-centered analysis mode is active
+- the run is not in PROTAC mode
+- two or more polymer chains are detected from `atomIndex.txt`
+
+In interactive mode, 3A asks:
+
+```text
+Detected a ligandless multi-chain system with N chains. Run protein-protein / protein-peptide interface RIN analysis? [Y/n]:
+```
+
+In headless mode, 3A dispatches automatically unless `--skip-interface-rin` is passed.
+
+For chain definitions, 3C uses `atomIndex.txt` as the source of truth when available rather than relying on chain IDs alone.
+
+Interactive ligandless multichain analysis:
+
+```bash
+conda activate mdanalysis
+python 3A_AutomateGromacs.py --mode protein
+```
+
+Headless interface analysis through 3A:
+
+```bash
+conda activate mdanalysis
+python 3A_AutomateGromacs.py \
+  --mode protein \
+  --headless \
+  --interface-contact-cutoff 4.0 \
+  --interface-min-contact-frac 0.10 \
+  --interface-frame-step 1
+```
+
+Restrict to selected chain pairs:
+
+```bash
+python 3A_AutomateGromacs.py \
+  --mode protein \
+  --headless \
+  --interface-chain-pairs A:B,A:C
+```
+
+Run 3C directly if Final_Trajectory files already exist:
+
+```bash
+python 3C_Interface_RIN.py \
+  --topo Final_Trajectory.pdb \
+  --traj Final_Trajectory.xtc \
+  --atomindex atomIndex.txt \
+  --outdir Analysis_Results/Interface_RIN \
+  --contact-cutoff 4.0 \
+  --min-contact-frac 0.10
+```
 
 ---
 
@@ -1188,6 +1378,10 @@ Optional custom figure notes can also be supplied through:
 ```text
 4_GraphNotes.txt
 ```
+
+Interface RIN note:
+
+Interface RIN figures are written to `Analysis_Results/Interface_RIN/`. If you want those figures included in a final PDF figurebook, add the desired PNGs to your figure list/reporting workflow or include them manually until dedicated interface-RIN PDF manifest support is added.
 
 ### 🔧 Common customization examples
 
@@ -1242,6 +1436,7 @@ cp ../../1_AutomateGromacs.py .
 cp ../../2_AutomateGromacs.py .
 cp ../../3A_AutomateGromacs.py .
 cp ../../3B_NETWORX.py .
+cp ../../3C_Interface_RIN.py .
 cp ../../3_PROTAC_Analysis.py .
 cp ../../4PDF4MD.py .
 cp ../../4_MDfigs.txt .
@@ -1353,8 +1548,11 @@ Enter number of threads to use [ENTER = auto]:
 Important analysis-mode behavior:
 
 - if you select **PROTAC** inside `3A_AutomateGromacs.py`, the script hands off automatically to `3_PROTAC_Analysis.py`
-- if you run a **ligand** or **protein:protein/peptide** analysis and `3B_NETWORX.py` is present, `3A_AutomateGromacs.py` will call it automatically to build the ligand interaction network figure
-- if you run a **protein-only** or **biological-system** analysis, ligand-style NETWORX rendering is skipped because it is not needed for that workflow
+- if you run a **ligand** analysis and `3B_NETWORX.py` is present, `3A_AutomateGromacs.py` can call it automatically to build the ligand interaction network figure
+- if you run a **ligandless multi-chain protein-protein/protein-peptide** analysis, `3A_AutomateGromacs.py` dispatches to `3C_Interface_RIN.py` unless `--skip-interface-rin` is used
+- if you run **protein-peptide mode without an explicit ligand**, it is treated as interface analysis rather than ligand-style NETWORX
+- if you provide `--ligand` explicitly, 3A preserves ligand-centered behavior
+- if you run a **single-chain protein-only** or **biological-system** analysis, ligand-style NETWORX and interface-RIN dispatch are skipped
 
 ---
 
@@ -1446,6 +1644,7 @@ cp ../../1_AutomateGromacs.py .
 cp ../../2_AutomateGromacs.py .
 cp ../../3A_AutomateGromacs.py .
 cp ../../3B_NETWORX.py .
+cp ../../3C_Interface_RIN.py .
 cp ../../4PDF4MD.py .
 cp ../../4_MDfigs.txt .
 cp ../../4_GraphNotes.txt .

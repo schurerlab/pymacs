@@ -331,6 +331,41 @@ parser.add_argument(
     default="auto",
     help="GROMACS executable to use: auto, gmx, gmx_mpi, gmx-mpi, or an explicit path.",
 )
+parser.add_argument(
+    "--skip-interface-rin",
+    action="store_true",
+    help="Do not dispatch to 3C_Interface_RIN.py even if a ligandless multi-chain interface is detected.",
+)
+parser.add_argument(
+    "--interface-contact-cutoff",
+    type=float,
+    default=None,
+    help="Distance cutoff in Å passed to 3C_Interface_RIN.py (default: --contact_cutoff).",
+)
+parser.add_argument(
+    "--interface-min-contact-frac",
+    type=float,
+    default=None,
+    help="Minimum residue-residue contact fraction passed to 3C_Interface_RIN.py (default: --min_contact_frac).",
+)
+parser.add_argument(
+    "--interface-frame-step",
+    type=int,
+    default=1,
+    help="Analyze every Nth frame in 3C_Interface_RIN.py (default 1).",
+)
+parser.add_argument(
+    "--interface-max-edges",
+    type=int,
+    default=100,
+    help="Maximum number of residue-residue edges shown in the final interface network (default 100).",
+)
+parser.add_argument(
+    "--interface-chain-pairs",
+    type=str,
+    default=None,
+    help="Optional comma-separated chain pairs for 3C_Interface_RIN.py (example: A:B,A:C).",
+)
 
 # ------------------ NETWORX-compatible flags ------------------
 parser.add_argument(
@@ -360,6 +395,10 @@ parser.add_argument(
 
 
 args = parser.parse_args()
+if args.interface_contact_cutoff is None:
+    args.interface_contact_cutoff = args.contact_cutoff
+if args.interface_min_contact_frac is None:
+    args.interface_min_contact_frac = args.min_contact_frac
 try:
     GMX_BIN = resolve_gmx_binary(args.gmx_bin)
     print_gmx_preflight()
@@ -513,6 +552,52 @@ def parse_atomindex_entries(path="atomIndex.txt"):
                 }
             )
     return entries
+
+
+def normalize_chain_type(chain_type):
+    return (chain_type or "mixed_or_unknown").strip().lower()
+
+
+def is_polymer_chain_type(chain_type):
+    normalized = normalize_chain_type(chain_type)
+    if not normalized or normalized == "mixed_or_unknown":
+        return True
+    return normalized not in {
+        "ligand",
+        "small_molecule",
+        "cofactor",
+        "ion",
+        "water",
+        "solvent",
+        "lipid",
+    }
+
+
+def collect_polymer_chain_entries(chain_map, chain_entry_meta, system_registry=None):
+    polymer_entries = []
+    registry_chain_types = (system_registry or {}).get("chain_types", {})
+
+    for idx, (label, (start, end)) in enumerate(chain_map.items(), start=1):
+        meta = chain_entry_meta.get(label, {})
+        current_chain = meta.get("current_chain")
+        chain_type = normalize_chain_type(meta.get("chain_type"))
+        if (not chain_type or chain_type == "mixed_or_unknown") and current_chain:
+            chain_type = normalize_chain_type(registry_chain_types.get(current_chain))
+        if not chain_type:
+            chain_type = "mixed_or_unknown"
+        if not is_polymer_chain_type(chain_type):
+            continue
+        polymer_entries.append(
+            {
+                "label": label,
+                "start": start,
+                "end": end,
+                "current_chain": current_chain or label or f"Chain_{idx}",
+                "chain_type": chain_type,
+            }
+        )
+
+    return polymer_entries
 
 
 def anchor_atom_candidates_for_chain(chain_type):
@@ -714,7 +799,8 @@ PROTEIN_ONLY = SIM_TYPE_NORM in {"just protein", "protein", "biological system",
 PEPTIDE_LIKE = SIM_TYPE_NORM in {"protein:protein/peptide", "peptide"}
 LIGAND_MODE = SIM_TYPE_NORM in {"ligand:protein", "ligand"}
 PROTAC_MODE = SIM_TYPE_NORM == "protac"
-PARTNER_MODE = LIGAND_MODE or PEPTIDE_LIKE
+FORCED_LIGAND_MODE = bool((args.ligand or "").strip()) and not PROTAC_MODE
+PARTNER_MODE = LIGAND_MODE or FORCED_LIGAND_MODE
 PEPTIDE_INFO = load_peptide_chainmap(".") if PEPTIDE_LIKE else None
 COMPONENT_REGISTRY = load_component_registry(".") or {}
 SYSTEM_REGISTRY = load_system_registry(".") or {}
@@ -744,14 +830,17 @@ if BIOMOLECULE_MODE:
     print("🧬 Ligand-style per-residue interaction networks are still reserved for ligand/peptide partner analyses.")
 if PEPTIDE_LIKE:
     if PEPTIDE_INFO is not None:
-        print("🧬 Protein:Protein/Peptide mode will use ligand-style peptide interaction analysis.")
+        print("🧬 Protein:Protein/Peptide mode detected.")
         print(f"   • chain_id   = {PEPTIDE_INFO.get('chain_id')}")
         print(f"   • name       = {PEPTIDE_INFO.get('name')}")
         print(f"   • group_name = {PEPTIDE_INFO.get('group_name')}")
         print(f"   • atom_range = {PEPTIDE_INFO.get('atom_range')}")
     else:
         print("⚠️ Protein:Protein/Peptide mode selected but .chainmap.peptide.json was not found.")
-        print("⚠️ Falling back to protein-centric handling where peptide-specific partner analysis may be unavailable.")
+    if FORCED_LIGAND_MODE:
+        print("🧬 Explicit ligand supplied; preserving ligand-centered analysis behavior.")
+    else:
+        print("🧬 Ligandless multi-chain peptide/protein systems will be evaluated for standalone interface RIN dispatch.")
 
 if PROTAC_MODE:
     dispatch_to_protac_analysis()
@@ -1058,7 +1147,7 @@ compound_name = None
 PARTNER_SELECTION_MDA = None
 PARTNER_IS_PEPTIDE = False
 
-if LIGAND_MODE:
+if PARTNER_MODE:
     if args.ligand or REGISTRY_PRIMARY_LIGAND:
         ligand_code = (args.ligand or REGISTRY_PRIMARY_LIGAND).strip().upper()
         source = "CLI" if args.ligand else "component registry"
@@ -1115,26 +1204,9 @@ if LIGAND_MODE:
     print(f"\n🧬 RESNAME for topology selections: {ligand_code}")
     print(f"🏷️ Compound name for figures/output: {compound_name}\n")
 
-elif PEPTIDE_LIKE:
-    PARTNER_IS_PEPTIDE = True
-    CONTEXT_COMPONENTS = []
-
-    if PEPTIDE_INFO is None:
-        print("⚠️ No .chainmap.peptide.json detected; peptide partner cannot be auto-resolved.")
-        ligand_code = "PEPTIDE"
-        compound_name = "Peptide"
-        PARTNER_SELECTION_MDA = None
-    else:
-        ligand_code = (PEPTIDE_INFO.get("group_name") or "PEPTIDE").strip().upper()
-        compound_name = (args.compound_name or PEPTIDE_INFO.get("name") or PEPTIDE_INFO.get("group_name") or "Peptide").strip()
-        PARTNER_SELECTION_MDA = mda_partner_selection(peptide_info=PEPTIDE_INFO)
-        print(f"✅ Auto-detected peptide partner: {compound_name}")
-        print(f"🧬 Peptide output code: {ligand_code}")
-        print(f"🔗 MDAnalysis peptide selection: {PARTNER_SELECTION_MDA}")
-
 else:
     ligand_code = None
-    compound_name = "ProteinOnly"
+    compound_name = args.compound_name or ("ProteinPeptideInterface" if PEPTIDE_LIKE else "ProteinOnly")
     PARTNER_SELECTION_MDA = None
     CONTEXT_COMPONENTS = []
     print("🧬 No ligand will be used for this analysis mode.")
@@ -1206,7 +1278,7 @@ def ensure_analysis_group(protein_only=False, ligand_code=None, context_componen
     return wanted_group
 
 analysis_group = ensure_analysis_group(
-    protein_only=(PROTEIN_ONLY or PEPTIDE_LIKE),
+    protein_only=(PROTEIN_ONLY or (PEPTIDE_LIKE and not PARTNER_MODE)),
     ligand_code=ligand_code,
     context_components=CONTEXT_COMPONENTS,
     polymer_group_override=ANALYSIS_POLYMER_GROUP if BIOMOLECULE_MODE else None,
@@ -1358,7 +1430,7 @@ if not (file_exists("Final_Trajectory.xtc") and file_exists("Final_Trajectory.pd
         f"-o Final_Trajectory_RAW.pdb -n index.ndx -dump 0"
     )
 
-    if PROTEIN_ONLY or PEPTIDE_LIKE:
+    if PROTEIN_ONLY or (PEPTIDE_LIKE and not PARTNER_MODE):
         if NUMBERING_TEMPLATE and os.path.exists(NUMBERING_TEMPLATE):
             resmap = build_residue_number_map(NUMBERING_TEMPLATE)
             apply_template_numbering(
@@ -1410,7 +1482,7 @@ else:
 # ============================================================
 if not (file_exists("binding_pocket_only.xtc") and file_exists("binding_pocket_only.pdb")):
 
-    if PROTEIN_ONLY or PEPTIDE_LIKE:
+    if PROTEIN_ONLY or (PEPTIDE_LIKE and not PARTNER_MODE):
         print("🧬 Protein/peptide-centric mode: using full centered protein trajectory as the analysis subset.")
         shutil.copyfile("Final_Trajectory.xtc", "binding_pocket_only.xtc")
         shutil.copyfile("Final_Trajectory.pdb", "binding_pocket_only.pdb")
@@ -1497,51 +1569,14 @@ if not chain_map:
 
 active_chains = {}
 
-if PROTEIN_ONLY:
+if PROTEIN_ONLY or (PEPTIDE_LIKE and not PARTNER_MODE):
     if BIOMOLECULE_MODE:
         print("🧬 Biomolecule-centric mode: treating all available polymer chains as active.")
+    elif PEPTIDE_LIKE:
+        print("🧬 Protein-peptide/protein-protein mode: treating all parsed polymer chains as active.")
     else:
         print("🧬 Protein-centric mode: treating all available protein chains as active.")
     active_chains = dict(chain_map)
-
-elif PEPTIDE_LIKE:
-    print("🧬 Peptide mode: identifying receptor chains relative to the peptide partner.")
-
-    peptide_bounds = peptide_atom_bounds(PEPTIDE_INFO)
-    peptide_sel = None
-    if PARTNER_SELECTION_MDA:
-        try:
-            peptide_sel = u_pocket.select_atoms(PARTNER_SELECTION_MDA)
-        except Exception:
-            peptide_sel = None
-
-    peptide_indices = set(peptide_sel.indices.tolist()) if peptide_sel is not None and peptide_sel.n_atoms > 0 else set()
-
-    for cname, (start, end) in chain_map.items():
-        chain_indices = set(range(max(0, start), end + 1))
-        overlaps_peptide = bool(peptide_indices & chain_indices)
-
-        if peptide_bounds is not None:
-            ps, pe = peptide_bounds
-            overlaps_peptide = overlaps_peptide or not (end < ps or start > pe)
-
-        if overlaps_peptide:
-            print(f"⚪ {cname} appears to be the peptide/partner chain — excluding from receptor-chain list.")
-            continue
-
-        overlapping = [
-            r for r in protein_residues
-            if start <= r.atoms[0].index <= end
-        ]
-        if overlapping:
-            active_chains[cname] = (start, end)
-            print(f"✅ {cname} participates in peptide-facing analysis ({len(overlapping)} residues in working subset).")
-        else:
-            print(f"⚪ {cname} is absent from the working subset.")
-
-    if not active_chains and chain_map:
-        print("⚠️ Could not confidently exclude peptide chain from atomIndex map; using all parsed chains as fallback receptor chains.")
-        active_chains = dict(chain_map)
 
 else:
     lig_atomgroup = u_pocket.select_atoms(PARTNER_SELECTION_MDA or f"resname {ligand_code}")
@@ -1564,6 +1599,12 @@ if not active_chains:
     print("⚠️ No active protein chains detected!")
 else:
     print("📎 Active binding chains:", ", ".join(active_chains.keys()))
+
+polymer_chain_entries = collect_polymer_chain_entries(chain_map, chain_entry_meta, SYSTEM_REGISTRY)
+INTERFACE_CHAIN_COUNT = len(polymer_chain_entries)
+INTERFACE_RIN_MODE = (not PROTAC_MODE) and (not PARTNER_MODE) and INTERFACE_CHAIN_COUNT >= 2
+print(f"🧬 Polymer chains detected from atomIndex.txt: {INTERFACE_CHAIN_COUNT}")
+print(f"🧬 Interface RIN mode active: {'yes' if INTERFACE_RIN_MODE else 'no'}")
 # ============================================================
 # ✅ Ready for downstream RMSD/RMSF and contact analysis
 # ============================================================
@@ -1612,6 +1653,61 @@ def checkpoint(path):
 
 def done_checkpoint(path):
     return os.path.exists(path)
+
+
+def interface_rin_outputs_present(outdir):
+    required = [
+        os.path.join(outdir, "interface_chain_pair_summary.csv"),
+        os.path.join(outdir, "interface_residue_pair_contacts.csv"),
+        os.path.join(outdir, "Interface_RIN_Network.png"),
+    ]
+    return all(os.path.exists(path) for path in required)
+
+
+def dispatch_to_interface_rin():
+    interface_script = os.path.join(os.getcwd(), "3C_Interface_RIN.py")
+    if not os.path.exists(interface_script):
+        raise SystemExit(
+            "Interface RIN mode selected, but 3C_Interface_RIN.py was not found in the current directory."
+        )
+
+    outdir = os.path.join(args.outdir, "Interface_RIN")
+    cmd = [
+        sys.executable,
+        interface_script,
+        "--topo",
+        args.topo,
+        "--traj",
+        args.traj,
+        "--atomindex",
+        "atomIndex.txt",
+        "--outdir",
+        outdir,
+        "--contact-cutoff",
+        str(args.interface_contact_cutoff),
+        "--min-contact-frac",
+        str(args.interface_min_contact_frac),
+        "--frame-step",
+        str(args.interface_frame_step),
+        "--max-edges",
+        str(args.interface_max_edges),
+    ]
+    if args.interface_chain_pairs:
+        cmd.extend(["--chain-pairs", args.interface_chain_pairs])
+    if args.headless:
+        cmd.append("--headless")
+
+    print(f"🧬 Interface RIN output folder: {outdir}")
+    print(f"🚀 Launching interface RIN with command: {' '.join(cmd)}")
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        raise SystemExit(rc)
+
+    if not interface_rin_outputs_present(outdir):
+        raise SystemExit("❌ 3C_Interface_RIN.py completed but expected interface outputs were not found.")
+
+    checkpoint("chk_EINTERFACE.txt")
+    print("✅ STEP E-INTERFACE complete.")
 
 def safe_rmsd(traj, ref, frame, atom_indices):
     """Try modern MDTraj rst syntax; fall back when unsupported."""
@@ -2530,137 +2626,31 @@ else:
 
 
 
-if BIOMOLECULE_MODE and not PARTNER_MODE and not done_checkpoint("chk_EBIO.txt"):
-    phase("STEP E-BIO — Chain Interaction Analysis")
-
-    traj, _, _, _ = get_aligned_traj_and_ligand()
-    atomindex_entries = parse_atomindex_entries("atomIndex.txt")
-    chain_entry_meta = {entry["label"]: entry for entry in atomindex_entries}
-    pair_rows = []
-    pair_series = {"Time_ns": traj.time / 1000.0}
-
-    active_chain_entries = []
-    for chain_label, (start, end) in active_chains.items():
-        meta = chain_entry_meta.get(chain_label, {})
-        current_chain_id = meta.get("current_chain")
-        chain_type = meta.get("chain_type")
-        if not chain_type and current_chain_id and SYSTEM_REGISTRY.get("chain_types"):
-            chain_type = SYSTEM_REGISTRY["chain_types"].get(current_chain_id)
-        chain_type = chain_type or "mixed_or_unknown"
-        anchor_indices, residue_numbers, anchor_name = select_chain_anchor_atoms(
-            traj, start, end, chain_type=chain_type
-        )
-        if anchor_indices.size == 0:
-            print(f"⚠️ Skipping {chain_label}: no usable anchor atoms for biomolecule contact analysis.")
-            continue
-        active_chain_entries.append(
-            {
-                "label": chain_label,
-                "chain_id": current_chain_id or chain_label,
-                "chain_type": chain_type,
-                "anchor_indices": anchor_indices,
-                "residue_numbers": residue_numbers,
-                "anchor_name": anchor_name,
-            }
-        )
-
-    if len(active_chain_entries) < 2:
-        print("⚠️ Fewer than two biomolecule chains had usable anchor atoms; skipping STEP E-BIO.")
+phase("STEP E-INTERFACE — Protein-Protein / Protein-Peptide Interface RIN Analysis")
+if INTERFACE_RIN_MODE and not args.skip_interface_rin:
+    interface_outdir = os.path.join(args.outdir, "Interface_RIN")
+    if done_checkpoint("chk_EINTERFACE.txt"):
+        if interface_rin_outputs_present(interface_outdir):
+            print("⏭️ STEP E-INTERFACE skipped (checkpoint found and outputs present).")
+        else:
+            print("⚠️ chk_EINTERFACE.txt exists but interface outputs are missing; rerunning 3C_Interface_RIN.py.")
+            dispatch_to_interface_rin()
     else:
-        for left, right in combinations(active_chain_entries, 2):
-            pair_name = f"{left['label']}__vs__{right['label']}"
-            min_distances_ang = np.empty(traj.n_frames, dtype=float)
-            in_contact = np.empty(traj.n_frames, dtype=int)
-
-            for frame_i in range(traj.n_frames):
-                xyz_left = traj.xyz[frame_i, left["anchor_indices"], :]
-                xyz_right = traj.xyz[frame_i, right["anchor_indices"], :]
-                d = np.linalg.norm(
-                    xyz_left[:, None, :] - xyz_right[None, :, :],
-                    axis=2
-                )
-                min_distance_ang = float(d.min() * 10.0)
-                min_distances_ang[frame_i] = min_distance_ang
-                in_contact[frame_i] = int(min_distance_ang <= CONTACT_CUTOFF)
-
-            pair_series[f"{pair_name}_contact"] = in_contact
-            pair_series[f"{pair_name}_min_distance_A"] = min_distances_ang
-            pair_rows.append(
-                {
-                    "ChainA_Label": left["label"],
-                    "ChainA_ID": left["chain_id"],
-                    "ChainA_Type": polymer_type_label(left["chain_type"]),
-                    "ChainA_Anchor": left["anchor_name"],
-                    "ChainB_Label": right["label"],
-                    "ChainB_ID": right["chain_id"],
-                    "ChainB_Type": polymer_type_label(right["chain_type"]),
-                    "ChainB_Anchor": right["anchor_name"],
-                    "ContactFraction": float(in_contact.mean()),
-                    "MeanMinDistance_A": float(min_distances_ang.mean()),
-                    "MinObservedDistance_A": float(min_distances_ang.min()),
-                }
-            )
-
-        pair_df = pd.DataFrame(pair_rows).sort_values(
-            ["ContactFraction", "MeanMinDistance_A"],
-            ascending=[False, True],
-        )
-        pair_df.to_csv(
-            os.path.join(OUTPUT_DIR, "Biomolecule_Chain_Interaction_Summary.csv"),
-            index=False,
-        )
-        pd.DataFrame(pair_series).to_csv(
-            os.path.join(OUTPUT_DIR, "Biomolecule_Chain_Interaction_Timeseries.csv"),
-            index=False,
-        )
-
-        if not pair_df.empty:
-            heatmap_rows = []
-            for _, row in pair_df.iterrows():
-                heatmap_rows.append(
-                    {
-                        "Pair": f"{row['ChainA_Label']} vs {row['ChainB_Label']}",
-                        "ContactFraction": row["ContactFraction"],
-                    }
-                )
-            heatmap_df = pd.DataFrame(heatmap_rows).set_index("Pair")
-            plt.figure(figsize=(8, max(3, 0.5 * len(heatmap_df))))
-            sns.heatmap(
-                heatmap_df,
-                annot=True,
-                fmt=".2f",
-                cmap="viridis",
-                cbar_kws={"label": f"Fraction of frames within {CONTACT_CUTOFF:.1f} Å"},
-            )
-            plt.title("Biomolecule Chain-Chain Contact Fractions")
-            savefig(os.path.join(OUTPUT_DIR, "Biomolecule_Chain_Interaction_Heatmap.png"))
-
-            plt.figure(figsize=(12, 6))
-            time_ns = traj.time / 1000.0
-            for _, row in pair_df.iterrows():
-                pair_name = f"{row['ChainA_Label']}__vs__{row['ChainB_Label']}"
-                plt.plot(
-                    time_ns,
-                    pair_series[f"{pair_name}_min_distance_A"],
-                    lw=1.3,
-                    label=f"{row['ChainA_Label']} vs {row['ChainB_Label']}",
-                )
-            plt.axhline(CONTACT_CUTOFF, color="black", lw=1.0, ls="--", alpha=0.7)
-            plt.xlabel("Time (ns)")
-            plt.ylabel("Minimum chain-anchor distance (Å)")
-            plt.title("Biomolecule Chain-Chain Minimum Distances Over Time")
-            plt.legend(frameon=False, fontsize=8)
-            savefig(os.path.join(OUTPUT_DIR, "Biomolecule_Chain_Interaction_Distances.png"))
-
-        print("✅ STEP E-BIO complete — biomolecule chain interaction summaries saved.")
-
-    checkpoint("chk_EBIO.txt")
-
+        if args.headless:
+            dispatch_to_interface_rin()
+        else:
+            resp = input(
+                f"Detected a ligandless multi-chain system with {INTERFACE_CHAIN_COUNT} chains. "
+                "Run protein-protein / protein-peptide interface RIN analysis? [Y/n]: "
+            ).strip().lower()
+            if resp in {"", "y", "yes"}:
+                dispatch_to_interface_rin()
+            else:
+                print("⏭️ STEP E-INTERFACE skipped by user choice.")
+elif INTERFACE_RIN_MODE and args.skip_interface_rin:
+    print("⏭️ STEP E-INTERFACE skipped due to --skip-interface-rin.")
 elif not PARTNER_MODE:
-    if BIOMOLECULE_MODE:
-        print("⏭️ Skipping ligand-contact, NETWORX, and pocket interaction analyses; biomolecule chain analysis path already used.")
-    else:
-        print("⏭️ Skipping ligand-contact, NETWORX, and pocket interaction analyses (protein-centric mode).")
+    print("⏭️ Skipping ligand-contact/NETWORX analysis because this is apo single-chain or protein-centric mode.")
 else:
     # ============================================================
     # STEP E — FULL BINDING-POCKET ANALYSIS WITH CSV EXPORTS
