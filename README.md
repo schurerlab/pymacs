@@ -146,7 +146,7 @@ if [ "$(find "$TARGET_DIR" -mindepth 1 -maxdepth 1 | wc -l)" -gt 0 ]; then
   echo "Files with the same names as PyMACS files may be overwritten."
   echo
   printf "Continue copying lightweight PyMACS files into this directory? [y/N]: "
-  read -r answer
+  read -r answer </dev/tty
   case "$answer" in
     y|Y|yes|YES) ;;
     *)
@@ -192,7 +192,7 @@ for item in "$TMP_DIR/pymacs"/*; do
 
   if [ -e "$TARGET_DIR/$base" ]; then
     printf "Overwrite existing %s? [y/N]: " "$base"
-    read -r overwrite
+    read -r overwrite </dev/tty
     case "$overwrite" in
       y|Y|yes|YES)
         rm -rf "$TARGET_DIR/$base"
@@ -271,7 +271,7 @@ if [ "$(find "$TARGET_DIR" -mindepth 1 -maxdepth 1 | wc -l)" -gt 0 ]; then
   echo "Files with the same names as PyMACS files may be overwritten."
   echo
   printf "Continue copying PyMACS into this directory? [y/N]: "
-  read -r answer
+  read -r answer </dev/tty
   case "$answer" in
     y|Y|yes|YES) ;;
     *)
@@ -309,7 +309,7 @@ for item in "$TMP_DIR/pymacs"/*; do
 
   if [ -e "$TARGET_DIR/$base" ]; then
     printf "Overwrite existing %s? [y/N]: " "$base"
-    read -r overwrite
+    read -r overwrite </dev/tty
     case "$overwrite" in
       y|Y|yes|YES)
         rm -rf "$TARGET_DIR/$base"
