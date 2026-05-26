@@ -386,6 +386,38 @@ def append_setup_log(directory, message):
         handle.write(f"{message}\n")
 
 
+def detect_peptide_like_chains(polymer_info, residue_threshold=50):
+    peptide_like = []
+    for entry in (polymer_info or {}).get("chains", []):
+        chain_type = (entry or {}).get("chain_type")
+        residue_count = int((entry or {}).get("residue_count", 0) or 0)
+        if chain_type == "protein" and 0 < residue_count < residue_threshold:
+            peptide_like.append(entry)
+    return peptide_like
+
+
+def format_peptide_like_chain_note(polymer_info, residue_threshold=50):
+    peptide_like = detect_peptide_like_chains(polymer_info, residue_threshold=residue_threshold)
+    if not peptide_like:
+        return None
+    labels = ", ".join(
+        f"chain {entry.get('chain_id')} ({entry.get('residue_count')} residues)"
+        for entry in peptide_like
+    )
+    return (
+        "🧬 Short retained protein chain(s) look peptide-like: "
+        f"{labels}. PyMACS will phrase this as a protein-peptide assembly unless you explicitly treat it as a different workflow."
+    )
+
+
+def infer_polymer_only_workflow_label(polymer_info, residue_threshold=50):
+    if (polymer_info or {}).get("has_nucleic_acid"):
+        return "polymer-only / biomolecule-only"
+    if detect_peptide_like_chains(polymer_info, residue_threshold=residue_threshold):
+        return "protein-peptide"
+    return "protein-only"
+
+
 def resolve_existing_path(base_directory, candidate):
     if not candidate:
         return None
@@ -3611,6 +3643,9 @@ if __name__ == "__main__":
     )
     print("\n🧬 Detected polymer chains:")
     print(format_polymer_chain_report(polymer_info))
+    peptide_note = format_peptide_like_chain_note(polymer_info)
+    if peptide_note:
+        print(peptide_note)
     try:
         selected_polymer_chain_ids = resolve_input_chain_selection(polymer_info)
     except ValueError as exc:
@@ -3641,6 +3676,9 @@ if __name__ == "__main__":
             )
         print("🧬 Polymer chains after selection:")
         print(format_polymer_chain_report(polymer_info))
+        peptide_note = format_peptide_like_chain_note(polymer_info)
+        if peptide_note:
+            print(peptide_note)
     else:
         selected_polymer_chain_ids = original_polymer_chain_ids
 
@@ -3675,6 +3713,8 @@ if __name__ == "__main__":
         ligand_code = None
         if polymer_info.get("has_nucleic_acid"):
             print("\n✅ Biomolecule-only mode forced by CLI. Skipping small-molecule ligand detection.")
+        elif detect_peptide_like_chains(polymer_info):
+            print("\n✅ Protein/peptide mode forced by CLI. Skipping small-molecule ligand detection.")
         else:
             print("\n✅ Protein-only mode forced by CLI. Skipping ligand detection.")
 
@@ -3768,6 +3808,8 @@ if __name__ == "__main__":
             print(f"🧬 Detected polymer chains include: {', '.join(polymer_labels) if polymer_labels else 'unknown'}.")
             if polymer_info.get("has_nucleic_acid"):
                 use_lig = input("Run as polymer-only / biomolecule-only system? [Y/n]: ").strip().lower()
+            elif detect_peptide_like_chains(polymer_info):
+                use_lig = input("Run as protein-peptide / peptide-interface system? [Y/n]: ").strip().lower()
             else:
                 use_lig = input("Run as protein-only? [Y/n]: ").strip().lower()
 
@@ -3834,6 +3876,7 @@ if __name__ == "__main__":
         print(f"\n✅ Using ligand: {ligand_code}")
     else:
         print("\n✅ No ligand selected for this simulation.")
+        print(f"✅ Assembly classification: {infer_polymer_only_workflow_label(polymer_info)}")
     if input_cleanup_resnames:
         print(f"✅ Input cleanup removed: {', '.join(input_cleanup_resnames)}")
     else:
