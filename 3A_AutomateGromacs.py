@@ -3820,42 +3820,46 @@ else:
         # Gap threshold (ns) to define event break
         GAP_NS = 1.5  # ns; maximum allowed gap between frames for a continuous event
 
-        for residue, g in df.groupby("Residue"):
+        # Build all contiguous residue/type events before drawing.  Calling
+        # ``broken_barh`` once per event creates tens of thousands of separate
+        # Matplotlib collections for long trajectories and becomes very slow.
+        from matplotlib.collections import PolyCollection
+
+        event_start = (
+            df["Residue"].ne(df["Residue"].shift())
+            | df["Type"].ne(df["Type"].shift())
+            | df["Time_ns"].sub(df["Time_ns"].shift()).gt(GAP_NS)
+        )
+        events = (
+            df.assign(_event_id=event_start.cumsum())
+            .groupby("_event_id", sort=False, as_index=False)
+            .agg(
+                Residue=("Residue", "first"),
+                Type=("Type", "first"),
+                Start=("Time_ns", "first"),
+                End=("Time_ns", "last"),
+            )
+        )
+
+        event_polygons = []
+        event_colors = []
+        half_height = BAR_HEIGHT / 2
+        for residue, itype, start_time, end_time in events.itertuples(
+            index=False, name=None
+        ):
             y = res_to_y[residue]
-            g = g.sort_values("Time_ns")
+            event_polygons.append([
+                (start_time, y - half_height),
+                (end_time, y - half_height),
+                (end_time, y + half_height),
+                (start_time, y + half_height),
+            ])
+            event_colors.append(TYPE_COLORS.get(itype, "gray"))
 
-            current_type = None
-            start_time = None
-            prev_time = None
-
-            for _, row in g.iterrows():
-                t = row["Time_ns"]
-                itype = row["Type"]
-
-                # Start new event
-                if start_time is None:
-                    start_time = t
-                    current_type = itype
-
-                # Break event if gap or type change
-                elif (t - prev_time > GAP_NS) or (itype != current_type):
-                    ax.broken_barh(
-                        [(start_time, prev_time - start_time)],
-                        (y - BAR_HEIGHT / 2, BAR_HEIGHT),
-                        facecolors=TYPE_COLORS.get(current_type, "gray")
-                    )
-                    start_time = t
-                    current_type = itype
-
-                prev_time = t
-
-            # Final segment
-            if start_time is not None:
-                ax.broken_barh(
-                    [(start_time, prev_time - start_time)],
-                    (y - BAR_HEIGHT / 2, BAR_HEIGHT),
-                    facecolors=TYPE_COLORS.get(current_type, "gray")
-                )
+        ax.add_collection(
+            PolyCollection(event_polygons, facecolors=event_colors, edgecolors="none")
+        )
+        print(f"  ✓ Rendering {len(events):,} interaction events as one collection.")
 
         # Axis formatting
         ax.set_yticks(range(len(residues)))
