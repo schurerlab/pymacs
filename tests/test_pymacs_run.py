@@ -76,6 +76,8 @@ class PyMACSRunTests(unittest.TestCase):
             self.assertIn("#BSUB -q normal", contents)
             self.assertIn("#BSUB -P brd", contents)
             self.assertIn("#BSUB -L /bin/bash", contents)
+            self.assertIn("source /sw/summit/lmod/lmod/init/bash", contents)
+            self.assertIn(str(folder.resolve()), contents)
             self.assertNotIn("source $HOME/miniforge3", contents)
             self.assertIn("gromacs/2025.1-gcc-13.4.0-6vq7xfo", contents)
             self.assertIn("--mode peptide", contents)

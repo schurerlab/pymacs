@@ -6,11 +6,12 @@
 #BSUB -W {walltime}
 #BSUB -n {threads}
 #BSUB -R "span[hosts=1]"
-#BSUB -oo {job_name}.%J.out
-#BSUB -eo {job_name}.%J.err
+#BSUB -oo {workdir}/{job_name}.%J.out
+#BSUB -eo {workdir}/{job_name}.%J.err
 
 set -euo pipefail
 cd {workdir}
+source /sw/summit/lmod/lmod/init/bash
 module purge
 module load {gcc_module}
 module load {gromacs_module}
