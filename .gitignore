@@ -28,6 +28,10 @@ RUNS/
 runs/
 run*/
 *_run*/
+pymacs_run.json
+pymacs_commands.log
+run_*_md.lsf
+run_*_resume.lsf
 Analysis_Results/
 NETWORX/
 RESIDUE_Contact_Distance/

@@ -1,0 +1,12 @@
+{
+  "scheduler": "lsf",
+  "template": "triton_gpu.lsf.tmpl",
+  "queue": "normal",
+  "walltime": "144:00",
+  "threads": 16,
+  "gpus": 1,
+  "gcc_module": "gcc-runtime/13.4.0-none-none-gh6rpjx",
+  "gromacs_module": "gromacs/2025.1-gcc-13.4.0-6vq7xfo",
+  "conda_root": "$HOME/miniforge3",
+  "conda_env": "mdanalysis"
+}

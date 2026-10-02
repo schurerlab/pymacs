@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#BSUB -J {job_name}
+#BSUB -q {queue}
+#BSUB -W {walltime}
+#BSUB -n {threads}
+#BSUB -gpu "num={gpus}"
+#BSUB -R "span[hosts=1]"
+#BSUB -oo {job_name}.%J.out
+#BSUB -eo {job_name}.%J.err
+
+set -euo pipefail
+cd {workdir}
+
+module purge
+module load {gcc_module}
+module load {gromacs_module}
+source {conda_root}/etc/profile.d/conda.sh
+conda activate {conda_env}
+
+export OMP_NUM_THREADS={threads}
+{command}

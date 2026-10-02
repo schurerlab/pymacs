@@ -1278,6 +1278,69 @@ python 4PDF4MD.py
 
 ---
 
+### Template D — Guided single-folder workflow and Triton submission
+
+Use this workflow when one folder contains one starting structure and one
+simulation. It is portable: every user gets the same guided setup and saved
+configuration, while only people with Triton access opt into the Triton
+profile.
+
+From a clean run folder containing your `.pdb`, `.cif`, or `.mmcif` input and
+the copied PyMACS files:
+
+```bash
+python pymacs_run.py configure
+```
+
+The short Q&A detects PDB chains and non-water components, asks whether the
+system is protein-protein, protein-peptide, protein-ligand, or biological,
+and offers numbered box choices. It writes `pymacs_run.json` in the same
+folder. This file is the permanent record of the run choices and can be
+reviewed or edited before execution.
+
+```bash
+python pymacs_run.py validate
+```
+
+For Triton, load GROMACS and activate the existing `cgenff` environment for
+the lightweight Step 1 preparation. Protein-protein and protein-peptide runs
+do not need CGenFF ligand parameterization.
+
+```bash
+module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
+conda activate cgenff
+python pymacs_run.py setup
+```
+
+After Step 1 finishes, submit this folder's single GPU production job:
+
+```bash
+python pymacs_run.py submit --profile triton
+```
+
+This writes a versioned LSF script in the current run folder and submits it to
+Triton's `normal` queue. The bundled profile requests one GPU, 16 CPU threads,
+and 144 hours, loads `gmx_mpi`, activates `mdanalysis`, and runs the MPI-aware
+Step 2 script in non-interactive mode. Review a script without submitting it:
+
+```bash
+python pymacs_run.py submit --profile triton --dry-run
+```
+
+Restart an interrupted production run safely from its checkpoint:
+
+```bash
+python pymacs_run.py resume --profile triton
+```
+
+The `triton` profile is intentionally explicit, never the default. It lives in
+`hpc_profiles/triton.json`; its LSF template is
+`hpc_profiles/triton_gpu.lsf.tmpl`. Users without Triton can still use
+`configure`, `validate`, and `setup`, or add a profile for another scheduler
+without changing the scientific configuration.
+
+---
+
 ### Standard local and MPI-compatible command examples
 
 Standard local workstation:
