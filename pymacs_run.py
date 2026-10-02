@@ -82,6 +82,49 @@ def inspect_pdb(path: Path) -> tuple[list[str], list[str]]:
     return sorted(chains), sorted(hetero)
 
 
+def inspect_cif(path: Path) -> tuple[list[str], list[str]]:
+    """Read chain IDs and non-water components from a standard mmCIF atom loop.
+
+    This deliberately uses only the Python standard library so configuration
+    works before either PyMACS conda environment has been activated.
+    """
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for loop_index, line in enumerate(lines):
+        if line.strip() != "loop_":
+            continue
+        headers, cursor = [], loop_index + 1
+        while cursor < len(lines) and lines[cursor].lstrip().startswith("_"):
+            headers.append(lines[cursor].split()[0])
+            cursor += 1
+        if "_atom_site.group_PDB" not in headers:
+            continue
+        indices = {name: headers.index(name) for name in headers}
+        chain_key = "_atom_site.auth_asym_id" if "_atom_site.auth_asym_id" in indices else "_atom_site.label_asym_id"
+        residue_key = "_atom_site.label_comp_id"
+        chains, hetero, tokens = set(), set(), []
+        while cursor < len(lines):
+            current = lines[cursor].strip()
+            if not current or current.startswith("#") or current == "loop_" or current.startswith("_"):
+                break
+            tokens.extend(shlex.split(current))
+            while len(tokens) >= len(headers):
+                row, tokens = tokens[:len(headers)], tokens[len(headers):]
+                record = row[indices["_atom_site.group_PDB"]]
+                chain = row[indices[chain_key]]
+                residue = row[indices[residue_key]].upper()
+                if record == "ATOM" and chain not in {".", "?"}:
+                    chains.add(chain)
+                elif record == "HETATM" and residue not in {"HOH", "WAT", "SOL"}:
+                    hetero.add(residue)
+            cursor += 1
+        return sorted(chains), sorted(hetero)
+    return [], []
+
+
+def inspect_structure(path: Path) -> tuple[list[str], list[str]]:
+    return inspect_pdb(path) if path.suffix.lower() == ".pdb" else inspect_cif(path)
+
+
 def ask(prompt: str, default: str | None = None) -> str:
     suffix = f" [{default}]" if default else ""
     value = input(f"{prompt}{suffix}: ").strip()
@@ -119,7 +162,7 @@ def configure(folder: Path) -> None:
             break
         print("Choose one of the numbered structures.")
 
-    chains, hetero = inspect_pdb(structure)
+    chains, hetero = inspect_structure(structure)
     if chains:
         print(f"\nDetected polymer chains: {', '.join(chains)}")
     if hetero:

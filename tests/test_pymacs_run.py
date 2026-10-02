@@ -42,6 +42,17 @@ class PyMACSRunTests(unittest.TestCase):
             )
             self.assertEqual(pymacs_run.inspect_pdb(structure), (["A", "B"], ["LIG"]))
 
+    def test_inspect_cif_reports_chains_and_hetero(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            structure = Path(temporary) / "complex.cif"
+            structure.write_text(
+                "data_test\nloop_\n_atom_site.group_PDB\n_atom_site.label_comp_id\n"
+                "_atom_site.label_asym_id\n_atom_site.auth_asym_id\nATOM ALA A A\n"
+                "ATOM GLY B B\nHETATM LIG C C\nHETATM HOH D D\n#\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(pymacs_run.inspect_cif(structure), (["A", "B"], ["LIG"]))
+
     def test_commands_and_lsf_render_for_peptide_folder(self):
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
