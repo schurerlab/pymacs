@@ -391,6 +391,7 @@ def render_lsf(folder: Path, config: dict[str, Any], profile_name: str, resume: 
         "threads": int(config["simulation"].get("threads", profile["threads"])),
         "gpus": profile["gpus"],
         "queue": profile["queue"],
+        "project": profile.get("project", "brd"),
         "gromacs_module": profile["gromacs_module"],
         "gcc_module": profile["gcc_module"],
         "conda_root": profile["conda_root"],
@@ -427,7 +428,7 @@ def render_analysis_lsf(folder: Path, config: dict[str, Any], profile_name: str)
     if config.get("analysis", {}).get("figurebook", True):
         command += " && python 4PDF4MD.py"
     values = {"job_name": f"{job_stem}_analysis", "workdir": str(folder.resolve()), "walltime": profile["analysis_walltime"],
-              "threads": int(config.get("analysis", {}).get("threads", profile["analysis_threads"])), "queue": profile["queue"],
+              "threads": int(config.get("analysis", {}).get("threads", profile["analysis_threads"])), "queue": profile["queue"], "project": profile.get("project", "brd"),
               "gromacs_module": profile["gromacs_module"], "gcc_module": profile["gcc_module"],
               "conda_root": profile["conda_root"], "conda_env": profile["conda_env"], "command": command}
     destination = folder / f"run_{job_stem}_analysis.lsf"

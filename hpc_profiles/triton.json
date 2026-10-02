@@ -5,6 +5,7 @@
   "analysis_walltime": "48:00",
   "analysis_threads": 8,
   "queue": "normal",
+  "project": "brd",
   "walltime": "144:00",
   "threads": 16,
   "gpus": 1,
