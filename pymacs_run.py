@@ -218,6 +218,24 @@ def configure(folder: Path) -> None:
     length = float(ask("Production length in ns", "100"))
     if length <= 0:
         raise ConfigError("Production length must be greater than zero.")
+    analysis_enabled = ask_yes_no("Run chunked Step 3 analysis automatically after MD", True)
+    analysis = {"enabled": analysis_enabled, "figurebook": False, "threads": 8, "chunk_size": 1000}
+    if analysis_enabled:
+        analysis["figurebook"] = ask_yes_no("Generate the Step 4 figurebook PDF", True)
+        analysis["threads"] = int(ask("Analysis CPU threads", "8"))
+        analysis["chunk_size"] = int(ask("Frames per analysis chunk", "1000"))
+        if system_type in {"protein", "peptide"}:
+            if not ask_yes_no("Analyze all chain interfaces", True):
+                analysis["interface_chain_pairs"] = ask("Chain pairs to analyze (for example A:B)")
+            analysis["interface_contact_cutoff"] = float(ask("Interface contact cutoff in Å", "4.0"))
+            analysis["interface_min_contact_fraction"] = float(ask("Minimum interface contact fraction", "0.10"))
+            analysis["interface_frame_step"] = int(ask("Analyze every Nth interface frame", "1"))
+            analysis["interface_max_edges"] = int(ask("Maximum interface-network edges", "100"))
+        elif system_type == "ligand":
+            analysis["pocket_cutoff"] = float(ask("Ligand pocket cutoff in Å", "5.0"))
+            analysis["contact_cutoff"] = float(ask("Ligand contact cutoff in Å", "4.0"))
+            analysis["min_contact_fraction"] = float(ask("Minimum persistent-contact fraction", "0.10"))
+            analysis["compound_name"] = ask("Compound display name", ligand)
 
     config = {
         "input": structure.name,
@@ -238,6 +256,7 @@ def configure(folder: Path) -> None:
             "threads": 16,
             "compute": "GPU",
         },
+        "analysis": analysis,
     }
     print("\nReady to write:")
     print(f"  Input: {structure.name}")
@@ -308,6 +327,25 @@ def simulation_command(config: dict[str, Any], resume: bool = False) -> list[str
     return command
 
 
+def analysis_command(config: dict[str, Any]) -> list[str]:
+    sim, setup, analysis = config["simulation"], config["setup"], config.get("analysis", {})
+    command = ["python", "3A_AutomateGromacs_chunks_MPI.py", "--gmx-bin", "gmx_mpi", "--mode", sim["mode"], "--headless",
+               "--threads", str(analysis.get("threads", 8)), "--chunk-size", str(analysis.get("chunk_size", 1000))]
+    if sim["mode"] == "ligand":
+        command += ["--ligand", setup["ligand"], "--pocket-cutoff", str(analysis.get("pocket_cutoff", 5.0)),
+                    "--contact_cutoff", str(analysis.get("contact_cutoff", 4.0)), "--min_contact_frac", str(analysis.get("min_contact_fraction", 0.10))]
+        if analysis.get("compound_name"):
+            command += ["--compound-name", analysis["compound_name"]]
+    elif sim["mode"] in {"protein", "peptide"}:
+        command += ["--interface-contact-cutoff", str(analysis.get("interface_contact_cutoff", 4.0)),
+                    "--interface-min-contact-frac", str(analysis.get("interface_min_contact_fraction", 0.10)),
+                    "--interface-frame-step", str(analysis.get("interface_frame_step", 1)),
+                    "--interface-max-edges", str(analysis.get("interface_max_edges", 100))]
+        if analysis.get("interface_chain_pairs"):
+            command += ["--interface-chain-pairs", analysis["interface_chain_pairs"]]
+    return command
+
+
 def append_log(folder: Path, message: str) -> None:
     with (folder / "pymacs_commands.log").open("a", encoding="utf-8") as handle:
         handle.write(f"{dt.datetime.now().astimezone().isoformat(timespec='seconds')} {message}\n")
@@ -364,22 +402,60 @@ def render_lsf(folder: Path, config: dict[str, Any], profile_name: str, resume: 
     return destination
 
 
-def submit(folder: Path, config: dict[str, Any], profile: str, resume: bool, dry_run: bool) -> None:
-    script = render_lsf(folder, config, profile, resume)
-    print(f"Generated {script.name}")
+def submit_lsf(folder: Path, script: Path, dependency: str | None = None, dry_run: bool = False) -> str | None:
     if dry_run:
         print(script.read_text(encoding="utf-8"))
-        return
+        return None
     bsub = shutil.which("bsub")
     if not bsub:
         raise ConfigError("bsub was not found. Submit from Triton or use --dry-run to inspect the generated script.")
-    completed = subprocess.run([bsub], cwd=folder, input=script.read_text(encoding="utf-8"), text=True, capture_output=True)
+    command = [bsub] + (["-w", dependency] if dependency else [])
+    completed = subprocess.run(command, cwd=folder, input=script.read_text(encoding="utf-8"), text=True, capture_output=True)
     print(completed.stdout, end="")
     if completed.returncode:
         print(completed.stderr, file=sys.stderr, end="")
         raise SystemExit(completed.returncode)
     match = re.search(r"Job <(\d+)>", completed.stdout)
-    append_log(folder, f"submitted profile={profile} resume={resume} script={script.name} jobid={match.group(1) if match else 'unknown'}")
+    return match.group(1) if match else None
+
+
+def render_analysis_lsf(folder: Path, config: dict[str, Any], profile_name: str) -> Path:
+    profile = load_profile(profile_name)
+    template = (ROOT / "hpc_profiles" / profile["analysis_template"]).read_text(encoding="utf-8")
+    job_stem = re.sub(r"[^a-z0-9._-]+", "_", folder.name.lower()).strip("_") or "pymacs_analysis"
+    command = shlex.join(analysis_command(config))
+    if config.get("analysis", {}).get("figurebook", True):
+        command += " && python 4PDF4MD.py"
+    values = {"job_name": f"{job_stem}_analysis", "workdir": str(folder.resolve()), "walltime": profile["analysis_walltime"],
+              "threads": int(config.get("analysis", {}).get("threads", profile["analysis_threads"])), "queue": profile["queue"],
+              "gromacs_module": profile["gromacs_module"], "gcc_module": profile["gcc_module"],
+              "conda_root": profile["conda_root"], "conda_env": profile["conda_env"], "command": command}
+    destination = folder / f"run_{job_stem}_analysis.lsf"
+    destination.write_text(template.format(**values), encoding="utf-8")
+    return destination
+
+
+def submit_analysis(folder: Path, config: dict[str, Any], profile: str, after_job: str | None, dry_run: bool) -> None:
+    if not config.get("analysis", {}).get("enabled", True):
+        raise ConfigError("Analysis is disabled in pymacs_run.json. Reconfigure or enable analysis before submitting.")
+    script = render_analysis_lsf(folder, config, profile)
+    print(f"Generated {script.name}")
+    jobid = submit_lsf(folder, script, f"done({after_job})" if after_job else None, dry_run)
+    if jobid:
+        append_log(folder, f"submitted analysis profile={profile} script={script.name} jobid={jobid} after={after_job or 'none'}")
+
+
+def submit(folder: Path, config: dict[str, Any], profile: str, resume: bool, dry_run: bool, with_analysis: bool = False) -> None:
+    script = render_lsf(folder, config, profile, resume)
+    print(f"Generated {script.name}")
+    jobid = submit_lsf(folder, script, dry_run=dry_run)
+    if jobid:
+        append_log(folder, f"submitted profile={profile} resume={resume} script={script.name} jobid={jobid}")
+        if with_analysis:
+            submit_analysis(folder, config, profile, jobid, dry_run=False)
+    elif with_analysis and dry_run:
+        print("\n--- Dependent analysis script ---")
+        submit_analysis(folder, config, profile, "MD_JOBID", dry_run=True)
 
 
 def status(folder: Path) -> None:
@@ -404,6 +480,12 @@ def main() -> None:
         command = subparsers.add_parser(name, help=help_text)
         command.add_argument("--profile", default="triton")
         command.add_argument("--dry-run", action="store_true")
+        if name == "submit":
+            command.add_argument("--with-analysis", action="store_true", help="Submit chunked Step 3/4 after successful MD.")
+    analysis_parser = subparsers.add_parser("submit-analysis", help="Render and submit the chunked Step 3/4 CPU job.")
+    analysis_parser.add_argument("--profile", default="triton")
+    analysis_parser.add_argument("--after", default=None, help="Run only after this LSF job succeeds.")
+    analysis_parser.add_argument("--dry-run", action="store_true")
     subparsers.add_parser("status", help="Show local setup/checkpoint status.")
     args = parser.parse_args()
     folder = Path.cwd()
@@ -417,7 +499,9 @@ def main() -> None:
         elif args.action == "setup":
             execute_setup(folder, config, args.dry_run)
         elif args.action in {"submit", "resume"}:
-            submit(folder, config, args.profile, args.action == "resume", args.dry_run)
+            submit(folder, config, args.profile, args.action == "resume", args.dry_run, getattr(args, "with_analysis", False))
+        elif args.action == "submit-analysis":
+            submit_analysis(folder, config, args.profile, args.after, args.dry_run)
         else:
             status(folder)
     except ConfigError as exc:

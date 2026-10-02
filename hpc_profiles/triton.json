@@ -1,6 +1,9 @@
 {
   "scheduler": "lsf",
   "template": "triton_gpu.lsf.tmpl",
+  "analysis_template": "triton_analysis.lsf.tmpl",
+  "analysis_walltime": "48:00",
+  "analysis_threads": 8,
   "queue": "normal",
   "walltime": "144:00",
   "threads": 16,
