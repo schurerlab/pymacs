@@ -83,6 +83,15 @@ class PyMACSRunTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('#BSUB -gpu "num=1"', result.stdout)
 
+    def test_ligand_simulation_command_carries_ligand_flags(self):
+        config = {
+            "setup": {"ligand": "LIG", "cofactors": "HEM"},
+            "simulation": {"mode": "ligand", "length_ns": 1, "threads": 16, "compute": "GPU"},
+        }
+        command = pymacs_run.simulation_command(config)
+        self.assertEqual(command[command.index("--ligand") + 1], "LIG")
+        self.assertEqual(command[command.index("--cofactors") + 1], "HEM")
+
 
 if __name__ == "__main__":
     unittest.main()

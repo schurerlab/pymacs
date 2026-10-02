@@ -252,10 +252,14 @@ def setup_command(folder: Path, config: dict[str, Any]) -> list[str]:
 
 
 def simulation_command(config: dict[str, Any], resume: bool = False) -> list[str]:
-    sim = config["simulation"]
+    sim, setup = config["simulation"], config["setup"]
     command = ["python", "2_AutomateGromacs_MPI.py", "--gmx-bin", "gmx_mpi", "--mode", sim["mode"],
                "--ns", str(sim["length_ns"]), "--compute", sim.get("compute", "GPU"),
                "--ntomp", str(sim.get("threads", 16)), "--external-mpi", "--headless"]
+    if sim["mode"] == "ligand":
+        command += ["--ligand", setup["ligand"]]
+        if setup.get("cofactors"):
+            command += ["--cofactors", setup["cofactors"]]
     if resume:
         command += ["--resume", "--production_only"]
     return command
