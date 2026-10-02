@@ -2,8 +2,9 @@ name: cgenff
 channels:
   - conda-forge
 dependencies:
-  # Portable for Triton's POWER9 / linux-ppc64le architecture.  GROMACS is
-  # supplied by Triton's module system, not by this Conda environment.
-  - python=3.10
+  # Triton's POWER9 / linux-ppc64le OpenMM build is available for Python 3.9.
+  # GROMACS is supplied by Triton's module system, not this environment.
+  - python=3.9
+  - openmm=7.6
   - numpy
   - networkx
