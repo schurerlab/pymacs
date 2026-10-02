@@ -1302,11 +1302,17 @@ run choices and can be reviewed or edited before execution.
 python pymacs_run.py validate
 ```
 
-For Triton, load GROMACS and activate the existing `cgenff` environment for
-the lightweight Step 1 preparation. Protein-protein and protein-peptide runs
-do not need CGenFF ligand parameterization.
+For Triton, load the cluster Miniconda module and create the native POWER9
+environments once per account. The standard workstation YAML files contain
+`linux-64` pins, so use the Triton-specific files instead. Protein-protein and
+protein-peptide runs do not need CGenFF ligand parameterization.
 
 ```bash
+module load miniconda3/25.3.1-1
+eval "$(${CONDA_EXE} shell.bash hook)"
+conda env create -f environment_triton_setup.yml
+conda env create -f environment_triton_analysis.yml
+
 module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
 conda activate cgenff
 python pymacs_run.py setup

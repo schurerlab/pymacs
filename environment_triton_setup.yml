@@ -1,0 +1,9 @@
+name: cgenff
+channels:
+  - conda-forge
+dependencies:
+  # Portable for Triton's POWER9 / linux-ppc64le architecture.  GROMACS is
+  # supplied by Triton's module system, not by this Conda environment.
+  - python=3.10
+  - numpy
+  - networkx

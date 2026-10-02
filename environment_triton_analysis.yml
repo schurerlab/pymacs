@@ -1,0 +1,22 @@
+name: mdanalysis
+channels:
+  - conda-forge
+dependencies:
+  # CPU analysis and figurebook dependencies.  Avoid workstation-specific
+  # linux-64/CUDA pins so Conda resolves native POWER9 packages on Triton.
+  - python=3.10
+  - biopython
+  - mdanalysis=2.6.1
+  - mdtraj
+  - matplotlib
+  - seaborn
+  - networkx
+  - numpy
+  - pandas
+  - pillow
+  - rdkit
+  - reportlab
+  - scikit-learn
+  - scipy
+  - svglib
+  - tqdm
