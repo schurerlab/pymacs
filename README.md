@@ -1315,6 +1315,8 @@ source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda env create -f environment_triton_setup.yml
 conda env create -f environment_triton_analysis.yml
 
+module purge
+module load gcc-runtime/13.4.0-none-none-gh6rpjx
 module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
 conda activate cgenff
 python pymacs_run.py setup
