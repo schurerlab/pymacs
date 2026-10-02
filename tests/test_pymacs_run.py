@@ -17,6 +17,7 @@ def write_config(folder: Path):
         "setup": {
             "mode": "protein",
             "chain_map": "A:Receptor,B:Peptide",
+            "keep_chains": "A,B",
             "remove_input_waters": True,
             "remove_input_ions": True,
             "box_type": "dodecahedron",
@@ -54,6 +55,7 @@ class PyMACSRunTests(unittest.TestCase):
             setup = pymacs_run.setup_command(folder, config)
             self.assertIn("protein", setup)
             self.assertIn("--chain-map", setup)
+            self.assertIn("--keep-chains", setup)
             command = pymacs_run.simulation_command(config)
             self.assertEqual(command[command.index("--mode") + 1], "peptide")
             self.assertIn("--external-mpi", command)

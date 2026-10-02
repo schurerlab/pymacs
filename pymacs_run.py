@@ -134,10 +134,19 @@ def configure(folder: Path) -> None:
             ("biological", "RNA/DNA/protein biological assembly (advanced)"),
         ],
     )
+    selected_chains = chains[:]
+    if len(chains) > 1 and not ask_yes_no("Keep all detected polymer chains", True):
+        while True:
+            raw_chains = ask("Chains to retain (comma-separated IDs)", ",".join(chains))
+            selected_chains = [item.strip() for item in raw_chains.split(",") if item.strip()]
+            unknown = sorted(set(selected_chains) - set(chains))
+            if selected_chains and not unknown:
+                break
+            print(f"Use one or more detected chain IDs only: {', '.join(chains)}")
     chain_map = ""
-    if chains:
+    if selected_chains:
         names = []
-        for chain in chains:
+        for chain in selected_chains:
             name = ask(f"Name for chain {chain}", chain)
             names.append(f"{chain}:{name}")
         chain_map = ",".join(names)
@@ -172,6 +181,7 @@ def configure(folder: Path) -> None:
         "setup": {
             "mode": "ligand" if system_type == "ligand" else "protein",
             "chain_map": chain_map or None,
+            "keep_chains": ",".join(selected_chains) if set(selected_chains) != set(chains) else None,
             "ligand": ligand or None,
             "cofactors": cofactors or None,
             "remove_input_waters": ask_yes_no("Remove crystallographic waters", True),
@@ -228,6 +238,8 @@ def setup_command(folder: Path, config: dict[str, Any]) -> list[str]:
                "--box-type", setup["box_type"], "--box-distance", str(setup["box_distance_nm"])]
     if setup.get("chain_map"):
         command += ["--chain-map", setup["chain_map"]]
+    if setup.get("keep_chains"):
+        command += ["--keep-chains", setup["keep_chains"]]
     if setup.get("ligand"):
         command += ["--ligand", setup["ligand"]]
     if setup.get("cofactors"):

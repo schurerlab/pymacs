@@ -1292,11 +1292,11 @@ the copied PyMACS files:
 python pymacs_run.py configure
 ```
 
-The short Q&A detects PDB chains and non-water components, asks whether the
-system is protein-protein, protein-peptide, protein-ligand, or biological,
-and offers numbered box choices. It writes `pymacs_run.json` in the same
-folder. This file is the permanent record of the run choices and can be
-reviewed or edited before execution.
+The short Q&A detects PDB chains and non-water components, asks which chains
+to retain, asks whether the system is protein-protein, protein-peptide,
+protein-ligand, or biological, and offers numbered box choices. It writes
+`pymacs_run.json` in the same folder. This file is the permanent record of the
+run choices and can be reviewed or edited before execution.
 
 ```bash
 python pymacs_run.py validate
