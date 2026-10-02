@@ -1312,6 +1312,7 @@ parameterization.
 
 ```bash
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
+conda init bash
 conda env create -f environment_triton_setup.yml
 conda env create -f environment_triton_analysis.yml
 
