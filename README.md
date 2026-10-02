@@ -1302,14 +1302,16 @@ run choices and can be reviewed or edited before execution.
 python pymacs_run.py validate
 ```
 
-For Triton, load the cluster Miniconda module and create the native POWER9
-environments once per account. The standard workstation YAML files contain
-`linux-64` pins, so use the Triton-specific files instead. Protein-protein and
-protein-peptide runs do not need CGenFF ligand parameterization.
+For Triton, install Miniforge once in your home directory and create the native
+POWER9 environments once per account. Miniforge includes the fast libmamba
+solver; the cluster Miniconda module uses Conda's legacy solver and can take a
+very long time to resolve these environments. The standard workstation YAML
+files contain `linux-64` pins, so use the Triton-specific files instead.
+Protein-protein and protein-peptide runs do not need CGenFF ligand
+parameterization.
 
 ```bash
-module load miniconda3/25.3.1-1
-eval "$(${CONDA_EXE} shell.bash hook)"
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
 conda env create -f environment_triton_setup.yml
 conda env create -f environment_triton_analysis.yml
 
