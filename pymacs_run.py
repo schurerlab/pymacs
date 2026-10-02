@@ -375,6 +375,11 @@ def load_profile(name: str) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def resolved_conda_root(profile: dict[str, Any]) -> str:
+    """Resolve the submitting user's Conda path before LSF changes $HOME."""
+    return os.path.expanduser(os.path.expandvars(str(profile["conda_root"])))
+
+
 def render_lsf(folder: Path, config: dict[str, Any], profile_name: str, resume: bool) -> Path:
     profile = load_profile(profile_name)
     if profile.get("scheduler") != "lsf":
@@ -394,7 +399,7 @@ def render_lsf(folder: Path, config: dict[str, Any], profile_name: str, resume: 
         "project": profile.get("project", "brd"),
         "gromacs_module": profile["gromacs_module"],
         "gcc_module": profile["gcc_module"],
-        "conda_root": profile["conda_root"],
+        "conda_root": resolved_conda_root(profile),
         "conda_env": profile["conda_env"],
         "command": shlex.join(simulation_command(config, resume=resume)),
     }
@@ -430,7 +435,7 @@ def render_analysis_lsf(folder: Path, config: dict[str, Any], profile_name: str)
     values = {"job_name": f"{job_stem}_analysis", "workdir": str(folder.resolve()), "walltime": profile["analysis_walltime"],
               "threads": int(config.get("analysis", {}).get("threads", profile["analysis_threads"])), "queue": profile["queue"], "project": profile.get("project", "brd"),
               "gromacs_module": profile["gromacs_module"], "gcc_module": profile["gcc_module"],
-              "conda_root": profile["conda_root"], "conda_env": profile["conda_env"], "command": command}
+              "conda_root": resolved_conda_root(profile), "conda_env": profile["conda_env"], "command": command}
     destination = folder / f"run_{job_stem}_analysis.lsf"
     destination.write_text(template.format(**values), encoding="utf-8")
     return destination
