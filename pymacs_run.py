@@ -496,6 +496,9 @@ def main() -> None:
         config = load_config(folder)
         if args.action == "validate":
             print(f"Configuration is valid: {config_path(folder)}")
+            print("\nNext: run PyMACS Step 1 setup:")
+            print("  python pymacs_run.py setup")
+            print("\nOn Triton, activate the cgenff environment and load gmx_mpi first.")
         elif args.action == "setup":
             execute_setup(folder, config, args.dry_run)
         elif args.action in {"submit", "resume"}:

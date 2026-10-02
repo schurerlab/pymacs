@@ -94,6 +94,21 @@ class PyMACSRunTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('#BSUB -gpu "num=1"', result.stdout)
 
+    def test_cli_validate_prints_the_next_setup_command(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            (folder / "complex.pdb").write_text("ATOM\n", encoding="utf-8")
+            write_config(folder)
+            result = subprocess.run(
+                [sys.executable, str(REPO / "pymacs_run.py"), "validate"],
+                cwd=folder,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Next: run PyMACS Step 1 setup:", result.stdout)
+            self.assertIn("python pymacs_run.py setup", result.stdout)
+
     def test_ligand_simulation_command_carries_ligand_flags(self):
         config = {
             "setup": {"ligand": "LIG", "cofactors": "HEM"},
