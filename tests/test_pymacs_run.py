@@ -151,8 +151,9 @@ class PyMACSRunTests(unittest.TestCase):
                 "ATOM      1  N   ALA A   1      0.000   0.000   0.000  1.00  0.00           N\n",
                 encoding="utf-8",
             )
-            answers = iter(["1", "Receptor", "DR7", "", "1.0", "10", "https://kyle.example.ts.net", "~/.config/pymacs/cgenff-funnel.token"])
-            with patch("pymacs_run.ask", side_effect=lambda *_args, **_kwargs: next(answers)), \
+            answers = iter(["1", "Receptor", "DR7", "", "1.0", "10"])
+            with patch.dict("os.environ", {"PYMACS_CGENFF_FUNNEL_URL": "https://kyle.example.ts.net", "PYMACS_CGENFF_TOKEN_FILE": "~/.config/pymacs/cgenff-funnel.token"}), \
+                 patch("pymacs_run.ask", side_effect=lambda *_args, **_kwargs: next(answers)), \
                  patch("pymacs_run.ask_choice", side_effect=["ligand_funnel", "dodecahedron"]), \
                  patch("pymacs_run.ask_yes_no", side_effect=[False, True, True, True]):
                 pymacs_run.configure(folder)

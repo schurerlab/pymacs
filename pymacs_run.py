@@ -196,6 +196,7 @@ def configure(folder: Path) -> None:
         chain_map = ",".join(names)
 
     ligand = cofactors = ""
+    funnel_url = funnel_token_file = None
     if system_type in {"ligand", "ligand_funnel"}:
         if hetero:
             print(f"Detected possible ligand residues: {', '.join(hetero)}")
@@ -203,6 +204,17 @@ def configure(folder: Path) -> None:
         if not ligand:
             raise ConfigError("A ligand residue code is required for a ligand workflow.")
         cofactors = ask("Optional retained cofactors (comma-separated; press Enter for none)").upper()
+        if system_type == "ligand_funnel":
+            funnel_url = os.environ.get("PYMACS_CGENFF_FUNNEL_URL")
+            funnel_token_file = os.environ.get(
+                "PYMACS_CGENFF_TOKEN_FILE", "~/.config/pymacs/cgenff-funnel.token"
+            )
+            if funnel_url:
+                print("🌐 Using Kyle CGenFF Funnel URL from PYMACS_CGENFF_FUNNEL_URL.")
+                print("🔐 Using CGenFF token-file path from PYMACS_CGENFF_TOKEN_FILE/default.")
+            else:
+                funnel_url = ask("Kyle CGenFF Funnel URL")
+                funnel_token_file = ask("Triton CGenFF token file", funnel_token_file)
 
     box_type = ask_choice(
         "Choose simulation box shape:",
@@ -251,14 +263,8 @@ def configure(folder: Path) -> None:
             "box_type": box_type,
             "box_distance_nm": distance,
             "cgenff_backend": "funnel" if system_type == "ligand_funnel" else "local",
-            "cgenff_funnel_url": (
-                ask("Kyle CGenFF Funnel URL", os.environ.get("PYMACS_CGENFF_FUNNEL_URL"))
-                if system_type == "ligand_funnel" else None
-            ),
-            "cgenff_token_file": (
-                ask("Triton CGenFF token file", os.environ.get("PYMACS_CGENFF_TOKEN_FILE", "~/.config/pymacs/cgenff-funnel.token"))
-                if system_type == "ligand_funnel" else None
-            ),
+            "cgenff_funnel_url": funnel_url,
+            "cgenff_token_file": funnel_token_file,
         },
         "simulation": {
             "mode": "ligand" if system_type == "ligand_funnel" else system_type,
@@ -299,9 +305,11 @@ def validate_config(config: dict[str, Any], folder: Path) -> None:
     if backend not in {"local", "funnel"}:
         raise ConfigError("setup.cgenff_backend must be local or funnel.")
     if backend == "funnel":
-        if not str(setup.get("cgenff_funnel_url") or "").startswith("https://"):
+        funnel_url = setup.get("cgenff_funnel_url") or os.environ.get("PYMACS_CGENFF_FUNNEL_URL")
+        if not str(funnel_url or "").startswith("https://"):
             raise ConfigError("A remote CGenFF workflow requires an HTTPS Kyle Funnel URL.")
-        if not str(setup.get("cgenff_token_file") or "").strip():
+        token_file = setup.get("cgenff_token_file") or os.environ.get("PYMACS_CGENFF_TOKEN_FILE")
+        if not str(token_file or "").strip():
             raise ConfigError("A remote CGenFF workflow requires a token file path.")
     if setup.get("box_type") not in {"cubic", "dodecahedron", "octahedron", "triclinic"}:
         raise ConfigError("setup.box_type is not a supported GROMACS box type.")
@@ -325,8 +333,10 @@ def setup_command(folder: Path, config: dict[str, Any]) -> list[str]:
     if setup.get("cofactors"):
         command += ["--cofactors", setup["cofactors"]]
     if setup.get("cgenff_backend") == "funnel":
-        command += ["--cgenff-funnel-url", setup["cgenff_funnel_url"],
-                    "--cgenff-token-file", setup["cgenff_token_file"]]
+        funnel_url = setup.get("cgenff_funnel_url") or os.environ.get("PYMACS_CGENFF_FUNNEL_URL")
+        token_file = setup.get("cgenff_token_file") or os.environ.get("PYMACS_CGENFF_TOKEN_FILE")
+        command += ["--cgenff-funnel-url", funnel_url,
+                    "--cgenff-token-file", token_file]
     if setup.get("remove_input_waters"):
         command.append("--remove-input-waters")
     if setup.get("remove_input_ions"):

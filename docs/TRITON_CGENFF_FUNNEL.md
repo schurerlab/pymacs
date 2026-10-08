@@ -76,10 +76,19 @@ unset token
 chmod 600 ~/.config/pymacs/cgenff-funnel.token
 ```
 
-During `python pymacs_run.py configure`, choose option 5 and provide:
+Add the stable Funnel address and non-secret token-file path to Triton's
+`~/.bashrc` once. The URL is deliberately kept out of the PyMACS source code
+and is supplied automatically to every new run folder:
 
-- the Funnel HTTPS URL;
-- `~/.config/pymacs/cgenff-funnel.token`.
+```bash
+export PYMACS_CGENFF_FUNNEL_URL="https://kyle.rove-vernier.ts.net:8443"
+export PYMACS_CGENFF_TOKEN_FILE="$HOME/.config/pymacs/cgenff-funnel.token"
+```
+
+Open a new shell or run `source ~/.bashrc` after adding these exports.
+
+During `python pymacs_run.py configure`, choose option 5. With the exports
+above, PyMACS detects them and does not ask for a URL or token-file path.
 
 The path is saved in `pymacs_run.json`; the token contents are not. Then use
 the normal commands:
