@@ -155,12 +155,13 @@ class PyMACSRunTests(unittest.TestCase):
             with patch.dict("os.environ", {"PYMACS_CGENFF_FUNNEL_URL": "https://kyle.example.ts.net", "PYMACS_CGENFF_TOKEN_FILE": "~/.config/pymacs/cgenff-funnel.token"}), \
                  patch("pymacs_run.ask", side_effect=lambda *_args, **_kwargs: next(answers)), \
                  patch("pymacs_run.ask_choice", side_effect=["ligand_funnel", "dodecahedron"]), \
-                 patch("pymacs_run.ask_yes_no", side_effect=[False, True, True, True]):
+                 patch("pymacs_run.ask_yes_no", side_effect=[False, True, True, True, True]):
                 pymacs_run.configure(folder)
             config = json.loads((folder / "pymacs_run.json").read_text(encoding="utf-8"))
             self.assertEqual(config["setup"]["cgenff_backend"], "funnel")
             self.assertEqual(config["setup"]["mode"], "ligand")
             self.assertEqual(config["simulation"]["mode"], "ligand")
+            self.assertTrue(config["setup"]["remove_input_solvents"])
 
 
 if __name__ == "__main__":

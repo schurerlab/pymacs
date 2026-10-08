@@ -260,6 +260,9 @@ def configure(folder: Path) -> None:
             "cofactors": cofactors or None,
             "remove_input_waters": ask_yes_no("Remove crystallographic waters", True),
             "remove_input_ions": ask_yes_no("Remove deposited ions", True),
+            "remove_input_solvents": ask_yes_no(
+                "Remove common solvents/buffers (for example phosphate or sulfate)", True
+            ),
             "box_type": box_type,
             "box_distance_nm": distance,
             "cgenff_backend": "funnel" if system_type == "ligand_funnel" else "local",
@@ -341,6 +344,8 @@ def setup_command(folder: Path, config: dict[str, Any]) -> list[str]:
         command.append("--remove-input-waters")
     if setup.get("remove_input_ions"):
         command.append("--remove-input-ions")
+    if setup.get("remove_input_solvents"):
+        command.append("--remove-input-solvents")
     return command
 
 
