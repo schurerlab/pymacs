@@ -52,6 +52,12 @@ import os
 import math
 import numpy as np
 import networkx as nx
+
+# NetworkX 3 removed the legacy ``Graph.node`` alias used throughout this
+# converter.  Keep the established converter code compatible with both the
+# NetworkX 2.x environment historically used by PyMACS and current 3.x builds.
+if not hasattr(nx.Graph, "node"):
+	nx.Graph.node = property(lambda graph: graph._node)
 #=================================================================================================================
 def check_versions(str_filename,ffdoc_filename):
 	ffver = 0	# CGenFF version in force field directory
@@ -987,18 +993,20 @@ if(len(sys.argv) != 5):
 	print("Usage: RESNAME drug.mol2 drug.str charmm36.ff")
 	exit()
 
-#check for compatible NetworkX version
-if(float(nx.__version__) < 2.0):
+# Check for a compatible NetworkX major version.  ``float('3.2.1')`` is not a
+# valid version parser, and caused otherwise-valid Triton setups to stop.
+try:
+	networkx_major = int(str(nx.__version__).split(".", 1)[0])
+except (TypeError, ValueError):
+	networkx_major = 0
+if(networkx_major < 2):
 	print("Your NetworkX version is: ",nx.__version__)
-	print("This script requires a version in the 2.x series")
+	print("This script requires NetworkX 2.x or newer")
 	print("Your NetworkX package is incompatible with this conversion script and cannot be used.")
 	exit()
 else:
-	if(float(nx.__version__) > 2.3):
-		print("This script has been tested with NetworkX 2.3, and 2.4 is buggy.")
-		print("Please install version 2.3 for best performance:")
-		print("pip uninstall networkx")
-		print("pip install networkx==2.3")
+	if(networkx_major >= 3):
+		print("NetworkX 3.x detected; using PyMACS legacy Graph.node compatibility shim.")
 
 if(sys.version_info < (3,0)):
 	print("You are using a Python version in the 2.x series. This script requires Python 3.0 or higher.")
