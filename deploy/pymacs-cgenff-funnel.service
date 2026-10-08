@@ -1,0 +1,17 @@
+[Unit]
+Description=PyMACS token-gated CGenFF Funnel service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/pymacs-cgenff-funnel
+ExecStart=%h/.local/share/pymacs-cgenff-funnel/conda-env/bin/python %h/.local/share/pymacs-cgenff-funnel/cgenff_funnel_service.py --token-file %h/.config/pymacs/cgenff-funnel.token --cgenff-exec %h/silcsbio.2025.1/cgenff/cgenff --port 8787
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

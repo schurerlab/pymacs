@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pymacs_run
 
@@ -122,6 +123,43 @@ class PyMACSRunTests(unittest.TestCase):
         command = pymacs_run.simulation_command(config)
         self.assertEqual(command[command.index("--ligand") + 1], "LIG")
         self.assertEqual(command[command.index("--cofactors") + 1], "HEM")
+
+    def test_funnel_ligand_setup_command_keeps_token_out_of_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            (folder / "complex.pdb").write_text("ATOM\n", encoding="utf-8")
+            (folder / "1_AutomateGromacs_MPI.py").write_text("", encoding="utf-8")
+            config = {
+                "input": "complex.pdb",
+                "setup": {
+                    "mode": "ligand", "ligand": "DR7", "box_type": "dodecahedron", "box_distance_nm": 1.0,
+                    "cgenff_backend": "funnel", "cgenff_funnel_url": "https://kyle.example.ts.net",
+                    "cgenff_token_file": "~/.config/pymacs/cgenff-funnel.token",
+                },
+                "simulation": {"mode": "ligand", "length_ns": 1, "threads": 16, "compute": "GPU"},
+            }
+            pymacs_run.validate_config(config, folder)
+            command = pymacs_run.setup_command(folder, config)
+            self.assertIn("--cgenff-funnel-url", command)
+            self.assertIn("--cgenff-token-file", command)
+            self.assertNotIn("token-value", " ".join(command))
+
+    def test_configure_option_five_writes_funnel_backend(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            (folder / "complex.pdb").write_text(
+                "ATOM      1  N   ALA A   1      0.000   0.000   0.000  1.00  0.00           N\n",
+                encoding="utf-8",
+            )
+            answers = iter(["1", "Receptor", "DR7", "", "1.0", "10", "https://kyle.example.ts.net", "~/.config/pymacs/cgenff-funnel.token"])
+            with patch("pymacs_run.ask", side_effect=lambda *_args, **_kwargs: next(answers)), \
+                 patch("pymacs_run.ask_choice", side_effect=["ligand_funnel", "dodecahedron"]), \
+                 patch("pymacs_run.ask_yes_no", side_effect=[False, True, True, True]):
+                pymacs_run.configure(folder)
+            config = json.loads((folder / "pymacs_run.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["setup"]["cgenff_backend"], "funnel")
+            self.assertEqual(config["setup"]["mode"], "ligand")
+            self.assertEqual(config["simulation"]["mode"], "ligand")
 
 
 if __name__ == "__main__":

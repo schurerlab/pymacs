@@ -160,6 +160,7 @@ import re
 
 
 import argparse
+from pymacs_cgenff_funnel import CGenFFFunnelError, parameterize_mol2
 from pymacs_component_utils import (
     apply_chain_type_overrides,
     build_component_selection_maps,
@@ -282,6 +283,9 @@ parser.add_argument("--drop-chains", type=str, help='Comma-separated polymer cha
 parser.add_argument("--fetch-pdb", type=str, help="Fetch a structure directly from the RCSB PDB before setup (e.g. 9UWJ).")
 parser.add_argument("--fetch-format", choices=["pdb", "cif", "mmcif"], default="cif", help="File format to download when using --fetch-pdb or the interactive fetch option.")
 parser.add_argument("--ligand", "-l", type=str, help="Ligand residue code used for non-covalent ligand workflows.")
+parser.add_argument("--cgenff-funnel-url", type=str, default=None, help="HTTPS Kyle Funnel endpoint used instead of a local SILCSBio CGenFF executable.")
+parser.add_argument("--cgenff-token-file", type=str, default=None, help="Path to the Triton-only Funnel API token (never stored in run metadata).")
+parser.add_argument("--cgenff-funnel-timeout", type=int, default=180, help="Maximum seconds to wait for the remote CGenFF request.")
 parser.add_argument("--cofactors", type=str, default=None, help="Comma-separated retained non-protein components (e.g. CLR,HEM).")
 parser.add_argument("--auto-keep-hetero", action="store_true", help="When multiple ligand-like residues are detected, keep non-primary residues as cofactors automatically.")
 parser.add_argument("--component-mode", choices=["selected", "all", "none"], default="selected", help="Retained-component mode: selected keeps --ligand plus --cofactors, all keeps all detected ligand-like residues, none disables retained non-protein components unless explicitly requested.")
@@ -345,6 +349,8 @@ parser.add_argument(
 args = parser.parse_args()
 if args.box_distance <= 0:
     parser.error("--box-distance must be greater than 0.0 nm.")
+if bool(args.cgenff_funnel_url) != bool(args.cgenff_token_file):
+    parser.error("--cgenff-funnel-url and --cgenff-token-file must be supplied together.")
 if args.keep_chains and args.drop_chains:
     parser.error("--keep-chains and --drop-chains cannot be used together.")
 if args.pdb and args.fetch_pdb:
@@ -3188,9 +3194,11 @@ def build_cgenff_inputs_realtime(directory, ligand_code, source_complex_pdb):
 
     Returns (mol2_file, str_file) or (None, None).
     """
-    cgenff_exec, prm36, silcs_home = ensure_silcsbio_env()
-    if not cgenff_exec:
-        return None, None
+    cgenff_exec = None
+    if not args.cgenff_funnel_url:
+        cgenff_exec, _, _ = ensure_silcsbio_env()
+        if not cgenff_exec:
+            return None, None
 
     ligand_code = ligand_code.strip().upper()
     base = ligand_code.lower()
@@ -3324,29 +3332,47 @@ quit
     cgenff_stderr  = os.path.join(directory, f"{ligand_code}.cgenff.stderr.log")
     cgenff_verbose = os.path.join(directory, f"{ligand_code}.cgenff.verbose.log")
 
-    print("\n🧪 Running SILCSBio CGenFF parameterization...")
-    print(f"⚙️ Command: {cgenff_exec} {os.path.basename(mol2)}")
     print(f"🧾 Output .str: {os.path.basename(strout)}")
-
-    rc, out_txt, err_txt = run_and_log(
-        [cgenff_exec, os.path.basename(mol2)],
-        cwd=directory,
-        stdout_path=strout,
-        stderr_path=cgenff_stderr
-    )
-
-    if ("skipped molecule" in err_txt.lower()) or ("unfulfilled valence" in err_txt.lower()) or rc != 0:
-        print("⚠️ CGenFF reported a chemistry/connectivity problem.")
-        print(f"   See: {os.path.basename(cgenff_stderr)}")
-        print("🔎 Running verbose diagnostics (-v)...")
-        run_and_log(
-            [cgenff_exec, "-v", os.path.basename(mol2)],
+    if args.cgenff_funnel_url:
+        print("\n🌐 Sending hydrogenated MOL2 to the Kyle CGenFF Funnel...")
+        try:
+            stream_text, service_log = parameterize_mol2(
+                endpoint=args.cgenff_funnel_url,
+                token_file=args.cgenff_token_file,
+                ligand_code=ligand_code,
+                mol2_path=mol2,
+                timeout_seconds=args.cgenff_funnel_timeout,
+            )
+        except CGenFFFunnelError as exc:
+            with open(cgenff_stderr, "w") as handle:
+                handle.write(f"Remote CGenFF failed: {exc}\n")
+            print(f"❌ Kyle CGenFF Funnel failed: {exc}")
+            return None, None
+        with open(strout, "w") as handle:
+            handle.write(stream_text)
+        with open(cgenff_stderr, "w") as handle:
+            handle.write(service_log)
+    else:
+        print("\n🧪 Running local SILCSBio CGenFF parameterization...")
+        print(f"⚙️ Command: {cgenff_exec} {os.path.basename(mol2)}")
+        rc, out_txt, err_txt = run_and_log(
+            [cgenff_exec, os.path.basename(mol2)],
             cwd=directory,
-            stdout_path=cgenff_verbose,
+            stdout_path=strout,
             stderr_path=cgenff_stderr
         )
-        print(f"🧾 Verbose log: {os.path.basename(cgenff_verbose)}")
-        return None, None
+        if ("skipped molecule" in err_txt.lower()) or ("unfulfilled valence" in err_txt.lower()) or rc != 0:
+            print("⚠️ CGenFF reported a chemistry/connectivity problem.")
+            print(f"   See: {os.path.basename(cgenff_stderr)}")
+            print("🔎 Running verbose diagnostics (-v)...")
+            run_and_log(
+                [cgenff_exec, "-v", os.path.basename(mol2)],
+                cwd=directory,
+                stdout_path=cgenff_verbose,
+                stderr_path=cgenff_stderr
+            )
+            print(f"🧾 Verbose log: {os.path.basename(cgenff_verbose)}")
+            return None, None
 
     if not os.path.exists(strout) or os.path.getsize(strout) == 0:
         print("❌ CGenFF produced an EMPTY .str file.")

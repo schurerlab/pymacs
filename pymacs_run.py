@@ -175,6 +175,7 @@ def configure(folder: Path) -> None:
             ("peptide", "Protein–peptide complex"),
             ("ligand", "Protein–small-molecule complex"),
             ("biological", "RNA/DNA/protein biological assembly (advanced)"),
+            ("ligand_funnel", "Protein–small-molecule complex — remote CGenFF via Kyle Funnel"),
         ],
     )
     selected_chains = chains[:]
@@ -195,7 +196,7 @@ def configure(folder: Path) -> None:
         chain_map = ",".join(names)
 
     ligand = cofactors = ""
-    if system_type == "ligand":
+    if system_type in {"ligand", "ligand_funnel"}:
         if hetero:
             print(f"Detected possible ligand residues: {', '.join(hetero)}")
         ligand = ask("Ligand residue code (for example LIG)").upper()
@@ -231,7 +232,7 @@ def configure(folder: Path) -> None:
             analysis["interface_min_contact_fraction"] = float(ask("Minimum interface contact fraction", "0.10"))
             analysis["interface_frame_step"] = int(ask("Analyze every Nth interface frame", "1"))
             analysis["interface_max_edges"] = int(ask("Maximum interface-network edges", "100"))
-        elif system_type == "ligand":
+        elif system_type in {"ligand", "ligand_funnel"}:
             analysis["pocket_cutoff"] = float(ask("Ligand pocket cutoff in Å", "5.0"))
             analysis["contact_cutoff"] = float(ask("Ligand contact cutoff in Å", "4.0"))
             analysis["min_contact_fraction"] = float(ask("Minimum persistent-contact fraction", "0.10"))
@@ -240,7 +241,7 @@ def configure(folder: Path) -> None:
     config = {
         "input": structure.name,
         "setup": {
-            "mode": "ligand" if system_type == "ligand" else "protein",
+            "mode": "ligand" if system_type in {"ligand", "ligand_funnel"} else "protein",
             "chain_map": chain_map or None,
             "keep_chains": ",".join(selected_chains) if set(selected_chains) != set(chains) else None,
             "ligand": ligand or None,
@@ -249,9 +250,18 @@ def configure(folder: Path) -> None:
             "remove_input_ions": ask_yes_no("Remove deposited ions", True),
             "box_type": box_type,
             "box_distance_nm": distance,
+            "cgenff_backend": "funnel" if system_type == "ligand_funnel" else "local",
+            "cgenff_funnel_url": (
+                ask("Kyle CGenFF Funnel URL", os.environ.get("PYMACS_CGENFF_FUNNEL_URL"))
+                if system_type == "ligand_funnel" else None
+            ),
+            "cgenff_token_file": (
+                ask("Triton CGenFF token file", os.environ.get("PYMACS_CGENFF_TOKEN_FILE", "~/.config/pymacs/cgenff-funnel.token"))
+                if system_type == "ligand_funnel" else None
+            ),
         },
         "simulation": {
-            "mode": system_type,
+            "mode": "ligand" if system_type == "ligand_funnel" else system_type,
             "length_ns": length,
             "threads": 16,
             "compute": "GPU",
@@ -281,10 +291,18 @@ def validate_config(config: dict[str, Any], folder: Path) -> None:
     setup, simulation = config["setup"], config["simulation"]
     if setup.get("mode") not in {"protein", "ligand"}:
         raise ConfigError("setup.mode must be protein or ligand.")
-    if simulation.get("mode") not in {"protein", "peptide", "ligand", "biological"}:
+    if simulation.get("mode") not in {"protein", "peptide", "ligand", "biological", "ligand_funnel"}:
         raise ConfigError("simulation.mode is not supported.")
     if setup.get("mode") == "ligand" and not setup.get("ligand"):
         raise ConfigError("A ligand workflow requires setup.ligand.")
+    backend = setup.get("cgenff_backend", "local")
+    if backend not in {"local", "funnel"}:
+        raise ConfigError("setup.cgenff_backend must be local or funnel.")
+    if backend == "funnel":
+        if not str(setup.get("cgenff_funnel_url") or "").startswith("https://"):
+            raise ConfigError("A remote CGenFF workflow requires an HTTPS Kyle Funnel URL.")
+        if not str(setup.get("cgenff_token_file") or "").strip():
+            raise ConfigError("A remote CGenFF workflow requires a token file path.")
     if setup.get("box_type") not in {"cubic", "dodecahedron", "octahedron", "triclinic"}:
         raise ConfigError("setup.box_type is not a supported GROMACS box type.")
     if float(setup.get("box_distance_nm", 0)) <= 0 or float(simulation.get("length_ns", 0)) <= 0:
@@ -306,6 +324,9 @@ def setup_command(folder: Path, config: dict[str, Any]) -> list[str]:
         command += ["--ligand", setup["ligand"]]
     if setup.get("cofactors"):
         command += ["--cofactors", setup["cofactors"]]
+    if setup.get("cgenff_backend") == "funnel":
+        command += ["--cgenff-funnel-url", setup["cgenff_funnel_url"],
+                    "--cgenff-token-file", setup["cgenff_token_file"]]
     if setup.get("remove_input_waters"):
         command.append("--remove-input-waters")
     if setup.get("remove_input_ions"):
