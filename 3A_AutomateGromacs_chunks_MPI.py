@@ -3890,9 +3890,9 @@ else:
         event_polygons = []
         event_colors = []
         half_height = BAR_HEIGHT / 2
-        for residue, itype, start_time, end_time in events.itertuples(
-            index=False, name=None
-        ):
+        for residue, itype, start_time, end_time in events[
+            ["Residue", "Type", "Start", "End"]
+        ].itertuples(index=False, name=None):
             y = res_to_y[residue]
             event_polygons.append([
                 (start_time, y - half_height),
