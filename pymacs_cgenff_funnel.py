@@ -11,13 +11,14 @@ import base64
 import json
 import re
 from pathlib import Path
-from typing import Final
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-MAX_MOL2_BYTES: Final = 2 * 1024 * 1024
-LIGAND_CODE_RE: Final = re.compile(r"^[A-Z0-9]{1,4}$")
+# Do not use typing.Final here: Kyle's established CGenFF environment still
+# runs Python 3.7, where Final is unavailable from the standard typing module.
+MAX_MOL2_BYTES = 2 * 1024 * 1024
+LIGAND_CODE_RE = re.compile(r"^[A-Z0-9]{1,4}$")
 
 
 class CGenFFFunnelError(RuntimeError):
