@@ -913,6 +913,42 @@ conda env create -f environment_cgenff.yml
 conda env create -f environment_mdanalysis.yml
 ```
 
+### Leela: micromamba environments
+
+Leela users do not need Conda. From a fresh PyMACS folder, use the bundled
+micromamba/mamba installer instead:
+
+```bash
+bash setup_leela_micromamba.sh
+source "$HOME/.bashrc"
+pymacs-leela
+```
+
+This creates two lightweight environments: `pymacs-leela-setup` for Steps 1–2
+and `pymacs-leela-analysis` for CPU analysis. They deliberately do **not**
+install a Conda GROMACS build: Leela's supported CUDA-11.5 GROMACS build is
+kept outside the environments and is selected by `pymacs-leela`. (OpenMM may
+bring its own supporting CUDA runtime, but PyMACS does not use it for GROMACS
+MD.) See the [Leela guide](https://www.pymacs.com/leela) for tmux and GPU
+instructions.
+
+### Leela: shared administrator installation
+
+An administrator can make the same two environments and CUDA-11.5 GROMACS
+available to every Leela user without placing them in an individual's home
+directory. First build the environments once as the administrator, then run:
+
+```bash
+sudo bash install_leela_shared.sh
+```
+
+The bundled installer places the shared, root-controlled installation at
+`/data/pymacs` and adds `/etc/profile.d/pymacs-leela.sh`. Users can then open a
+new login shell and run `pymacs-leela` or `pymacs-leela-analysis`; they do not
+need Conda or a personal micromamba installation. Funnel URL/token files are
+intentionally never copied into the shared installation: authorized users keep
+those permission-restricted files in `~/.config/pymacs/`.
+
 Or use the helper script:
 
 ```bash

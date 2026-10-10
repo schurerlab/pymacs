@@ -1,0 +1,24 @@
+name: pymacs-leela-analysis
+channels:
+  - conda-forge
+dependencies:
+  # CPU analysis only: do not pull CuPy or CUDA packages onto Leela.
+  - python=3.11
+  - biopython
+  - mdanalysis=2.7
+  - mdtraj
+  - matplotlib
+  - seaborn
+  - networkx
+  - numpy
+  - pandas
+  - pillow
+  - rdkit
+  - reportlab
+  - scikit-learn
+  - scipy
+  - svglib
+  - tqdm
+  - prolif
+  - pyedr
+  - plotly

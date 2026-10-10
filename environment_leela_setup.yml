@@ -1,0 +1,15 @@
+name: pymacs-leela-setup
+channels:
+  - conda-forge
+dependencies:
+  # GROMACS is intentionally not included. Leela uses its separately compiled
+  # CUDA-11.5 build; a Conda GROMACS package can pull an incompatible CUDA runtime.
+  - python=3.10
+  - biopython
+  - networkx
+  - numpy
+  - pandas
+  - pdbfixer
+  - openmm
+  - openbabel
+  - requests
