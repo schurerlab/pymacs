@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from pymacs_component_utils import load_component_registry
 from pymacs_analysis_cache import record_stage_completion
+from pymacs_native_contacts import contact_fraction, reference_contact_pairs
 
 PLOTTING_IMPORT_ERROR = None
 try:
@@ -201,6 +202,7 @@ DESCRIPTION_KEYS = {
     "water_bridges": "protac_water_bridges",
     "water_bridge_frequency": "protac_water_bridge_frequency",
     "water_bridge_network": "protac_water_bridge_network",
+    "native_contact_q": "protac_native_contact_q",
 }
 
 GMX_BIN = None
@@ -530,6 +532,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atomindex", default="atomIndex.txt", help="atomIndex file with ordered protein atom ranges (default: atomIndex.txt).")
     parser.add_argument("--outdir", default="Analysis_Results/PROTAC", help="Output directory root (default: Analysis_Results/PROTAC).")
     parser.add_argument("--distance-cutoff", type=float, default=4.0, help="Protein-ligand contact cutoff in angstroms (default: 4.0).")
+    parser.add_argument("--qx-contact-cutoff", type=float, default=4.5, help="Heavy-atom cutoff in angstroms for reference-defined native-contact retention Q (default: 4.5).")
+    parser.add_argument("--skip-qx", action="store_true", help="Skip reference-defined native-contact retention Q calculation.")
     parser.add_argument("--headless", action="store_true", help="Disable interactive prompts and fail clearly when detection is ambiguous.")
     parser.add_argument("--start-frame", type=int, default=None, help="First frame index to analyze for trajectory-scan analyses.")
     parser.add_argument("--end-frame", type=int, default=None, help="Last frame index (exclusive) to analyze for trajectory-scan analyses.")
@@ -2855,6 +2859,57 @@ def write_contact_csvs(
     role_summary.to_csv(qc_dir / "protac_contact_summary.csv", index=False)
 
 
+def run_native_contact_q(
+    universe: mda.Universe, protein: mda.AtomGroup, ligand: mda.AtomGroup,
+    frame_indices: Sequence[int], cutoff_angstrom: float, contacts_dir: Path,
+    ligand_code: str, entries: Sequence[dict], registry: FigureRegistry,
+) -> dict:
+    """Calculate reference-defined retained heavy-atom contacts, Q, for a modeled pose."""
+    ensure_plotting_available()
+    if not frame_indices:
+        raise ValueError("No sampled frames available for Q calculation.")
+    protein_heavy = protein.select_atoms("not name H*")
+    ligand_heavy = ligand.select_atoms("not name H*")
+    if protein_heavy.n_atoms == 0 or ligand_heavy.n_atoms == 0:
+        raise ValueError("Q calculation requires protein and ligand heavy atoms.")
+    reference_frame = int(frame_indices[0])
+    universe.trajectory[reference_frame]
+    native_pairs = reference_contact_pairs(ligand_heavy.positions.copy(), protein_heavy.positions.copy(), cutoff_angstrom)
+    if len(native_pairs) == 0:
+        raise ValueError(f"No reference protein-ligand heavy-atom contacts within {cutoff_angstrom:.2f} Å.")
+    rows = []
+    for _, frame in iter_with_progress(frame_indices, "Computing native-contact retention Q"):
+        universe.trajectory[frame]
+        rows.append({
+            "Frame": int(frame), "Time_ps": float(universe.trajectory.time),
+            "Time_ns": float(universe.trajectory.time) / 1000.0,
+            "Q_native_contact_fraction": contact_fraction(ligand_heavy.positions, protein_heavy.positions, native_pairs, cutoff_angstrom),
+            "ReferenceFrame": reference_frame, "ReferenceType": "first_sampled_trajectory_frame",
+            "ContactCutoff_A": cutoff_angstrom, "NativeHeavyAtomContactPairs": int(len(native_pairs)),
+        })
+    q_df = pd.DataFrame(rows)
+    q_csv = contacts_dir / "native_contact_q.csv"
+    q_df.to_csv(q_csv, index=False)
+    summary_path = contacts_dir / "native_contact_q_summary.txt"
+    summary_path.write_text(
+        "Reference-defined native-contact retention Q\n"
+        f"Reference frame: {reference_frame} (first sampled trajectory frame)\n"
+        "Reference type: starting modeled configuration; not an experimental native structure\n"
+        f"Heavy-atom contact cutoff: {cutoff_angstrom:.2f} Å\nReference contact pairs: {len(native_pairs)}\n"
+        f"Mean Q: {q_df['Q_native_contact_fraction'].mean():.4f}\nFinal Q: {q_df['Q_native_contact_fraction'].iloc[-1]:.4f}\n",
+        encoding="utf-8",
+    )
+    plt.figure(figsize=(10, 5))
+    plt.plot(q_df["Time_ns"], q_df["Q_native_contact_fraction"], color="#005030", linewidth=2)
+    plt.ylim(0, 1.05); plt.xlabel("Time (ns)"); plt.ylabel("Q: retained reference contacts")
+    plt.title(f"{ligand_code} native-contact retention relative to the starting model"); plt.tight_layout()
+    q_plot = contacts_dir / "native_contact_q.png"
+    plt.savefig(q_plot, dpi=300); plt.close()
+    register_standard_figure(registry, q_plot, f"{ligand_code} native-contact retention Q", "native_contact_q", ligand_code, entries,
+                             "Fraction of starting-model protein-ligand heavy-atom contacts retained in each sampled frame.", 48)
+    return {"csv": q_csv, "plot": q_plot, "summary": summary_path, "native_pairs": len(native_pairs)}
+
+
 def run_contact_analysis(
     universe: mda.Universe,
     protein: mda.AtomGroup,
@@ -4223,6 +4278,18 @@ def main() -> int:
         args.contact_map_min_contact_fraction,
         args.contact_map_max_residues,
     )
+
+    if args.skip_qx:
+        log("Skipping native-contact retention Q (use without --skip-qx to enable).")
+    else:
+        try:
+            execute_stage(
+                runtime_profiler, "Native-contact retention Q", run_native_contact_q,
+                universe, protein, ligand, frame_indices, args.qx_contact_cutoff,
+                contacts_dir, ligand_setup["ligand_code"], entries, figure_registry,
+            )
+        except ValueError as exc:
+            log(f"⚠️ Skipping native-contact retention Q: {exc}")
 
     if args.analyze_water_bridges:
         raw_residue_records = execute_stage(

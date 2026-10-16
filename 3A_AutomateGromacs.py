@@ -157,6 +157,7 @@ from pymacs_analysis_cache import (
     record_stage_completion,
     validate_stage_cache,
 )
+from pymacs_native_contacts import contact_fraction, reference_contact_pairs
 
 
 
@@ -226,6 +227,14 @@ parser.add_argument(
 parser.add_argument(
     "--contact_cutoff", type=float, default=4.0,
     help="Contact cutoff distance in Å (default 4.0)."
+)
+parser.add_argument(
+    "--qx-contact-cutoff", type=float, default=4.5,
+    help="Heavy-atom cutoff in Å for reference-defined native-contact retention Q (default 4.5)."
+)
+parser.add_argument(
+    "--skip-qx", action="store_true",
+    help="Skip reference-defined native-contact retention Q calculation."
 )
 
 parser.add_argument(
@@ -3198,6 +3207,41 @@ else:
 
 
     # ============================================================
+    # Q is reference-defined native-contact retention, not experimental-pose similarity.
+    if args.skip_qx:
+        print("Native-contact retention Q skipped by request.")
+    elif pocket_ligand.n_atoms == 0 or pocket_protein.n_atoms == 0:
+        print("Native-contact retention Q skipped: ligand or protein selection is empty.")
+    else:
+        try:
+            phase("STEP E1Q - Native-Contact Retention Q")
+            ligand_heavy = pocket_ligand.select_atoms("not name H*")
+            protein_heavy = pocket_protein.select_atoms("not name H*")
+            if ligand_heavy.n_atoms == 0 or protein_heavy.n_atoms == 0:
+                raise ValueError("heavy-atom selections are empty")
+            u.trajectory[0]
+            native_pairs = reference_contact_pairs(ligand_heavy.positions.copy(), protein_heavy.positions.copy(), args.qx_contact_cutoff)
+            if len(native_pairs) == 0:
+                raise ValueError(f"no reference contacts within {args.qx_contact_cutoff:.2f} A")
+            q_rows = []
+            for ts in tqdm(u.trajectory, desc="Computing native-contact retention Q"):
+                q_rows.append({"Frame": int(ts.frame), "Time_ps": float(ts.time), "Time_ns": float(ts.time) / 1000.0,
+                               "Q_native_contact_fraction": contact_fraction(ligand_heavy.positions, protein_heavy.positions, native_pairs, args.qx_contact_cutoff),
+                               "ReferenceFrame": 0, "ReferenceType": "first_centered_pocket_trajectory_frame",
+                               "ContactCutoff_A": float(args.qx_contact_cutoff), "NativeHeavyAtomContactPairs": int(len(native_pairs))})
+            q_df = pd.DataFrame(q_rows)
+            q_df.to_csv(os.path.join(OUTPUT_DIR, "native_contact_q.csv"), index=False)
+            with open(os.path.join(OUTPUT_DIR, "native_contact_q_summary.txt"), "w", encoding="utf-8") as handle:
+                handle.write("Reference-defined native-contact retention Q\nReference type: starting modeled configuration; not an experimental native structure\n"
+                             f"Heavy-atom contact cutoff: {args.qx_contact_cutoff:.2f} A\nReference contact pairs: {len(native_pairs)}\n"
+                             f"Mean Q: {q_df['Q_native_contact_fraction'].mean():.4f}\n")
+            plt.figure(figsize=(10, 5)); plt.plot(q_df["Time_ns"], q_df["Q_native_contact_fraction"], color=MIAMI_GREEN, linewidth=2)
+            plt.ylim(0, 1.05); plt.xlabel("Time (ns)"); plt.ylabel("Q: retained reference contacts")
+            plt.title(f"{compound_name} native-contact retention relative to the starting model")
+            savefig(os.path.join(OUTPUT_DIR, "native_contact_q.png"))
+        except Exception as e:
+            print(f"Native-contact retention Q skipped: {type(e).__name__}: {e}")
+
     # DATAFRAME CONSTRUCTION
     # ============================================================
 
