@@ -1,0 +1,18 @@
+#!/bin/bash
+#BSUB -J pymacs-sid-sample-130
+#BSUB -q normal
+#BSUB -n 4
+#BSUB -R "rusage[mem=8000]"
+#BSUB -W 2:00
+#BSUB -oo sid_validation_sample_130.%J.log
+set -euo pipefail
+cd /projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/130_rank1_confidence0.30
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export PYTHONPATH="$PWD/Level3_Chemistry_Validation:${PYTHONPATH:-}"
+python Level3_Chemistry_Validation/sample_validated_sid_events.py \
+  --ligand LIG --frames 500 \
+  --outdir SID_Validation_Sample_20261022
+PYMACS_ANALYSIS_DIR=SID_Validation_Sample_20261022 \
+  python Level3_Chemistry_Validation/3B_NETWORX.py --ligand LIG --filter 0.02 \
+    --output SID_Validation_Sample_20261022/NETWORX/LIG_validated.pdf

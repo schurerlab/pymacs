@@ -31,6 +31,11 @@ from pymacs_analysis_cache import (
     validate_stage_cache,
     write_json_atomic,
 )
+from pymacs_interaction_chemistry import (
+    EVENT_COLUMNS,
+    aggregate_event_occupancy,
+    classify_protein_residue_pair_events,
+)
 
 try:
     from tqdm import tqdm
@@ -217,18 +222,11 @@ def residue_label(chain_label, residue):
     return f"{chain_label}:{residue.resname}{residue_number(residue)}"
 
 
-def classify_residue_pair(resname_a, resname_b):
-    a = (resname_a or "").upper()
-    b = (resname_b or "").upper()
-    if (a in POSITIVE and b in NEGATIVE) or (a in NEGATIVE and b in POSITIVE):
-        return "ionic_or_salt_bridge_like"
-    if a in HYDROPHOBIC and b in HYDROPHOBIC:
-        return "hydrophobic"
-    if a in AROMATIC and b in AROMATIC:
-        return "aromatic"
-    if a in POLAR and b in POLAR:
-        return "polar"
-    return "mixed_or_other"
+def classify_residue_pair(residue_a, residue_b, frame=0, time_ns=0.0):
+    """Compatibility wrapper returning evidence-backed interface labels."""
+    events = classify_protein_residue_pair_events(residue_a, residue_b, frame, time_ns)
+    validated = sorted({event["InteractionClass"] for event in events if event["ValidationStatus"] == "validated"})
+    return ";".join(validated) if validated else "Other Contact"
 
 
 def build_chain_data(universe, entry):
@@ -461,6 +459,7 @@ def analyze_chain_pair_contacts(universe, left_entry, right_entry, frame_indices
     residue_pair_series = defaultdict(list)
     time_rows = []
     framewise_rows = []
+    validated_event_rows = []
     analyzed_times_ns = []
 
     iterator = frame_indices
@@ -516,6 +515,20 @@ def analyze_chain_pair_contacts(universe, left_entry, right_entry, frame_indices
                 res_left["label"],
                 res_right["label"],
             )
+            interaction_class = classify_residue_pair(
+                res_left["residue"], res_right["residue"], frame_index,
+                float(universe.trajectory.time) / 1000.0,
+            )
+            for event in classify_protein_residue_pair_events(
+                res_left["residue"], res_right["residue"], frame_index,
+                float(universe.trajectory.time) / 1000.0,
+            ):
+                event = dict(event)
+                event["Partner"] = res_left["label"]
+                event["Component"] = pair_id
+                event["InterfaceResidueA"] = res_left["label"]
+                event["InterfaceResidueB"] = res_right["label"]
+                validated_event_rows.append(event)
             framewise_rows.append(
                 {
                     "Pair_ID": pair_id_value,
@@ -530,7 +543,7 @@ def analyze_chain_pair_contacts(universe, left_entry, right_entry, frame_indices
                     "ResidueA_Index": res_left["resnum"],
                     "ResidueB_Index": res_right["resnum"],
                     "MinDistance_A": float(dist),
-                    "InteractionClass": classify_residue_pair(res_left["resname"], res_right["resname"]),
+                    "InteractionClass": interaction_class,
                 }
             )
 
@@ -577,7 +590,7 @@ def analyze_chain_pair_contacts(universe, left_entry, right_entry, frame_indices
                 "ContactFraction": float(stats["contact_frames"] / frames_analyzed) if frames_analyzed else 0.0,
                 "MeanMinDistance_A": float(stats["distance_sum"] / stats["contact_frames"]),
                 "MinObservedDistance_A": float(stats["min_distance"]),
-                "InteractionClass": classify_residue_pair(res_left["resname"], res_right["resname"]),
+                "InteractionClass": "Evidence in interface_residue_pair_framewise.csv",
                 "_pair_key": pair_key,
                 "_pair_id": pair_id,
                 "_series_key": f"{pair_id}::{pair_key[0]}::{pair_key[1]}",
@@ -608,6 +621,7 @@ def analyze_chain_pair_contacts(universe, left_entry, right_entry, frame_indices
         "time_rows": time_rows,
         "residue_rows": residue_rows,
         "framewise_rows": framewise_rows,
+        "validated_event_rows": validated_event_rows,
         "pair_binary_series": residue_pair_series,
         "times_ns": analyzed_times_ns,
     }
@@ -1191,6 +1205,7 @@ def main():
     timeseries_rows = []
     residue_rows = []
     framewise_rows = []
+    validated_event_rows = []
     pair_binary_series = {}
     analyzed_times_ns = None
 
@@ -1203,6 +1218,7 @@ def main():
         timeseries_rows.extend(result["time_rows"])
         residue_rows.extend(result["residue_rows"])
         framewise_rows.extend(result["framewise_rows"])
+        validated_event_rows.extend(result["validated_event_rows"])
         for pair_key, binary_series in result["pair_binary_series"].items():
             pair_binary_series[f"{result['summary_row']['ChainA_Label']}__{result['summary_row']['ChainB_Label']}::{pair_key[0]}::{pair_key[1]}"] = binary_series
         if analyzed_times_ns is None:
@@ -1286,6 +1302,15 @@ def main():
     if not framewise_df.empty:
         framewise_df = framewise_df.sort_values(["Frame", "ChainA_Label", "ChainB_Label", "ResidueA_Index", "ResidueB_Index"])
     presence_payload = build_presence_payload(residue_df, pair_binary_series, frame_indices, analyzed_times_ns)
+    validated_events_df = pd.DataFrame(validated_event_rows)
+    for column in EVENT_COLUMNS:
+        if column not in validated_events_df:
+            validated_events_df[column] = pd.Series(dtype=object)
+    validated_events_df.to_csv(outdir / "ValidatedInterfaceInteractionEvents.csv", index=False)
+    aggregate_event_occupancy(
+        validated_events_df[validated_events_df.get("ValidationStatus", pd.Series(dtype=object)) == "validated"],
+        len(frame_indices),
+    ).to_csv(outdir / "ValidatedInterfaceInteractionOccupancy.csv", index=False)
 
     runtime_lines = [
         f"input_topology={Path(args.topo).resolve()}",

@@ -158,6 +158,12 @@ from pymacs_analysis_cache import (
     validate_stage_cache,
 )
 from pymacs_native_contacts import contact_fraction, reference_contact_pairs
+from pymacs_interaction_chemistry import (
+    EVENT_COLUMNS,
+    classify_ligand_residue_events,
+    events_to_legacy_framewise,
+    legacy_summary,
+)
 
 
 
@@ -900,13 +906,19 @@ def ask(prompt, cast=str, default=None):
 # ------------------------------------------------------------
 lig_code = args.ligand or os.path.basename(args.topo).split('.')[0]
 
-NET_OUTDIR = os.path.join("Analysis_Results", "NETWORX")
+NET_OUTDIR = os.path.join(args.outdir, "NETWORX")
 os.makedirs(NET_OUTDIR, exist_ok=True)
 
 # The base output stem used for all NETWORX panel images (A, B, C)
 args.net_out = os.path.join(NET_OUTDIR, lig_code)
 
 if PARTNER_MODE:
+    # Batch/HPC execution must never block on aesthetic layout prompts.
+    if args.headless:
+        args.minfrac = 0.10 if args.minfrac is None else args.minfrac
+        args.ellipse_rx = None if args.ellipse_rx is None else args.ellipse_rx
+        args.ellipse_ry = None if args.ellipse_ry is None else args.ellipse_ry
+        args.no_edges = bool(args.no_edges)
     # If no --minfrac provided explicitly → ask
     if args.minfrac is None:
         args.minfrac = ask(
@@ -916,14 +928,14 @@ if PARTNER_MODE:
         )
 
     # If ellipse radii were not provided → ask interactively
-    if args.ellipse_rx is None:
+    if args.ellipse_rx is None and not args.headless:
         args.ellipse_rx = ask(
             "⚪ NETWORX ellipse horizontal radius (rx) (press ENTER to use auto layout): ",
             float,
             default=None
         )
 
-    if args.ellipse_ry is None:
+    if args.ellipse_ry is None and not args.headless:
         args.ellipse_ry = ask(
             "⚪ NETWORX ellipse vertical radius (ry) (press ENTER to use auto layout): ",
             float,
@@ -931,7 +943,7 @@ if PARTNER_MODE:
         )
 
     # If --no-edges was not passed → ask yes/no
-    if not args.no_edges:
+    if not args.no_edges and not args.headless:
         v = ask("Hide edges in NETWORX graph? (y/n, default n): ", str, default="n")
         if v.lower().startswith("y"):
             args.no_edges = True
@@ -1152,11 +1164,15 @@ if PARTNER_MODE:
     print(f"🧬 Final ligand selected: {ligand_code}")
     print(f"🧬 Context cofactors retained in trajectory: {', '.join(CONTEXT_COFACTORS) if CONTEXT_COFACTORS else 'None'}")
 
-    print("\n📌 You may now choose a full compound name for labeling graphs/output.")
-    print("   • Press ENTER to use the ligand code above (recommended only for short names).")
-    print("   • Or type a more descriptive compound name (e.g., Paprotrain, CPD32_Inhibitor).")
-
-    compound_input = input("🏷️  Enter compound display name (or press ENTER to use resname): ").strip()
+    if args.compound_name:
+        compound_input = args.compound_name.strip()
+    elif args.headless:
+        compound_input = ""
+    else:
+        print("\n📌 You may now choose a full compound name for labeling graphs/output.")
+        print("   • Press ENTER to use the ligand code above (recommended only for short names).")
+        print("   • Or type a more descriptive compound name (e.g., Paprotrain, CPD32_Inhibitor).")
+        compound_input = input("🏷️  Enter compound display name (or press ENTER to use resname): ").strip()
 
     if compound_input:
         compound_name = compound_input
@@ -3431,81 +3447,14 @@ else:
 
     phase("STEP E2 — Classifying Interaction Types")
 
-    ligand_hbond_heavy = hbond_heavy_indices(pocket_ligand)
-    ligand_hydrogens = hydrogen_indices(pocket_ligand)
-    residue_hbond_lookup = {
-        res.ix: (hbond_heavy_indices(res.atoms), hydrogen_indices(res.atoms))
-        for res in pocket_protein.residues
-    }
-    print(
-        "📐 H-bond geometry scan: "
-        f"{len(ligand_hbond_heavy)} ligand donor/acceptor heavy atoms, "
-        f"{len(ligand_hydrogens)} ligand hydrogens"
-    )
-
     def classify_frame(ts):
         time_ns = ts.time / 1000.0
-        ligand_positions = pocket_ligand.positions
         rows = []
 
         for res in pocket_protein.residues:
-            rid = f"{res.resname}{res.resid}"
-            res_atoms = res.atoms
-            if res_atoms.n_atoms == 0:
-                continue
-
-            # Same index-safety fix as STEP E1: use residue-local coordinates
-            # instead of slicing a pocket-wide matrix with universe-global indices.
-            dists = distances.distance_array(
-                ligand_positions,
-                res_atoms.positions
-            )
-            if dists.size == 0:
-                continue
-
-            lig_i, prot_j = np.unravel_index(np.argmin(dists), dists.shape)
-            min_dist = dists[lig_i, prot_j]
-
-            lig_atom = pocket_ligand.atoms[lig_i]
-            prot_atom = res_atoms[prot_j]
-
-            itype = None
-            hbond = best_hbond_between_groups(
-                pocket_ligand,
-                ligand_hbond_heavy,
-                ligand_hydrogens,
-                res_atoms,
-                residue_hbond_lookup.get(res.ix, ([], []))[0],
-                residue_hbond_lookup.get(res.ix, ([], []))[1],
-            )
-
-            # H-bond detection: scan all hetero-heavy atom pairs and require
-            # explicit donor-H-acceptor geometry when hydrogens are present.
-            if hbond is not None:
-                itype = "H-bond"
-                lig_atom = hbond["lig_atom"]
-                prot_atom = hbond["prot_atom"]
-                min_dist = hbond["distance"]
-
-            # Hydrophobic
-            if itype is None and res.resname in {"PHE","LEU","ILE","VAL","MET","TRP","TYR","ALA"} and min_dist < 4.5:
-                itype = "Hydrophobic"
-
-            # Ionic
-            if itype is None and res.resname in {"ASP","GLU","ARG","LYS","HIS"} and min_dist < 6.0:
-                itype = "Ionic"
-
-            if itype:
-                donor_name = hbond["donor_atom"].name if hbond is not None else None
-                acceptor_name = hbond["acceptor_atom"].name if hbond is not None else None
-                hbond_angle = hbond["angle"] if hbond is not None else np.nan
-                rows.append((
-                    time_ns, rid, itype,
-                    lig_atom.name, lig_atom.index,
-                    prot_atom.name, prot_atom.index,
-                    float(min_dist),
-                    donor_name, acceptor_name, hbond_angle
-                ))
+            rows.extend(classify_ligand_residue_events(
+                pocket_ligand, res, getattr(ts, "frame", 0), time_ns,
+            ))
 
         return rows
 
@@ -3517,24 +3466,18 @@ else:
 
 
     # Convert & save
-    int_df = pd.DataFrame(
-        framewise_interaction_rows,
-        columns=[
-            "Time_ns", "Residue", "Type",
-            "LigAtomName", "LigAtomIndex",
-            "ProtAtomName", "ProtAtomIndex",
-            "Distance",
-            "HbondDonorAtom", "HbondAcceptorAtom", "HbondAngle"
-        ]
-    )
-
+    validated_events = pd.DataFrame(framewise_interaction_rows, columns=EVENT_COLUMNS)
+    validated_events.to_csv(os.path.join(OUTPUT_DIR, "ValidatedInteractionEvents.csv"), index=False)
+    with open(os.path.join(OUTPUT_DIR, "InteractionFrameMetadata.json"), "w", encoding="utf-8") as handle:
+        json.dump({"total_analyzed_frames": int(len(u.trajectory))}, handle, indent=2)
+    int_df = events_to_legacy_framewise(validated_events)
     int_df.to_csv(os.path.join(OUTPUT_DIR, "InteractionTypes_Framewise.csv"), index=False)
 
-    if int_df.empty:
+    if validated_events.empty:
         print("⚠️ No ligand:protein interactions were classified in STEP E2. Creating an empty interaction summary and skipping data-dependent interaction plots.")
         summary = ensure_interaction_summary_columns(pd.DataFrame(), PLOT_TYPES)
     else:
-        summary = int_df.groupby(["Residue","Type"]).size().unstack(fill_value=0)
+        summary = legacy_summary(validated_events, PLOT_TYPES).set_index("Residue")
         summary = ensure_interaction_summary_columns(summary, PLOT_TYPES)
 
     print("📊 Interaction summary columns:", list(summary.columns))

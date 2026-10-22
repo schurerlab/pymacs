@@ -1,0 +1,20 @@
+#!/bin/bash
+#BSUB -J pymacs-level3-chem-130
+#BSUB -q normal
+#BSUB -n 8
+#BSUB -R "rusage[mem=16000]"
+#BSUB -W 12:00
+#BSUB -oo level3_chemistry_validation_130.%J.log
+
+set -euo pipefail
+cd /projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/130_rank1_confidence0.30
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export PYTHONPATH="$PWD/Level3_Chemistry_Validation:${PYTHONPATH:-}"
+python Level3_Chemistry_Validation/3A_AutomateGromacs.py \
+  --ligand LIG \
+  --compound-name "Angela BTK 130" \
+  --mode ligand \
+  --headless \
+  --outdir Analysis_Results_ChemistryValidated_20261022 \
+  --threads 8

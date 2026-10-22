@@ -31,6 +31,12 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from pymacs_component_utils import load_component_registry
 from pymacs_analysis_cache import record_stage_completion
 from pymacs_native_contacts import contact_fraction, reference_contact_pairs
+from pymacs_interaction_chemistry import (
+    EVENT_COLUMNS,
+    aggregate_event_occupancy,
+    classify_ligand_residue_events,
+    classify_water_bridge_events,
+)
 
 PLOTTING_IMPORT_ERROR = None
 try:
@@ -2979,6 +2985,7 @@ def run_contact_analysis(
             )
 
     detail_rows: List[dict] = []
+    validated_event_rows: List[dict] = []
     timeseries_rows: List[dict] = []
     residue_distance_history: Dict[str, Dict[str, List[float]]] = {
         spec["component"]: defaultdict(list) for spec in component_groups
@@ -3028,11 +3035,21 @@ def run_contact_analysis(
             record = residue_records[residue_index]
             residue = residue_objects[residue_index]
             min_distance = float(residue_min_distances[residue_index])
-            interaction_type = classify_interaction_type(residue, min_distance, mode=interaction_mode)
+            base_events = classify_ligand_residue_events(
+                ligand, residue, frame, float(universe.trajectory.time) / 1000.0,
+            )
+            validated_types = sorted({row["InteractionClass"] for row in base_events
+                                      if row["ValidationStatus"] == "validated"})
+            interaction_type = ";".join(validated_types) if validated_types else "Other Contact"
 
             for spec in component_groups:
                 if not component_masks[spec["component"]][residue_index]:
                     continue
+                for event in base_events:
+                    event = dict(event)
+                    event["Component"] = spec["component"]
+                    event["Partner"] = record["display_name"]
+                    validated_event_rows.append(event)
                 residue_distance_history[spec["component"]][record["residue_label_display"]].append(min_distance)
                 detail_rows.append(
                     {
@@ -3065,6 +3082,14 @@ def run_contact_analysis(
         raise ValueError("No ligand-protein contacts were detected. Check the ligand residue name or distance cutoff.")
 
     total_sampled_frames = len(frame_indices)
+
+    validated_events_df = pd.DataFrame(validated_event_rows, columns=EVENT_COLUMNS)
+    validated_events_path = contacts_dir / "ValidatedInteractionEvents.csv"
+    validated_events_df.to_csv(validated_events_path, index=False)
+    occupancy_df = aggregate_event_occupancy(
+        validated_events_df[validated_events_df["ValidationStatus"] == "validated"], total_sampled_frames
+    ) if not validated_events_df.empty else aggregate_event_occupancy([], total_sampled_frames)
+    occupancy_df.to_csv(contacts_dir / "ValidatedInteractionOccupancy.csv", index=False)
 
     residue_frequency = (
         detail_df.groupby(
@@ -3539,6 +3564,7 @@ def run_water_bridge_analysis(
         local_atom_to_residue[local_indices] = residue_index
 
     detail_rows: List[dict] = []
+    validated_bridge_rows: List[dict] = []
     timeseries_rows: List[dict] = []
     bridge_residue_keys = set()
     pocket_residue_keys = set()
@@ -3591,6 +3617,14 @@ def run_water_bridge_analysis(
             ligand_water_distance = float(ligand_water_min[close_water_indices[water_offset]])
             for residue_index in contacted_residue_indices:
                 record = raw_residue_records[int(residue_index)]
+                protein_residue = record.get("residue")
+                if protein_residue is not None:
+                    for event in classify_water_bridge_events(
+                        raw_ligand, water_atom.residue, protein_residue, frame,
+                        float(raw_universe.trajectory.time) / 1000.0,
+                        component=record["display_name"], partner=record["display_name"],
+                    ):
+                        validated_bridge_rows.append(event)
                 bridge_residue_keys.add(record["residue_key"])
                 frame_component_counts[record["display_name"]].add(record["residue_key"])
                 if record["role"].startswith("Target_"):
@@ -3665,7 +3699,11 @@ def run_water_bridge_analysis(
         )
 
     long_csv = water_dir / "protac_water_bridges_long.csv"
+    detail_df["ValidationStatus"] = "distance_screen_only"
     detail_df.to_csv(long_csv, index=False)
+    pd.DataFrame(validated_bridge_rows).to_csv(
+        water_dir / "ValidatedWaterBridgeEvents.csv", index=False
+    )
 
     total_sampled_frames = len(frame_indices)
     if detail_df.empty:

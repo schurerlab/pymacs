@@ -40,6 +40,9 @@ from matplotlib.lines import Line2D
 from matplotlib.collections import LineCollection
 from matplotlib.colors import to_rgba
 import json
+import shutil
+import subprocess
+import tempfile
 from rdkit import Chem
 from rdkit.Chem import rdDepictor
 import re
@@ -86,7 +89,30 @@ def find_nearest_halogen(atom_positions, halogen_atoms, center):
 
 
 
-def auto_place_residues_guided(residues, residue_to_ligatom, atom_positions, center):
+def _segments_properly_intersect(a, b, c, d):
+    """True when two finite segments cross away from their endpoints."""
+    def orient(p, q, r):
+        return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    o1, o2 = orient(a, b, c), orient(a, b, d)
+    o3, o4 = orient(c, d, a), orient(c, d, b)
+    return (o1 * o2 < -1e-8) and (o3 * o4 < -1e-8)
+
+
+def _connector_crosses_skeleton(anchor, badge, anchor_atom, bonds, atom_positions):
+    """Detect a connector that would visually cut through the ligand."""
+    if not bonds:
+        return False
+    for a1, a2, _ in bonds:
+        if anchor_atom in (a1, a2) or a1.startswith("H") or a2.startswith("H"):
+            continue
+        if a1 not in atom_positions or a2 not in atom_positions:
+            continue
+        if _segments_properly_intersect(anchor, badge, atom_positions[a1], atom_positions[a2]):
+            return True
+    return False
+
+
+def auto_place_residues_guided(residues, residue_to_ligatom, atom_positions, center, bonds=None):
     """
     Place residues on an oval boundary, guided by the ligand atom they interact with.
     Ensures:
@@ -106,9 +132,18 @@ def auto_place_residues_guided(residues, residue_to_ligatom, atom_positions, cen
     ligand_w = (max(xs) - min(xs))
     ligand_h = (max(ys) - min(ys))
 
-    # Base radii guided by ligand dimensions
-    rx = ligand_w * 1.6   # horizontal radius
-    ry = ligand_h * 1.8   # vertical radius
+    # Base radii guided by ligand dimensions.  Do not use a fixed oval here:
+    # a fixed oval is the reason crowded systems previously put residue labels
+    # on top of one another.  The perimeter is expanded below until it can
+    # physically accommodate every residue circle.
+    # Keep the residue halo close enough that the ligand remains the visual
+    # centrepiece.  The collision-expansion below, rather than a large fixed
+    # multiplier, supplies any required clearance for dense systems.
+    # A SID is a ligand drawing with residue annotations around it.  Keep
+    # that ring close enough that the ligand occupies the centrepiece, while
+    # collision relaxation still prevents label overlap.
+    rx = ligand_w * 0.58
+    ry = ligand_h * 0.66
 
     # Enforce sensible minimums so very compact ligand layouts don't
     # place residues on top of the ligand. These constants keep behaviour
@@ -148,98 +183,92 @@ def auto_place_residues_guided(residues, residue_to_ligatom, atom_positions, cen
             idx = residues.index(res)
             angles[res] = 2*np.pi * idx / len(residues)
 
-    # -----------------------------------------------------
-    # 3. Sort residues by angle for stable layout
-    # -----------------------------------------------------
-    sorted_res = sorted(residues, key=lambda r: angles[r])
+    # Sort once by the molecular region contacted.  Ordering around the
+    # boundary is retained throughout relaxation, which prevents edge fans
+    # from needlessly crossing the ligand drawing.
+    sorted_res = sorted(residues, key=lambda r: (angles[r], residue_number(r), r))
+    # Marker dimensions are specified in points while the placement operates
+    # in ligand-coordinate units.  Empirical 2D clearance keeps the drawn
+    # badges (and their labels) apart at publication DPI.
+    min_dist = 2.35
+    if len(sorted_res) == 1:
+        return {sorted_res[0]: (cx + rx * math.cos(angles[sorted_res[0]]),
+                                cy + ry * math.sin(angles[sorted_res[0]]))}
 
-    # -----------------------------------------------------
-    # 4. Initial placement on ellipse
-    # -----------------------------------------------------
-    res_positions = {}
+    # Preserve each residue's anchor angle.  The previous evenly-spaced-slot
+    # approach prevented badge overlap but could move a contact halfway around
+    # the ligand, producing long connectors that crossed the scaffold.  Here
+    # only residues sharing a local hotspot are fanned apart.
+    target = [angles[r] for r in sorted_res]
+    for i in range(1, len(target)):
+        while target[i] < target[i - 1]:
+            target[i] += 2.0 * math.pi
 
-    for res in sorted_res:
-        a = angles[res]
-        x = cx + rx * np.cos(a)
-        y = cy + ry * np.sin(a)
-        res_positions[res] = [x, y]
-
-    # -----------------------------------------------------
-    # 5. Non-overlap correction by nudging angles + pairwise checks
-    # -----------------------------------------------------
-    min_dist = 2.0 * RESIDUE_RADIUS
-
-    # Attempt multiple expand/relax cycles. In each cycle we relax angles
-    # to reduce residue-residue overlaps, then check for any remaining
-    # residue-residue or residue-ligand overlaps. If overlaps remain,
-    # expand the ellipse radii slightly and retry.
-    max_expand_passes = 10
-    for expand_pass in range(max_expand_passes):
-        # Relaxation: multiple short passes to nudge crowded residues apart
-        for _pass in range(6):
-            # check all pairs (not just adjacent) and nudge angles
-            for i1 in range(len(sorted_res)):
-                for i2 in range(i1 + 1, len(sorted_res)):
-                    r1 = sorted_res[i1]
-                    r2 = sorted_res[i2]
-
-                    x1, y1 = res_positions[r1]
-                    x2, y2 = res_positions[r2]
-
-                    d = math.hypot(x1 - x2, y1 - y2)
-                    if d < min_dist and d > 1e-6:
-                        # amount to nudge scaled by proximity
-                        overlap_frac = (min_dist - d) / min_dist
-                        delta = 0.04 + 0.18 * overlap_frac
-
-                        # separate angles: r1 clockwise, r2 counter-clockwise
-                        angles[r1] -= delta
-                        angles[r2] += delta
-
-                        # recompute their positions on ellipse
-                        a1 = angles[r1]
-                        a2 = angles[r2]
-                        res_positions[r1] = [cx + rx * np.cos(a1), cy + ry * np.sin(a1)]
-                        res_positions[r2] = [cx + rx * np.cos(a2), cy + ry * np.sin(a2)]
-
-        # After relaxation, check for any remaining overlaps
-        any_overlap = False
-
-        # 1) residue-residue pairwise
-        for i1 in range(len(sorted_res)):
-            for i2 in range(i1 + 1, len(sorted_res)):
-                r1 = sorted_res[i1]
-                r2 = sorted_res[i2]
-                x1, y1 = res_positions[r1]
-                x2, y2 = res_positions[r2]
-                if math.hypot(x1 - x2, y1 - y2) < min_dist:
-                    any_overlap = True
-                    break
-            if any_overlap:
-                break
-
-        # 2) residue-ligand overlap
-        if not any_overlap:
-            for (ax, ay) in atom_positions.values():
-                for (rx0, ry0) in res_positions.values():
-                    if math.hypot(ax - rx0, ay - ry0) < (RESIDUE_RADIUS + LIG_ATOM_RADIUS + 0.35):
-                        any_overlap = True
-                        break
-                if any_overlap:
-                    break
-
-        if not any_overlap:
-            return res_positions
-
-        # gentle expansion and recompute positions
+    # Expand the halo only until adjacent badges can be separated.  A small
+    # angular gap is then enforced in the original contact order.
+    n = len(sorted_res)
+    for _ in range(18):
+        angular_gap = 2.0 * math.asin(min(0.99, min_dist / (2.0 * min(rx, ry))))
+        placed = [target[0]]
+        for desired in target[1:]:
+            placed.append(max(desired, placed[-1] + angular_gap))
+        if placed[-1] - placed[0] <= 2.0 * math.pi - angular_gap:
+            break
         rx *= 1.12
         ry *= 1.12
-        for res in sorted_res:
-            a = angles[res]
-            res_positions[res] = [cx + rx * np.cos(a), cy + ry * np.sin(a)]
 
-    # fallback: return best-effort placement
-    return res_positions
+    # Centre the local fan on the requested anchor directions.  This changes
+    # neither order nor inter-badge separation, but minimizes total connector
+    # length instead of distributing unused space around the full ellipse.
+    shift = sum(t - p for t, p in zip(target, placed)) / n
+    placed_angles = {res: placed[i] + shift for i, res in enumerate(sorted_res)}
+
+    for _expand_pass in range(18):
+        positions = {
+            r: (cx + rx * math.cos(placed_angles[r]), cy + ry * math.sin(placed_angles[r]))
+            for r in sorted_res
+        }
+        node_clear = RESIDUE_RADIUS + LIG_ATOM_RADIUS + 0.35
+        ligand_clear = all(
+            math.hypot(x - ax, y - ay) >= node_clear
+            for x, y in positions.values() for ax, ay in atom_positions.values()
+        )
+        if ligand_clear:
+            # Enforce line-of-sight to each actual contact atom.  For a
+            # blocked direct connector, search nearby boundary locations and
+            # choose the shortest visible one that also keeps badges apart.
+            # This prevents the visually unacceptable case of a dashed edge
+            # crossing a ligand bond merely to save a little distance.
+            for res in sorted_res:
+                lig_atoms = residue_to_ligatom.get(res, [])
+                if isinstance(lig_atoms, str):
+                    lig_atoms = [lig_atoms]
+                anchor_atom = next((a for a in lig_atoms if a in atom_positions), None)
+                if anchor_atom is None:
+                    continue
+                anchor = atom_positions[anchor_atom]
+                if not _connector_crosses_skeleton(anchor, positions[res], anchor_atom, bonds, atom_positions):
+                    continue
+                base_angle = placed_angles[res]
+                candidates = []
+                for step in range(1, 25):
+                    delta = step * math.pi / 36.0
+                    candidates.extend((base_angle - delta, base_angle + delta))
+                for candidate_angle in candidates:
+                    candidate = (cx + rx * math.cos(candidate_angle),
+                                 cy + ry * math.sin(candidate_angle))
+                    if _connector_crosses_skeleton(anchor, candidate, anchor_atom, bonds, atom_positions):
+                        continue
+                    if any(other != res and math.dist(candidate, point) < min_dist
+                           for other, point in positions.items()):
+                        continue
+                    positions[res] = candidate
+                    break
+            return positions
+        rx *= 1.12
+        ry *= 1.12
+
+    return positions
 
 
 
@@ -370,6 +399,16 @@ def residue_number(resname: str) -> int:
     except Exception:
         return 0
 
+
+def residue_badge_lines(residue_key: str):
+    """Return (chain, residue code, number) for a three-line badge."""
+    value = str(residue_key)
+    chain, residue = (value.split("|", 1) + [""])[:2] if "|" in value else ("", value)
+    match = re.search(r"([A-Za-z]{3})\s*(\d+[A-Za-z]?)", residue)
+    if match:
+        return chain or "–", match.group(1).upper(), match.group(2)
+    return chain or "–", residue.upper(), ""
+
 def _resolve_h_to_heavy(atom, parent_map, atom_positions, atom_elements, center, max_heavy_dist=2.5):
     """
     Map a possibly-hydrogen ligand atom name to the corresponding heavy atom.
@@ -433,7 +472,7 @@ def _resolve_h_to_heavy(atom, parent_map, atom_positions, atom_elements, center,
 # --------------------------------------------------------------------
 # Global paths
 # --------------------------------------------------------------------
-ANALYSIS_DIR = "Analysis_Results"
+ANALYSIS_DIR = os.environ.get("PYMACS_ANALYSIS_DIR", "Analysis_Results")
 
 # --------------------------------------------------------------------
 # Color definitions
@@ -456,7 +495,7 @@ ATOM_COLORS = {
 
 # Network edge colors
 EDGE_HBOND = "#800000"    # maroon, dashed, thick
-EDGE_HYDRO = "#90EE90"    # light green, dashed
+EDGE_HYDRO = "#2B8A3E"    # high-contrast green, dashed
 EDGE_WATER = "#1E90FF"    # blue, dashed
     # FULL CONTACTS (for Panel C) — USE THE CORRECT FILE
 # Bar plot colors
@@ -466,16 +505,20 @@ BAR_IONIC  = "#FF7F0E"
 BAR_WATER  = "#1F77B4"
 
 # Radii for layout
-RESIDUE_RADIUS = 0.55    # radius of residue node circle
+# Geometry and visual radius of peripheral residue badges.  The clearance
+# must accommodate their text, not just the marker face.
+RESIDUE_RADIUS = 0.48
 LIG_ATOM_RADIUS = 0.18   # radius of ligand atom circle (increased for visual clearance)
 
 # Oval parameters (Option B)
 # Collapsed network only
-ELLIPSE_RX = 5.6
-ELLIPSE_RY = 3.4
+ELLIPSE_RX = 3.0
+ELLIPSE_RY = 2.2
 
 # Ligand 2D layout scaling factor (increase to spread ligand atom nodes)
-LIGAND_LAYOUT_SCALE = 1.25
+# Publication SID mode gives the molecule visual priority.  Residues are
+# placed around it afterwards, so enlarging this does not cause overlap.
+LIGAND_LAYOUT_SCALE = 2.80
 
 RESIDUE_CATEGORIES = {
     "hydrophobic": {"ALA","VAL","LEU","ILE","MET","PHE","TRP","TYR","PRO"},
@@ -568,6 +611,82 @@ def ask_if_missing(args):
 # --------------------------------------------------------------------
 # Ligand layout via MOL2 (2D drawing)
 # --------------------------------------------------------------------
+def mol2_atom_names_in_file_order(mol2_file):
+    """Read MOL2 atom names without RDKit's PDB-name normalisation.
+
+    CGenFF MOL2 files often call every hydrogen simply ``H``.  Their topology
+    and contact CSV, however, use H1, H2, ... .  Giving duplicate hydrogens a
+    stable sequential suffix restores the one-to-one mapping required for a
+    faithful interaction diagram.
+    """
+    names = []
+    in_atoms = False
+    duplicate_counts = {}
+    with open(mol2_file) as handle:
+        for line in handle:
+            if line.startswith("@<TRIPOS>ATOM"):
+                in_atoms = True
+                continue
+            if line.startswith("@<TRIPOS>"):
+                if in_atoms:
+                    break
+                continue
+            if not in_atoms or not line.strip():
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            base = normalize_atom(parts[1])
+            duplicate_counts[base] = duplicate_counts.get(base, 0) + 1
+            # Preserve names such as C01 -> C1, but make repeated bare H
+            # names addressable as H1, H2, ... just like the GROMACS topology.
+            name = f"{base}{duplicate_counts[base]}" if base == "H" else base
+            if name in names:
+                name = f"{base}{duplicate_counts[base]}"
+            names.append(name)
+    return names
+
+
+def openbabel_2d_coordinates(mol2_file, atom_names, atom_elements):
+    """Return a conventional chemical 2D layout when Open Babel is present.
+
+    The MOL/SDF atom block retains source atom order, so coordinates can be
+    mapped back to the stable CGenFF names without relying on atom labels.
+    ``None`` means that the portable RDKit layout should be retained.
+    """
+    obabel = shutil.which("obabel")
+    if not obabel:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="pymacs-2d-") as tmpdir:
+            mol_path = os.path.join(tmpdir, "ligand_2d.mol")
+            completed = subprocess.run(
+                [obabel, "-imol2", mol2_file, "-omol", "--gen2d", "-O", mol_path],
+                capture_output=True, text=True, check=False,
+            )
+            if completed.returncode != 0 or not os.path.exists(mol_path):
+                return None
+            lines = open(mol_path, encoding="utf-8").read().splitlines()
+            if len(lines) < 5:
+                return None
+            atom_count = int(lines[3][:3])
+            if atom_count != len(atom_names) or len(lines) < 4 + atom_count:
+                return None
+            coords = {}
+            for index, line in enumerate(lines[4:4 + atom_count]):
+                fields = line.split()
+                if len(fields) < 4:
+                    return None
+                name = atom_names[index]
+                element = fields[3]
+                if element != atom_elements.get(name):
+                    return None
+                coords[name] = (float(fields[0]), float(fields[1]))
+            return coords
+    except (OSError, ValueError):
+        return None
+
+
 def get_ligand_layout(ligand_resname: str):
     """
     Read <ligand_resname>.cgenff.mol2 and extract a 2D layout WITHOUT
@@ -621,6 +740,10 @@ def get_ligand_layout(ligand_resname: str):
     # ---------------------------------------------------------------
     # 5) Extract atom positions exactly as named in MOL2
     # ---------------------------------------------------------------
+    mol2_names = mol2_atom_names_in_file_order(mol2_file)
+    if len(mol2_names) != mol.GetNumAtoms():
+        raise ValueError(f"MOL2 atom table and RDKit molecule disagree for {mol2_file}")
+
     atom_positions = {}
     atom_elements = {}
     atom_names = []
@@ -629,53 +752,67 @@ def get_ligand_layout(ligand_resname: str):
     for i, atom in enumerate(mol.GetAtoms()):
         pos = conf.GetAtomPosition(i)
 
-        # The REAL, ORIGINAL atom name from the MOL2 file
-        info = atom.GetMonomerInfo()
-        raw_name = info.GetName().strip() if info else f"{atom.GetSymbol()}{i+1}"
-        atom_name = normalize_atom(raw_name)
+        # Use the raw MOL2 order/name, not RDKit's PDB monomer name.  The
+        # latter silently turns duplicate H atoms into H13/H14/... .
+        atom_name = mol2_names[i]
 
         atom_positions[atom_name] = (pos.x, pos.y)
         atom_elements[atom_name] = atom.GetSymbol()
         atom_names.append(atom_name)
 
+    # Prefer a chemical depiction layout when available.  This gives rigid
+    # rings, substituents, and heteroatom labels a conventional orientation;
+    # RDKit's coordinate generation remains the dependency-free fallback.
+    obabel_positions = openbabel_2d_coordinates(mol2_file, atom_names, atom_elements)
+    if obabel_positions is not None:
+        atom_positions = obabel_positions
+        print("✓ Using Open Babel chemical 2D layout")
+
     # ---------------------------------------------------------------
     # 6) Bonds + parent map for hydrogens
     # ---------------------------------------------------------------
+    # The MOL2 bond table is authoritative for names, numeric atom IDs, and
+    # bond orders.  RDKit may reorder or partially reinterpret an unsanitized
+    # CGenFF MOL2 (particularly heteroaromatics), which is unacceptable for a
+    # publication diagram: it can attach real bond orders to the wrong atom.
+    raw_bonds = parse_mol2_bonds(mol2_file)
+
+    # Start every aromatic bond as a single graphical line.  We then add only
+    # valence-safe companion strokes.  A global odd/even alternation is not
+    # chemically valid for fused/heteroaromatic systems: it can make a
+    # carbonyl carbon appear to have three double bonds.
+    valence = {name: 0 for name in atom_elements}
+    for a1, a2, raw_order in raw_bonds:
+        contribution = 1 if raw_order == "AR" else int(raw_order)
+        valence[a1] = valence.get(a1, 0) + contribution
+        valence[a2] = valence.get(a2, 0) + contribution
+
+    max_valence = {"C": 4, "N": 3, "O": 2, "S": 6, "P": 5,
+                   "F": 1, "Cl": 1, "Br": 1, "I": 1}
+    aromatic_double = set()
+    for bond_index, (a1, a2, raw_order) in enumerate(raw_bonds):
+        if raw_order != "AR":
+            continue
+        max1 = max_valence.get(atom_elements.get(a1, "C"), 4)
+        max2 = max_valence.get(atom_elements.get(a2, "C"), 4)
+        if valence.get(a1, 0) < max1 and valence.get(a2, 0) < max2:
+            aromatic_double.add(bond_index)
+            valence[a1] += 1
+            valence[a2] += 1
+
     bonds = []
-
-    for b in mol.GetBonds():
-        i = b.GetBeginAtomIdx()
-        j = b.GetEndAtomIdx()
-
-        a1 = atom_names[i]
-        a2 = atom_names[j]
-
-        bt = b.GetBondType()
-        if bt == Chem.BondType.SINGLE:
-            order = 1
-        elif bt == Chem.BondType.DOUBLE:
-            order = 2
-        elif bt == Chem.BondType.TRIPLE:
-            order = 3
-        elif bt == Chem.BondType.AROMATIC:
-            # Alternate single/double bond pattern for drawing ONLY.
-            # Does NOT modify molecule, atom indices, or mapping.
-            if (i + j) % 2 == 0:
-                order = 2
-            else:
-                order = 1
-
-
+    for bond_index, (a1, a2, raw_order) in enumerate(raw_bonds):
+        order = 2 if bond_index in aromatic_double else (1 if raw_order == "AR" else raw_order)
         bonds.append((a1, a2, order))
 
-        # Build hydrogen → heavy-atom parent map
-        sym1 = mol.GetAtomWithIdx(i).GetSymbol()
-        sym2 = mol.GetAtomWithIdx(j).GetSymbol()
-
+        # Build hydrogen → heavy-atom parent map from the same source table.
+        sym1 = atom_elements.get(a1, "")
+        sym2 = atom_elements.get(a2, "")
         if sym1 == "H" and sym2 != "H":
             parent_map[a1] = a2
         elif sym2 == "H" and sym1 != "H":
             parent_map[a2] = a1
+
     
 
     
@@ -843,9 +980,129 @@ def label_point_frac(x1, y1, x2, y2, f=0.75):
     return (x1 + f * (x2 - x1), y1 + f * (y2 - y1))
 
 
+def summarize_interaction_edges(df_full, min_fraction):
+    """Return one chemically meaningful edge per residue/atom/type.
+
+    The old renderer copied the residue-level contact fraction onto every
+    framewise row.  That made a transient interaction look as persistent as
+    the residue itself.  Here each percentage is the fraction of trajectory
+    frames containing that specific residue--ligand atom--interaction type.
+    """
+    # The validated event schema is authoritative.  Legacy input remains
+    # renderable for historical comparison, but never acquires a false
+    # "validated" status merely by being read here.
+    if "InteractionClass" in df_full.columns:
+        status = df_full["ValidationStatus"].astype(str) if "ValidationStatus" in df_full else pd.Series("", index=df_full.index)
+        df_full = df_full[status == "validated"].copy()
+        df_full["Type"] = df_full["InteractionClass"]
+        df_full["LigAtomName"] = df_full["LigandCanonicalAtom"]
+    frame_column = "Frame" if "Frame" in df_full.columns else "Time_ns"
+    required = {frame_column, "Residue", "Type", "LigAtomName"}
+    missing = required.difference(df_full.columns)
+    if missing:
+        raise ValueError(f"InteractionTypes_Framewise.csv missing columns: {sorted(missing)}")
+    # Occupancy must use every analyzed frame, including frames that produced
+    # no interaction event.  Prefer 3A's explicit metadata; older event-only
+    # CSVs are recovered from their regular sampled-frame grid rather than
+    # silently using only frames that happen to contain an event.
+    n_frames = None
+    metadata_path = os.path.join(ANALYSIS_DIR, "InteractionFrameMetadata.json")
+    try:
+        with open(metadata_path, encoding="utf-8") as handle:
+            n_frames = int(json.load(handle).get("total_analyzed_frames", 0)) or None
+    except (OSError, ValueError, TypeError):
+        pass
+    if n_frames is None:
+        frame_values = np.sort(df_full[frame_column].dropna().unique())
+        if len(frame_values) >= 2:
+            step = float(np.median(np.diff(frame_values)))
+            inferred = int(round((float(frame_values[-1]) - float(frame_values[0])) / step)) + 1 if step > 0 else 0
+            n_frames = max(len(frame_values), inferred)
+        else:
+            n_frames = len(frame_values)
+    n_frames = max(1, int(n_frames))
+    optional = ["ChainID"] if "ChainID" in df_full.columns else []
+    work = df_full[list(required) + optional].copy()
+    if "ChainID" in work.columns:
+        chain = work["ChainID"].fillna("").astype(str).str.strip()
+        # Chain is part of node identity, not merely its label: residues with
+        # the same number on different PROTAC chains remain separate nodes.
+        work["Residue"] = np.where(
+            chain.ne(""), chain + "|" + work["Residue"].astype(str), work["Residue"]
+        )
+    work["LigAtomName"] = work["LigAtomName"].map(normalize_atom)
+    work = work.dropna(subset=["Residue", "Type", "LigAtomName"])
+    edges = (work.groupby(["Residue", "LigAtomName", "Type"], as_index=False)[frame_column]
+                 .nunique()
+                 .rename(columns={frame_column: "Frames"}))
+    edges["Fraction"] = edges["Frames"] / float(n_frames)
+    return edges[edges["Fraction"] >= min_fraction].sort_values(
+        ["Fraction", "Residue", "LigAtomName"], ascending=[False, True, True]
+    ).reset_index(drop=True)
+
+
+def edge_style(interaction_type):
+    """Visual convention used consistently by every ligand network panel."""
+    value = str(interaction_type).lower()
+    if "h-bond" in value or "hbond" in value:
+        return EDGE_HBOND, 2.7, "--"
+    if "hydrophobic" in value:
+        return EDGE_HYDRO, 2.2, "--"
+    if "water" in value:
+        return EDGE_WATER, 2.3, "--"
+    if "ionic" in value or "salt" in value:
+        return "#8E5BBE", 2.5, "--"
+    return "#777777", 1.8, "--"
+
+
+def contact_residue_map(df_edges, fallback_map):
+    """Use observed contact atoms to anchor residues around the ligand."""
+    mapping = {}
+    for residue, group in df_edges.groupby("Residue"):
+        atoms = [a for a in group.sort_values("Fraction", ascending=False)["LigAtomName"].tolist() if a]
+        mapping[residue] = list(dict.fromkeys(atoms))
+    for residue, atom in fallback_map.items():
+        mapping.setdefault(residue, [atom] if isinstance(atom, str) else atom)
+    return mapping
+
+
+def clear_edge_label_position(x1, y1, x2, y2, edge_index, occupied):
+    """Choose a readable percentage-label position away from prior labels."""
+    dx, dy = x2 - x1, y2 - y1
+    length = max(math.hypot(dx, dy), 1e-6)
+    px, py = -dy / length, dx / length
+    # Alternating offsets keep bundles from the same atom legible.
+    direction = 1 if edge_index % 2 == 0 else -1
+    candidates = []
+    for frac in (0.58, 0.68, 0.78, 0.88):
+        bx, by = label_point_frac(x1, y1, x2, y2, frac)
+        for offset in (0.0, 0.34, -0.34, 0.68, -0.68):
+            candidates.append((bx + direction * offset * px, by + direction * offset * py))
+    for x, y in candidates:
+        if all(math.hypot(x - ox, y - oy) >= 0.62 for ox, oy in occupied):
+            occupied.append((x, y))
+            return x, y
+    x, y = candidates[-1]
+    occupied.append((x, y))
+    return x, y
+
+
+def arc3_label_point(x1, y1, x2, y2, rad, fraction=0.52):
+    """Point on the quadratic approximation of Matplotlib's Arc3 connector."""
+    mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    dx, dy = x2 - x1, y2 - y1
+    # Arc3's control point is a perpendicular displacement from the chord.
+    cx, cy = mx + rad * dy, my - rad * dx
+    t = fraction
+    u = 1.0 - t
+    return (u * u * x1 + 2.0 * u * t * cx + t * t * x2,
+            u * u * y1 + 2.0 * u * t * cy + t * t * y2)
+
+
 def classify_residue(res_name: str):
-    # Extract 3-letter code
-    code = "".join([c for c in res_name if c.isalpha()]).upper()
+    # Extract the residue code from either TYR76 or A|TYR76.
+    match = re.search(r"([A-Za-z]{3})(?=\s*\d)", str(res_name))
+    code = match.group(1).upper() if match else "".join([c for c in str(res_name) if c.isalpha()]).upper()
 
     for cat, members in RESIDUE_CATEGORIES.items():
         if code in members:
@@ -938,7 +1195,7 @@ def extract_mol2_bond_orders(mol2_file):
 
 
 
-def make_residue_legend(ax):
+def make_residue_legend(ax, interaction_types=None, residue_categories=None):
     """
     Unified legend for Panel C — identical style to Panel B.
     Includes:
@@ -946,18 +1203,20 @@ def make_residue_legend(ax):
       • Residue category colors (Hydrophobic, Positive, Negative, Polar)
     """
 
+    style_by_type = {
+        "H-bond": (EDGE_HBOND, 2.8), "Hydrophobic": (EDGE_HYDRO, 1.8),
+        "Water bridge": (EDGE_WATER, 2.1), "Ionic": ("#C39BD3", 2.3),
+    }
+    interaction_types = interaction_types or list(style_by_type)
     edge_handles = [
-        Line2D([0],[0],color=EDGE_HBOND, linestyle="--", linewidth=2.8, label="H-bond"),
-        Line2D([0],[0],color=EDGE_HYDRO, linestyle="--", linewidth=1.6, label="Hydrophobic"),
-        Line2D([0],[0],color=EDGE_WATER, linestyle="--", linewidth=2.0, label="Water bridge"),
-        Line2D([0],[0],color="#C39BD3", linestyle="--", linewidth=2.2, label="Ionic"),
+        Line2D([0], [0], color=style_by_type[label][0], linestyle="--",
+               linewidth=style_by_type[label][1], label=label)
+        for label in style_by_type if label in interaction_types
     ]
-
+    residue_categories = residue_categories or ["hydrophobic", "positive", "negative", "polar"]
     residue_handles = [
-        Patch(facecolor=RESIDUE_COLORS["hydrophobic"], edgecolor="black", label="Hydrophobic"),
-        Patch(facecolor=RESIDUE_COLORS["positive"],   edgecolor="black", label="Positive"),
-        Patch(facecolor=RESIDUE_COLORS["negative"],   edgecolor="black", label="Negative"),
-        Patch(facecolor=RESIDUE_COLORS["polar"],      edgecolor="black", label="Polar"),
+        Patch(facecolor=RESIDUE_COLORS[category], edgecolor="black", label=category.title())
+        for category in ["hydrophobic", "positive", "negative", "polar"] if category in residue_categories
     ]
 
     handles = edge_handles + residue_handles
@@ -968,7 +1227,7 @@ def make_residue_legend(ax):
         frameon=False,
         loc="upper center",
         bbox_to_anchor=(0.5, -0.02),
-        ncol=4
+        ncol=min(4, max(1, len(handles)))
     )
 
 
@@ -1185,7 +1444,8 @@ def parse_mol2_bonds(mol2_path):
     """
 
     bonds = []
-    atoms = {}
+    atom_ids = []
+    raw_bonds = []
     reading_atoms = False
     reading_bonds = False
 
@@ -1213,8 +1473,7 @@ def parse_mol2_bonds(mol2_path):
                 parts = line.split()
                 # MOL2 atoms: index name x y z type subst subst_id charge
                 idx = int(parts[0])
-                name = parts[1]
-                atoms[idx] = name
+                atom_ids.append(idx)
 
             # Parse bond block
             if reading_bonds and line:
@@ -1226,22 +1485,32 @@ def parse_mol2_bonds(mol2_path):
                 a1_idx = int(a1_idx)
                 a2_idx = int(a2_idx)
 
-                atom1 = atoms[a1_idx]
-                atom2 = atoms[a2_idx]
+                raw_bonds.append((a1_idx, a2_idx, order_raw))
 
-                # Assign bond order
-                if order_raw == "1":
-                    order = 1
-                elif order_raw == "2":
-                    order = 2
-                elif order_raw == "3":
-                    order = 3
-                elif order_raw in ("ar", "4"):
-                    order = "AR"
-                else:
-                    order = 1
+    # Atom labels in CGenFF MOL2 files are often duplicated (for example,
+    # several carbons are simply named ``C``).  Use exactly the same stable,
+    # de-duplicated names used for coordinates, keyed by the source numeric
+    # atom ID.  Using raw labels here was the cause of bond endpoints drifting
+    # onto the wrong carbon in the rendered structure.
+    names = mol2_atom_names_in_file_order(mol2_path)
+    if len(atom_ids) != len(names):
+        raise ValueError(f"MOL2 atom table could not be reconciled for {mol2_path}")
+    atoms = dict(zip(atom_ids, names))
 
-                bonds.append((atom1, atom2, order))
+    for a1_idx, a2_idx, order_raw in raw_bonds:
+        atom1 = atoms[a1_idx]
+        atom2 = atoms[a2_idx]
+        if order_raw == "1":
+            order = 1
+        elif order_raw == "2":
+            order = 2
+        elif order_raw == "3":
+            order = 3
+        elif order_raw in ("ar", "4"):
+            order = "AR"
+        else:
+            order = 1
+        bonds.append((atom1, atom2, order))
 
     return bonds
 
@@ -1347,6 +1616,48 @@ def draw_bond(ax, x1, y1, x2, y2, order, elem1="C", elem2="C", a1_name=None, a2_
 
     # fallback
     plot_split_line(x1, y1, x2, y2, c1, c2, linewidth=lw, z=bond_zorder)
+
+
+def draw_sid_bond(ax, x1, y1, x2, y2, order):
+    """Draw a conventional 2D chemical bond for the SID centrepiece.
+
+    Atom spheres work for a network graph but obscure the chemical silhouette.
+    This deliberately follows the standard structure-drawing convention:
+    carbon is implicit and bond order carries the visual information.
+    """
+    dx, dy = x2 - x1, y2 - y1
+    length = math.hypot(dx, dy)
+    if length < 1e-8:
+        return
+    px, py = -dy / length, dx / length
+    # Deliberately heavier than a default molecular drawing: the SID is
+    # commonly viewed beside a contact plot or after PDF downsampling.
+    color, linewidth = "#202020", 2.15
+    # A conventional bond is a main line plus a short, inset companion line
+    # for double/triple order.  Two full-width heavy rails created the black
+    # knot that made aromatic systems unreadable in the prior render.
+    ax.plot([x1, x2], [y1, y2], color=color, linewidth=linewidth,
+            solid_capstyle="round", zorder=3)
+    inset = min(0.24, length * 0.20)
+    ux, uy = dx / length, dy / length
+    if order == 2:
+        ax.plot([x1 + ux * inset + px * 0.40, x2 - ux * inset + px * 0.40],
+                [y1 + uy * inset + py * 0.40, y2 - uy * inset + py * 0.40],
+                color=color, linewidth=1.70, solid_capstyle="round", zorder=3)
+    elif order == 3:
+        for offset in (-0.40, 0.40):
+            ax.plot([x1 + ux * inset + px * offset, x2 - ux * inset + px * offset],
+                    [y1 + uy * inset + py * offset, y2 - uy * inset + py * offset],
+                    color=color, linewidth=1.55, solid_capstyle="round", zorder=3)
+
+
+def draw_sid_atom_label(ax, element, x, y):
+    """Draw only explicit non-carbon atoms, as in a 2D ligand diagram."""
+    colors = {"O": "#E53935", "N": "#1565C0", "S": "#C69200", "P": "#D81B60"}
+    color = colors.get(element, "#087F5B" if element in HALOGEN_ELEMENTS else "#303030")
+    ax.text(x, y, element, color=color, fontsize=16, weight="medium",
+            ha="center", va="center", zorder=7,
+            bbox=dict(boxstyle="round,pad=0.12", fc="white", ec="none", alpha=0.97))
 
 
 
@@ -2025,8 +2336,17 @@ def build_two_panel_figure(ligand: str, minfrac: float, output: str, no_edges: b
         if df_filt.empty:
             raise ValueError(f"No residues exceed minfrac={minfrac}")
 
-        framewise_path = os.path.join(ANALYSIS_DIR, "InteractionTypes_Framewise.csv")
-        df_full = pd.read_csv(framewise_path)
+        framewise_path = os.path.join(ANALYSIS_DIR, "ValidatedInteractionEvents.csv")
+        if os.path.exists(framewise_path):
+            df_full = pd.read_csv(framewise_path)
+            status = df_full["ValidationStatus"].astype(str) if "ValidationStatus" in df_full else pd.Series("", index=df_full.index)
+            df_full = df_full[status == "validated"].copy()
+            df_full["Type"] = df_full["InteractionClass"]
+            df_full["LigAtomName"] = df_full["LigandCanonicalAtom"]
+        else:
+            framewise_path = os.path.join(ANALYSIS_DIR, "InteractionTypes_Framewise.csv")
+            print("⚠️ Rendering legacy InteractionTypes framewise data; labels are unvalidated.")
+            df_full = pd.read_csv(framewise_path)
         required_cols = ["Time_ns", "Residue", "Type", "LigAtomName"]
         for col in required_cols:
             if col not in df_full.columns:
@@ -2075,7 +2395,7 @@ def build_two_panel_figure(ligand: str, minfrac: float, output: str, no_edges: b
             center=center,
             parent_map=parent_map,
             outdir=outdir,
-            show_edges="single",
+            show_edges="single" if not no_edges else False,
             dpi=900,
             out_name=clean_out,
         )
@@ -2106,6 +2426,25 @@ def load_interaction_summary():
     Simple loader for Analysis_Results/InteractionTypes_Summary.csv.
     Returns (df, total_frames)
     """
+    validated_path = os.path.join(ANALYSIS_DIR, "ValidatedInteractionEvents.csv")
+    if os.path.exists(validated_path):
+        events = pd.read_csv(validated_path)
+        status = events["ValidationStatus"].astype(str) if "ValidationStatus" in events else pd.Series("", index=events.index)
+        events = events[status == "validated"]
+        events = events[events["InteractionClass"].isin(["H-bond", "Hydrophobic", "Ionic"])]
+        total_frames = max(1, int(pd.read_csv(validated_path)["Frame"].nunique()))
+        if events.empty:
+            return pd.DataFrame(columns=["Residue", "H-bond", "Hydrophobic", "Ionic", "Total", "Fraction", "HasHbond"]), total_frames
+        unique = events.drop_duplicates(["ResidueID", "Residue", "InteractionClass", "Frame"])
+        df = unique.groupby(["Residue", "InteractionClass"])["Frame"].nunique().unstack(fill_value=0).reset_index()
+        for column in ["H-bond", "Hydrophobic", "Ionic"]:
+            if column not in df:
+                df[column] = 0
+        df["Total"] = unique.drop_duplicates(["ResidueID", "Residue", "Frame"]).groupby("Residue")["Frame"].nunique().reindex(df["Residue"]).to_numpy()
+        df["Fraction"] = df["Total"] / float(total_frames)
+        df["HasHbond"] = df["H-bond"] > 0
+        return df, total_frames
+
     fpath = os.path.join(ANALYSIS_DIR, "InteractionTypes_Summary.csv")
     if not os.path.exists(fpath):
         raise FileNotFoundError(f"{fpath} not found")
@@ -2127,7 +2466,8 @@ def load_interaction_summary():
     if "Total" not in df.columns:
         raise ValueError("InteractionTypes_Summary.csv must contain 'Total' column")
 
-    total_frames = int(df["Total"].max())
+    print("⚠️ Using legacy InteractionTypes CSV: chemistry labels are unvalidated historical diagnostics.")
+    total_frames = max(1, int(df["Total"].max()))
     df["Fraction"] = df["Total"] / float(total_frames)
 
     # boolean convenience flag for H-bonds
@@ -2144,6 +2484,15 @@ def load_residue_ligand_atom_map():
     Build residue -> ligand-atom map by preferring FilteredContacts over full framewise file.
     Returns mapping dict.
     """
+    f_validated = os.path.join(ANALYSIS_DIR, "ValidatedInteractionEvents.csv")
+    if os.path.exists(f_validated):
+        events = pd.read_csv(f_validated)
+        status = events["ValidationStatus"].astype(str) if "ValidationStatus" in events else pd.Series("", index=events.index)
+        events = events[status == "validated"]
+        events = events[events["InteractionClass"].isin(["H-bond", "Hydrophobic", "Ionic"])]
+        if not events.empty:
+            return (events.groupby("Residue")["LigandCanonicalAtom"].agg(lambda x: x.value_counts().idxmax())
+                    .apply(normalize_atom).to_dict())
     f_filt = os.path.join(ANALYSIS_DIR, "FilteredContacts_Framewise.csv")
     f_full = os.path.join(ANALYSIS_DIR, "InteractionTypes_Framewise.csv")
 
@@ -2209,6 +2558,164 @@ def make_bar_figure(ligand, df_summary, total_frames, minfrac, outdir, dpi=600):
     return path
 
 
+def draw_expanded_network_panel(ax, ligand, df_full, residue_to_ligatom,
+                                atom_positions, atom_elements, bonds, mol,
+                                atom_names, center, parent_map, show_edges=True,
+                                show_edge_labels=True, one_edge_per_residue=False):
+    """Draw a structure-preserving 2D ligand interaction diagram.
+
+    This is deliberately a chemical diagram first and a network second: the
+    ligand bond graph remains intact in the centre, while residues are placed
+    on the side of the molecule containing their observed contact atom.
+    """
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    # Chemical skeleton first, so interaction lines never hide bond order.
+    # This is intentionally a structure drawing (implicit carbon), not a
+    # ball-and-stick/network depiction.
+    for a1_idx, a2_idx, order in bonds:
+        a1 = normalize_bond_endpoint(a1_idx, atom_names)
+        a2 = normalize_bond_endpoint(a2_idx, atom_names)
+        if not a1 or not a2 or a1.startswith("H") or a2.startswith("H"):
+            continue
+        draw_sid_bond(ax, *atom_positions[a1], *atom_positions[a2], order)
+
+    df_edges = summarize_interaction_edges(df_full, MIN_FRACTION)
+    if df_edges.empty:
+        show_edges = False
+        residues = []
+        res_positions = {}
+    else:
+        # Resolve virtual sites and hydrogens before placement.  This keeps
+        # contact edges at the chemically associated heavy atom, never at the
+        # ligand centre.
+        raw_map = {str(i): name for i, name in enumerate(df_edges["LigAtomName"])}
+        resolved_map = fix_edges_to_center_safe(raw_map, atom_positions, atom_elements, center)
+        df_edges = df_edges.copy()
+        df_edges["DisplayAtom"] = [resolved_map[str(i)] for i in range(len(df_edges))]
+        df_edges["DisplayAtom"] = [
+            _resolve_h_to_heavy(atom, parent_map, atom_positions, atom_elements, center)
+            for atom in df_edges["DisplayAtom"]
+        ]
+        df_edges = df_edges[df_edges["DisplayAtom"].isin(atom_positions)].copy()
+        # One residue--atom anchor gets one unambiguous line style.  A real
+        # trajectory can contain several event classes over time, but mixing
+        # their colours on the same line implies a non-existent hybrid type.
+        priority = {"H-bond": 3, "Ionic": 2, "Hydrophobic": 1, "Water bridge": 0}
+        df_edges["_priority"] = df_edges["Type"].map(priority).fillna(-1)
+        df_edges = (df_edges.sort_values(["Fraction", "_priority"], ascending=[False, False])
+                    .drop_duplicates(["Residue", "DisplayAtom"], keep="first")
+                    .drop(columns="_priority"))
+        if one_edge_per_residue:
+            df_edges = (df_edges.sort_values("Fraction", ascending=False)
+                        .drop_duplicates(["Residue"], keep="first"))
+        residue_atoms = {
+            residue: list(dict.fromkeys(group.sort_values("Fraction", ascending=False)["DisplayAtom"].tolist()))
+            for residue, group in df_edges.groupby("Residue")
+        }
+        for residue, atom in residue_to_ligatom.items():
+            residue_atoms.setdefault(residue, [atom] if isinstance(atom, str) else atom)
+        residues = sorted(df_edges["Residue"].unique(), key=residue_number)
+        res_positions = auto_place_residues_guided(
+            residues, residue_atoms, atom_positions, center, bonds=bonds
+        )
+
+    # Interaction edges and percentages.  A distinct curvature per bundle
+    # makes parallel contacts traceable without sacrificing the molecular core.
+    if show_edges and not df_edges.empty:
+        bundle_order = {}
+        occupied_labels = []
+        for edge_index, (_, row) in enumerate(df_edges.iterrows()):
+            residue, atom = row["Residue"], row["DisplayAtom"]
+            if residue not in res_positions or atom not in atom_positions:
+                continue
+            x_lig, y_lig = atom_positions[atom]
+            x_res, y_res = res_positions[residue]
+            sx, sy = shorten_to_circle(x_lig, y_lig, x_res, y_res, LIG_ATOM_RADIUS)
+            ex, ey = shorten_to_circle(x_res, y_res, x_lig, y_lig, RESIDUE_RADIUS)
+            # Contacts sharing one ligand atom should leave that hotspot as a
+            # small fan.  Grouping by residue previously reset the curvature
+            # for every edge, stacking coincident connectors on top of one
+            # another.
+            key = atom
+            ordinal = bundle_order.get(key, 0)
+            bundle_order[key] = ordinal + 1
+            # Give each connector a visible but compact bow.  The placement
+            # has already established a clear line of sight; this curvature
+            # makes closely related contacts traceable back to their exact
+            # atom without reintroducing long cross-scaffold routes.
+            rad = (0.12 + 0.045 * (ordinal // 2)) * (1 if ordinal % 2 == 0 else -1)
+            color, linewidth, style = edge_style(row["Type"])
+            ax.add_patch(FancyArrowPatch(
+                (sx, sy), (ex, ey), arrowstyle="-", connectionstyle=f"arc3,rad={rad}",
+                linewidth=linewidth, linestyle=style, color=color, alpha=0.86, zorder=2,
+            ))
+            if show_edge_labels:
+                # Put the occupancy on the connector itself.  An opaque white
+                # box masks a short stretch of dashes, creating an intentional
+                # inline gap rather than a detached, potentially ambiguous
+                # number near a bundle of contacts.
+                # Try separated positions along the same curved connector.
+                # Hotspots commonly have several lines leaving one atom; a
+                # single fixed midpoint makes their occupancy labels overlap.
+                preferred_fractions = (
+                    [0.52, 0.72, 0.34, 0.86, 0.44, 0.62]
+                    if ordinal % 2 == 0 else
+                    [0.70, 0.36, 0.56, 0.84, 0.46, 0.64]
+                )
+                chosen = None
+                for label_fraction in preferred_fractions:
+                    candidate = arc3_label_point(sx, sy, ex, ey, rad, label_fraction)
+                    if all(math.dist(candidate, placed) >= 0.95 for placed in occupied_labels):
+                        chosen = candidate
+                        break
+                if chosen is None:
+                    # Dense diagrams remain deterministic even when every
+                    # ideal point is occupied: use the farthest available
+                    # inline point rather than detaching the label.
+                    chosen = max(
+                        (arc3_label_point(sx, sy, ex, ey, rad, t) for t in preferred_fractions),
+                        key=lambda point: min((math.dist(point, placed) for placed in occupied_labels), default=float("inf")),
+                    )
+                lx, ly = chosen
+                occupied_labels.append(chosen)
+                ax.text(lx, ly, f"{float(row['Fraction']) * 100:.0f}%", fontsize=8.6,
+                        weight="bold", color=color, ha="center", va="center", zorder=4,
+                        bbox=dict(boxstyle="round,pad=0.20", fc="white", ec="none", alpha=1.0))
+
+    # Draw only explicit heteroatoms over the conventional chemical skeleton.
+    # Carbon vertices remain implicit, which is the key visual difference
+    # between a molecular interaction diagram and the previous node graph.
+    for name, (x, y) in atom_positions.items():
+        if name.startswith("H"):
+            continue
+        element = atom_elements.get(name, "C")
+        if element != "C":
+            draw_sid_atom_label(ax, element, x, y)
+
+    for residue in residues:
+        x, y = res_positions[residue]
+        chain, code, number = residue_badge_lines(residue)
+        # Peripheral residues must remain annotations to the ligand, not the
+        # visual centre of the diagram.  Keep their actual marker size in
+        # sync with the collision radius used by the placement routine.
+        ax.scatter(x, y, s=1600, color=RESIDUE_COLORS[classify_residue(residue)],
+                   edgecolors="black", linewidth=1.45, zorder=6)
+        ax.text(x, y, f"{chain}\n{code}\n{number}", fontsize=9.2, weight="bold",
+                linespacing=0.90, ha="center", va="center", zorder=7)
+
+    if show_edges:
+        make_residue_legend(
+            ax,
+            interaction_types=df_edges["Type"].unique().tolist(),
+            residue_categories=[classify_residue(residue) for residue in residues],
+        )
+    ax.relim()
+    ax.autoscale_view()
+    ax.margins(0.16)
+
+
 def make_collapsed_network_figure(ligand, df_filt, residue_to_ligatom, outdir, dpi=600):
     """Create and save Panel B (collapsed network). Returns path."""
     fig, ax = plt.subplots(figsize=(12, 10))
@@ -2233,10 +2740,11 @@ def make_expanded_network_figure(ligand, df_full, residue_to_ligatom,
     """
     fig, ax = plt.subplots(figsize=(12, 10))
 
-    # If a full implementation exists in the globals -> call it (preferred),
-    # except when the caller specifically requested a 'single' simplified export.
+    # Use the structure-preserving renderer for every normal display mode.
+    # ``single`` means one strongest edge per residue, not the historical
+    # ball-and-stick fallback.
     panel_fn = globals().get("draw_expanded_network_panel", None)
-    if callable(panel_fn) and show_edges != "single":
+    if callable(panel_fn):
         panel_fn(
             ax,
             ligand=ligand,
@@ -2249,8 +2757,9 @@ def make_expanded_network_figure(ligand, df_full, residue_to_ligatom,
             atom_names=atom_names,
             center=center,
             parent_map=parent_map,
-            show_edges=show_edges,
-            show_edge_labels=show_edges,
+            show_edges=bool(show_edges),
+            show_edge_labels=bool(show_edges),
+            one_edge_per_residue=(show_edges == "single"),
         )
         if out_name:
             path = out_name
@@ -2497,4 +3006,3 @@ if __name__ == "__main__":
             auto_name = os.path.basename(os.getcwd())
 
     build_two_panel_figure(auto_name, args.minfrac, args.output, no_edges=args.no_edges, mode=args.mode)
-

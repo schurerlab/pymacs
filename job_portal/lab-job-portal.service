@@ -1,0 +1,18 @@
+[Unit]
+Description=Schurer Lab internal HPC job portal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jxs794
+WorkingDirectory=/home/jxs794/lab-job-portal
+EnvironmentFile=/home/jxs794/lab-job-portal/.env
+ExecStart=/home/jxs794/lab-job-portal/.venv/bin/python portal.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
