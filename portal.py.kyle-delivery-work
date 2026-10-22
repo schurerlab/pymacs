@@ -44,8 +44,12 @@ RESULT_FILE_SUFFIXES = {".csv", ".html", ".pdf", ".png"}
 RESULT_TRAJECTORY_NAMES = {
     "Final_Trajectory.pdb", "Final_Trajectory.xtc",
     "binding_pocket_only.pdb", "binding_pocket_only.xtc",
+    "binding_pocket.pdb", "binding_pocket.xtc",
 }
-RESULT_FILE_LIMIT = 2 * 1024 * 1024 * 1024
+# Kyle is a delivery cache, not a second raw-MD store.  Only the compact final
+# or binding-pocket trajectories that a scientist can reasonably download are
+# published there; raw md_0_1.xtc files are never on the allowlist.
+RESULT_FILE_LIMIT = 500 * 1024 * 1024
 DEFAULT_LEGACY_MD_COLLECTIONS = (
     {
         "root": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26",
@@ -753,8 +757,8 @@ from pathlib import Path
 
 campaigns = json.loads(base64.b64decode(PAYLOAD))
 suffixes = {".csv", ".html", ".pdf", ".png", ".svg", ".mol2", ".sdf", ".mol"}
-trajectory_names = {"Final_Trajectory.pdb", "Final_Trajectory.xtc", "binding_pocket_only.pdb", "binding_pocket_only.xtc"}
-limit = 2 * 1024 * 1024 * 1024
+trajectory_names = {"Final_Trajectory.pdb", "Final_Trajectory.xtc", "binding_pocket_only.pdb", "binding_pocket_only.xtc", "binding_pocket.pdb", "binding_pocket.xtc"}
+limit = 500 * 1024 * 1024
 
 def projects(root):
     manifest = root / "md_campaign.json"
@@ -824,7 +828,8 @@ from pathlib import Path
 
 collections = json.loads(base64.b64decode(PAYLOAD))
 portable_names = {"selected_input_curated.pdb", "selected_input_source.pdb", "md_0_1.gro", "pymacs_run.json"}
-limit = 2 * 1024 * 1024 * 1024
+trajectory_names = {"Final_Trajectory.pdb", "Final_Trajectory.xtc", "binding_pocket_only.pdb", "binding_pocket_only.xtc", "binding_pocket.pdb", "binding_pocket.xtc"}
+limit = 500 * 1024 * 1024
 items = []
 for collection_index, collection in enumerate(collections):
     root = Path(collection["root"])
@@ -854,7 +859,7 @@ for collection_index, collection in enumerate(collections):
         if output.is_dir():
             for candidate in output.rglob("*"):
                 try:
-                    if candidate.is_file() and (candidate.suffix.lower() in {".csv", ".html", ".pdf", ".png", ".svg"} or candidate.name in {"Final_Trajectory.pdb", "Final_Trajectory.xtc", "binding_pocket_only.pdb", "binding_pocket_only.xtc"}) and candidate.stat().st_size <= limit:
+                    if candidate.is_file() and (candidate.suffix.lower() in {".csv", ".html", ".pdf", ".png", ".svg"} or candidate.name in trajectory_names) and candidate.stat().st_size <= limit:
                         files.append({"relative": candidate.relative_to(project).as_posix(), "size": candidate.stat().st_size})
                 except OSError:
                     pass
@@ -1851,9 +1856,9 @@ def create_app(settings: Settings | None = None) -> Flask:
     def download_result_data(directory: str):
         """Deliver a compact, Kyle-local result package for one published system.
 
-        Full trajectories and generated HTML reports are intentionally omitted:
-        this route is for a scientist-friendly handoff of structures, figures,
-        tables, chemistry, and run metadata rather than a raw project archive.
+        Raw production trajectories, checkpoints, and generated HTML reports
+        are intentionally omitted.  Compact final/binding-pocket trajectories
+        are included when they were published to Kyle.
         """
         requested = safe_result_relative(directory)
         if requested is None:
@@ -1875,7 +1880,9 @@ def create_app(settings: Settings | None = None) -> Flask:
         allowed_suffixes = {".csv", ".png", ".svg", ".mol", ".mol2", ".sdf"}
         allowed_names = {
             "selected_input_curated.pdb", "selected_input_source.pdb",
-            "Final_Trajectory.pdb", "binding_pocket_only.pdb", "pymacs_run.json",
+            "Final_Trajectory.pdb", "Final_Trajectory.xtc",
+            "binding_pocket_only.pdb", "binding_pocket_only.xtc",
+            "binding_pocket.pdb", "binding_pocket.xtc", "pymacs_run.json",
         }
         selected: list[tuple[Path, PurePosixPath]] = []
         for item in files:
@@ -1905,8 +1912,8 @@ def create_app(settings: Settings | None = None) -> Flask:
                 archive.writestr(
                     prefix + "README.txt",
                     "PyMACS lightweight results package\n\n"
-                    "Includes published plots/tables, shareable PDB structures, ligand chemistry, and run metadata.\n"
-                    "Large raw trajectories, checkpoints, and the interactive HTML report remain available on the lab portal/archive.\n",
+                    "Includes published plots/tables, ligand chemistry, run metadata, and compact final/binding-pocket trajectories when available.\n"
+                    "Raw production trajectories, checkpoints, and the interactive HTML report are intentionally excluded.\n",
                 )
                 for source, relative in selected:
                     archive.write(source, prefix + relative.as_posix())
