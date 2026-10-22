@@ -763,6 +763,9 @@ def find_type_summary_path(analysis_dir: Path) -> Optional[Path]:
 
 
 def find_framewise_interaction_path(analysis_dir: Path) -> Optional[Path]:
+    validated = analysis_dir / "ValidatedInteractionEvents.csv"
+    if validated.exists():
+        return validated
     patterns = ["FilteredContacts_Framewise.csv", "InteractionTypes_Framewise.csv", "Contacts_Framewise.csv", "ResidueContacts_Framewise.csv", "AllContacts_Framewise.csv", "*contact*framewise*.csv", "*Contact*Framewise*.csv", "*interaction*framewise*.csv", "*Interaction*Framewise*.csv"]
     candidates = glob_many(analysis_dir, patterns)
     net = analysis_dir / "NETWORX"
@@ -782,6 +785,9 @@ def find_contact_framewise_path(analysis_dir: Path) -> Optional[Path]:
 
 
 def find_interaction_types_framewise_path(analysis_dir: Path) -> Optional[Path]:
+    validated = analysis_dir / "ValidatedInteractionEvents.csv"
+    if validated.exists():
+        return validated
     patterns = ["InteractionTypes_Framewise.csv", "*InteractionTypes*Framewise*.csv", "*interactiontypes*framewise*.csv", "*interaction*framewise*.csv"]
     candidates = glob_many(analysis_dir, patterns)
     net = analysis_dir / "NETWORX"
@@ -3569,9 +3575,15 @@ def load_residue_interaction_summary(path: Optional[Path], framewise_path: Optio
     size = file_size_mb(framewise_path)
     if framewise_path is not None and size is not None and size <= max_mb:
         names = read_header(framewise_path)
-        usecols = [c for c in names if c in {"Time_ns", "time_ns", "Time_ps", "time_ps", "Frame", "frame", "Residue", "residue", "ResNum", "resnum", "ResidNum", "Chain", "chain", "Type", "type"}]
+        usecols = [c for c in names if c in {"Time_ns", "time_ns", "Time_ps", "time_ps", "Frame", "frame", "Residue", "residue", "ResNum", "resnum", "ResidNum", "Chain", "chain", "ChainID", "Type", "type", "InteractionClass", "ValidationStatus"}]
         df = safe_read_csv(framewise_path, usecols=usecols if usecols else None)
         if df is not None and not df.empty:
+            if "ValidationStatus" in df:
+                df = df[df["ValidationStatus"].astype(str) == "validated"].copy()
+            if "InteractionClass" in df and "Type" not in df:
+                df["Type"] = df["InteractionClass"]
+            if "ChainID" in df and "Chain" not in df:
+                df["Chain"] = df["ChainID"]
             frame_ids, frame_col = frame_id_series_from_df(df)
             if frame_ids is not None:
                 df["__frame_id"] = frame_ids

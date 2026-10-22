@@ -160,6 +160,7 @@ GENERIC_CATEGORY_NOTES = {
     "interaction_network": "This network view highlights the most persistent residue contacts to the ligand, emphasizing the strongest interaction hotspots while suppressing low-frequency clutter.",
     "interaction_composition": "This figure breaks residue-contact events into broad interaction classes to compare how each protein component contributes hydrophobic, ionic, aromatic, and hydrophilic contacts.",
     "pca": "This PCA projection summarizes dominant collective protein motions sampled during the trajectory.",
+    "native_contact_q": "This plot reports reference-defined native-contact retention Q: the fraction of protein-ligand heavy-atom contacts present in the starting modeled configuration that remain within the documented cutoff at each sampled frame. It supports assessment of modeled-interface persistence and does not imply similarity to an experimental ternary structure.",
 }
 
 
@@ -531,6 +532,17 @@ def build_title_page(
     else:
         title_text = f"MD ANALYSIS REPORT — {protein_title}"
         description = TITLE_PAGE_DESCRIPTION_PROTEIN.format(Protein=protein_title)
+
+    q_paths = [
+        os.path.join("Analysis_Results", "native_contact_q.csv"),
+        os.path.join("Analysis_Results", "PROTAC", "Contacts", "native_contact_q.csv"),
+    ]
+    if any(os.path.exists(path) for path in q_paths):
+        description += (
+            " This report also includes reference-defined native-contact retention Q, "
+            "the fraction of starting-model protein-ligand heavy-atom contacts retained over time. "
+            "Q is interpreted relative to the documented modeled reference, not as agreement with an experimental ternary structure."
+        )
 
     title_body_style = styles["TitleBody"] if "TitleBody" in styles else styles["Body"]
 

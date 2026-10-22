@@ -1,0 +1,7 @@
+Dataset,InteractionClass,Events,Residues
+original,Ionic,250704,17
+original,Hydrophobic,234919,29
+original,H-bond,74755,24
+endpoint-screened,Ionic,28295,17
+endpoint-screened,Hydrophobic,31862,20
+endpoint-screened,H-bond,74755,24

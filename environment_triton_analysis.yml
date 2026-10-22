@@ -13,6 +13,8 @@ dependencies:
   - networkx
   - numpy
   - pandas
+  - plotly
+  - ruptures
   - pillow
   - rdkit
   - reportlab

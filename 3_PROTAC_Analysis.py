@@ -29,6 +29,13 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from pymacs_component_utils import load_component_registry
 from pymacs_analysis_cache import record_stage_completion
+from pymacs_native_contacts import contact_fraction, reference_contact_pairs
+from pymacs_interaction_chemistry import (
+    EVENT_COLUMNS,
+    aggregate_event_occupancy,
+    classify_ligand_residue_events,
+    classify_water_bridge_events,
+)
 
 PLOTTING_IMPORT_ERROR = None
 try:
@@ -200,6 +207,7 @@ DESCRIPTION_KEYS = {
     "water_bridges": "protac_water_bridges",
     "water_bridge_frequency": "protac_water_bridge_frequency",
     "water_bridge_network": "protac_water_bridge_network",
+    "native_contact_q": "protac_native_contact_q",
 }
 
 
@@ -470,6 +478,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--atomindex", default="atomIndex.txt", help="atomIndex file with ordered protein atom ranges (default: atomIndex.txt).")
     parser.add_argument("--outdir", default="Analysis_Results/PROTAC", help="Output directory root (default: Analysis_Results/PROTAC).")
     parser.add_argument("--distance-cutoff", type=float, default=4.0, help="Protein-ligand contact cutoff in angstroms (default: 4.0).")
+    parser.add_argument("--qx-contact-cutoff", type=float, default=4.5, help="Heavy-atom cutoff in angstroms for reference-defined native-contact retention Q (default: 4.5).")
+    parser.add_argument("--skip-qx", action="store_true", help="Skip reference-defined native-contact retention Q calculation.")
     parser.add_argument("--headless", action="store_true", help="Disable interactive prompts and fail clearly when detection is ambiguous.")
     parser.add_argument("--start-frame", type=int, default=None, help="First frame index to analyze for trajectory-scan analyses.")
     parser.add_argument("--end-frame", type=int, default=None, help="Last frame index (exclusive) to analyze for trajectory-scan analyses.")
@@ -2793,6 +2803,99 @@ def write_contact_csvs(
     role_summary.to_csv(qc_dir / "protac_contact_summary.csv", index=False)
 
 
+def run_native_contact_q(
+    universe: mda.Universe,
+    protein: mda.AtomGroup,
+    ligand: mda.AtomGroup,
+    frame_indices: Sequence[int],
+    cutoff_angstrom: float,
+    contacts_dir: Path,
+    ligand_code: str,
+    entries: Sequence[dict],
+    registry: FigureRegistry,
+) -> dict:
+    """Calculate Q as retained reference protein-ligand heavy-atom contacts.
+
+    The first sampled frame is the reference.  This makes Q suitable for
+    testing persistence of a modeled pose without claiming an experimental
+    ternary complex as the native state.
+    """
+    ensure_plotting_available()
+    if not frame_indices:
+        raise ValueError("No sampled frames available for Q calculation.")
+
+    protein_heavy = protein.select_atoms("not name H*")
+    ligand_heavy = ligand.select_atoms("not name H*")
+    if protein_heavy.n_atoms == 0 or ligand_heavy.n_atoms == 0:
+        raise ValueError("Q calculation requires protein and ligand heavy atoms.")
+
+    reference_frame = int(frame_indices[0])
+    universe.trajectory[reference_frame]
+    native_pairs = reference_contact_pairs(
+        ligand_heavy.positions.copy(), protein_heavy.positions.copy(), cutoff_angstrom
+    )
+    if len(native_pairs) == 0:
+        raise ValueError(
+            f"No reference protein-ligand heavy-atom contacts within {cutoff_angstrom:.2f} Å."
+        )
+
+    rows = []
+    for _, frame in iter_with_progress(frame_indices, "Computing native-contact retention Q"):
+        universe.trajectory[frame]
+        q_value = contact_fraction(
+            ligand_heavy.positions, protein_heavy.positions, native_pairs, cutoff_angstrom
+        )
+        rows.append(
+            {
+                "Frame": int(frame),
+                "Time_ps": float(universe.trajectory.time),
+                "Time_ns": float(universe.trajectory.time) / 1000.0,
+                "Q_native_contact_fraction": q_value,
+                "ReferenceFrame": reference_frame,
+                "ReferenceType": "first_sampled_trajectory_frame",
+                "ContactCutoff_A": cutoff_angstrom,
+                "NativeHeavyAtomContactPairs": int(len(native_pairs)),
+            }
+        )
+
+    q_df = pd.DataFrame(rows)
+    q_csv = contacts_dir / "native_contact_q.csv"
+    q_df.to_csv(q_csv, index=False)
+    summary_path = contacts_dir / "native_contact_q_summary.txt"
+    summary_path.write_text(
+        "Reference-defined native-contact retention Q\n"
+        f"Reference frame: {reference_frame} (first sampled trajectory frame)\n"
+        "Reference type: starting modeled configuration; not an experimental native structure\n"
+        f"Heavy-atom contact cutoff: {cutoff_angstrom:.2f} Å\n"
+        f"Reference contact pairs: {len(native_pairs)}\n"
+        f"Mean Q: {q_df['Q_native_contact_fraction'].mean():.4f}\n"
+        f"Final Q: {q_df['Q_native_contact_fraction'].iloc[-1]:.4f}\n",
+        encoding="utf-8",
+    )
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(q_df["Time_ns"], q_df["Q_native_contact_fraction"], color="#005030", linewidth=2)
+    plt.ylim(0, 1.05)
+    plt.xlabel("Time (ns)")
+    plt.ylabel("Q: retained reference contacts")
+    plt.title(f"{ligand_code} native-contact retention relative to the starting model")
+    plt.tight_layout()
+    q_plot = contacts_dir / "native_contact_q.png"
+    plt.savefig(q_plot, dpi=300)
+    plt.close()
+    register_standard_figure(
+        registry,
+        q_plot,
+        f"{ligand_code} native-contact retention Q",
+        "native_contact_q",
+        ligand_code,
+        entries,
+        "Fraction of starting-model protein-ligand heavy-atom contacts retained in each sampled frame.",
+        48,
+    )
+    return {"csv": q_csv, "plot": q_plot, "summary": summary_path, "native_pairs": len(native_pairs)}
+
+
 def run_contact_analysis(
     universe: mda.Universe,
     protein: mda.AtomGroup,
@@ -2862,6 +2965,7 @@ def run_contact_analysis(
             )
 
     detail_rows: List[dict] = []
+    validated_event_rows: List[dict] = []
     timeseries_rows: List[dict] = []
     residue_distance_history: Dict[str, Dict[str, List[float]]] = {
         spec["component"]: defaultdict(list) for spec in component_groups
@@ -2911,11 +3015,25 @@ def run_contact_analysis(
             record = residue_records[residue_index]
             residue = residue_objects[residue_index]
             min_distance = float(residue_min_distances[residue_index])
-            interaction_type = classify_interaction_type(residue, min_distance, mode=interaction_mode)
+            # Contact persistence remains a useful geometric diagnostic, but
+            # chemistry-specific labels come solely from the shared validator.
+            # It excludes H/virtual endpoints and returns Other Contact when
+            # topology cannot support a chemically specific assignment.
+            base_events = classify_ligand_residue_events(
+                ligand, residue, frame, float(universe.trajectory.time) / 1000.0,
+            )
+            validated_types = sorted({row["InteractionClass"] for row in base_events
+                                      if row["ValidationStatus"] == "validated"})
+            interaction_type = ";".join(validated_types) if validated_types else "Other Contact"
 
             for spec in component_groups:
                 if not component_masks[spec["component"]][residue_index]:
                     continue
+                for event in base_events:
+                    event = dict(event)
+                    event["Component"] = spec["component"]
+                    event["Partner"] = record["display_name"]
+                    validated_event_rows.append(event)
                 residue_distance_history[spec["component"]][record["residue_label_display"]].append(min_distance)
                 detail_rows.append(
                     {
@@ -2948,6 +3066,14 @@ def run_contact_analysis(
         raise ValueError("No ligand-protein contacts were detected. Check the ligand residue name or distance cutoff.")
 
     total_sampled_frames = len(frame_indices)
+
+    validated_events_df = pd.DataFrame(validated_event_rows, columns=EVENT_COLUMNS)
+    validated_events_path = contacts_dir / "ValidatedInteractionEvents.csv"
+    validated_events_df.to_csv(validated_events_path, index=False)
+    occupancy_df = aggregate_event_occupancy(
+        validated_events_df[validated_events_df["ValidationStatus"] == "validated"], total_sampled_frames
+    ) if not validated_events_df.empty else aggregate_event_occupancy([], total_sampled_frames)
+    occupancy_df.to_csv(contacts_dir / "ValidatedInteractionOccupancy.csv", index=False)
 
     residue_frequency = (
         detail_df.groupby(
@@ -3422,6 +3548,7 @@ def run_water_bridge_analysis(
         local_atom_to_residue[local_indices] = residue_index
 
     detail_rows: List[dict] = []
+    validated_bridge_rows: List[dict] = []
     timeseries_rows: List[dict] = []
     bridge_residue_keys = set()
     pocket_residue_keys = set()
@@ -3474,6 +3601,14 @@ def run_water_bridge_analysis(
             ligand_water_distance = float(ligand_water_min[close_water_indices[water_offset]])
             for residue_index in contacted_residue_indices:
                 record = raw_residue_records[int(residue_index)]
+                protein_residue = record.get("residue")
+                if protein_residue is not None:
+                    for event in classify_water_bridge_events(
+                        raw_ligand, water_atom.residue, protein_residue, frame,
+                        float(raw_universe.trajectory.time) / 1000.0,
+                        component=record["display_name"], partner=record["display_name"],
+                    ):
+                        validated_bridge_rows.append(event)
                 bridge_residue_keys.add(record["residue_key"])
                 frame_component_counts[record["display_name"]].add(record["residue_key"])
                 if record["role"].startswith("Target_"):
@@ -3548,7 +3683,13 @@ def run_water_bridge_analysis(
         )
 
     long_csv = water_dir / "protac_water_bridges_long.csv"
+    # Retain this historical distance-screen table for diagnostics only; it is
+    # not a validated water-bridge result.
+    detail_df["ValidationStatus"] = "distance_screen_only"
     detail_df.to_csv(long_csv, index=False)
+    pd.DataFrame(validated_bridge_rows).to_csv(
+        water_dir / "ValidatedWaterBridgeEvents.csv", index=False
+    )
 
     total_sampled_frames = len(frame_indices)
     if detail_df.empty:
@@ -4154,6 +4295,27 @@ def main() -> int:
         args.contact_map_min_contact_fraction,
         args.contact_map_max_residues,
     )
+
+    if args.skip_qx:
+        log("Skipping native-contact retention Q (use without --skip-qx to enable).")
+    else:
+        try:
+            execute_stage(
+                runtime_profiler,
+                "Native-contact retention Q",
+                run_native_contact_q,
+                universe,
+                protein,
+                ligand,
+                frame_indices,
+                args.qx_contact_cutoff,
+                contacts_dir,
+                ligand_setup["ligand_code"],
+                entries,
+                figure_registry,
+            )
+        except ValueError as exc:
+            log(f"⚠️ Skipping native-contact retention Q: {exc}")
 
     if args.analyze_water_bridges:
         raw_residue_records = execute_stage(

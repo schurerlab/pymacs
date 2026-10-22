@@ -1,0 +1,5 @@
+LAB_PORTAL_PEGASUS_REMOTE_ROOT=/nethome/jxs794/lab-portal-jobs
+LAB_PORTAL_TRITON_REMOTE_ROOT=/projectnb/triton/home/jxs794/lab-portal-jobs
+LAB_PORTAL_PYMACS_ROOT=/projectnb/triton/home/jxs794/Pymacs
+LAB_PORTAL_STAGE_ROOT=/home/jxs794/lab-job-portal/jobs
+LAB_PORTAL_LEGACY_MD_AUTORESTART=1

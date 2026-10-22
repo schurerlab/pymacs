@@ -468,6 +468,10 @@ def render_analysis_lsf(folder: Path, config: dict[str, Any], profile_name: str)
     command = shlex.join(analysis_command(config))
     if config.get("analysis", {}).get("figurebook", True):
         command += " && python 4PDF4MD.py"
+    # The interactive dossier is intentionally per-system.  It is separate
+    # from 00_Pymacs_X_analysis.py, which remains the cross-run comparison
+    # dashboard scientists invoke only when they want comparisons.
+    command += " && python 5_PyMACS_Result_Dashboard.py"
     values = {"job_name": f"{job_stem}_analysis", "workdir": str(folder.resolve()), "walltime": profile["analysis_walltime"],
               "threads": int(config.get("analysis", {}).get("threads", profile["analysis_threads"])), "queue": profile["queue"], "project": profile.get("project", "brd"),
               "gromacs_module": profile["gromacs_module"], "gcc_module": profile["gcc_module"],

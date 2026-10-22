@@ -114,6 +114,7 @@ Ligand-contact and interaction outputs commonly include:
 
 - `AllContacts_Framewise.csv`
 - `FilteredContacts_Framewise.csv`
+- `native_contact_q.csv`, `native_contact_q.png`, `native_contact_q_summary.txt`
 - `InteractionTypes_Framewise.csv`
 - `InteractionTypes_Summary.csv`
 - `interaction_grouped_normalized.png`
@@ -293,6 +294,10 @@ Contact maps show which residues approach the ligand within the chosen cutoff an
 ### Contact-frequency plots
 
 Contact-frequency plots summarize how often each residue contacts the ligand. High-frequency residues are often strong candidates for binding-pocket definition, mutagenesis prioritization, and medicinal-chemistry interpretation.
+
+### Reference-defined native-contact retention Q
+
+`native_contact_q.csv` and `native_contact_q.png` report Q as the fraction of protein-ligand heavy-atom contact pairs present in the first analyzed trajectory frame that remain within the documented cutoff in each sampled frame. This is a persistence metric for the starting modeled configuration. It does not imply agreement with an experimental native or ternary structure.
 
 ### Binding-importance ranking
 

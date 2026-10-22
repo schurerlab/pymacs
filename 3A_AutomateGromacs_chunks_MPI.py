@@ -157,6 +157,12 @@ from pymacs_analysis_cache import (
     record_stage_completion,
     validate_stage_cache,
 )
+from pymacs_interaction_chemistry import (
+    EVENT_COLUMNS,
+    classify_ligand_residue_events,
+    events_to_legacy_framewise,
+    legacy_summary,
+)
 
 GMX_BIN = None
 
@@ -3463,52 +3469,12 @@ else:
 
     def classify_frame(ts):
         time_ns = ts.time / 1000.0
-        ligand_positions = pocket_ligand.positions
         rows = []
 
         for res in pocket_protein.residues:
-            rid = f"{res.resname}{res.resid}"
-            res_atoms = res.atoms
-            if res_atoms.n_atoms == 0:
-                continue
-
-            # Same index-safety fix as STEP E1: use residue-local coordinates
-            # instead of slicing a pocket-wide matrix with universe-global indices.
-            dists = distances.distance_array(
-                ligand_positions,
-                res_atoms.positions
-            )
-            if dists.size == 0:
-                continue
-
-            lig_i, prot_j = np.unravel_index(np.argmin(dists), dists.shape)
-            min_dist = dists[lig_i, prot_j]
-
-            lig_atom = pocket_ligand.atoms[lig_i]
-            prot_atom = res_atoms[prot_j]
-
-            itype = None
-
-            # H-bond detection
-            if infer_element(prot_atom.name) in ("O","N") and infer_element(lig_atom.name) in ("O","N"):
-                if min_dist < HBOND_DISTANCE_CUTOFF:
-                    itype = "H-bond"
-
-            # Hydrophobic
-            if itype is None and res.resname in {"PHE","LEU","ILE","VAL","MET","TRP","TYR","ALA"} and min_dist < 4.5:
-                itype = "Hydrophobic"
-
-            # Ionic
-            if itype is None and res.resname in {"ASP","GLU","ARG","LYS","HIS"} and min_dist < 6.0:
-                itype = "Ionic"
-
-            if itype:
-                rows.append((
-                    time_ns, rid, itype,
-                    lig_atom.name, lig_atom.index,
-                    prot_atom.name, prot_atom.index,
-                    float(min_dist)
-                ))
+            rows.extend(classify_ligand_residue_events(
+                pocket_ligand, res, getattr(ts, "frame", 0), time_ns,
+            ))
 
         return rows
 
@@ -3520,23 +3486,18 @@ else:
 
 
     # Convert & save
-    int_df = pd.DataFrame(
-        framewise_interaction_rows,
-        columns=[
-            "Time_ns", "Residue", "Type",
-            "LigAtomName", "LigAtomIndex",
-            "ProtAtomName", "ProtAtomIndex",
-            "Distance"
-        ]
-    )
-
+    validated_events = pd.DataFrame(framewise_interaction_rows, columns=EVENT_COLUMNS)
+    validated_events.to_csv(os.path.join(OUTPUT_DIR, "ValidatedInteractionEvents.csv"), index=False)
+    with open(os.path.join(OUTPUT_DIR, "InteractionFrameMetadata.json"), "w", encoding="utf-8") as handle:
+        json.dump({"total_analyzed_frames": int(len(u.trajectory))}, handle, indent=2)
+    int_df = events_to_legacy_framewise(validated_events)
     int_df.to_csv(os.path.join(OUTPUT_DIR, "InteractionTypes_Framewise.csv"), index=False)
 
-    if int_df.empty:
+    if validated_events.empty:
         print("⚠️ No ligand:protein interactions were classified in STEP E2. Creating an empty interaction summary and skipping data-dependent interaction plots.")
         summary = ensure_interaction_summary_columns(pd.DataFrame(), PLOT_TYPES)
     else:
-        summary = int_df.groupby(["Residue","Type"]).size().unstack(fill_value=0)
+        summary = legacy_summary(validated_events, PLOT_TYPES).set_index("Residue")
         summary = ensure_interaction_summary_columns(summary, PLOT_TYPES)
 
     print("📊 Interaction summary columns:", list(summary.columns))
