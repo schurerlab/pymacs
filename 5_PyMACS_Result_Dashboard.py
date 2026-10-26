@@ -209,6 +209,16 @@ def ligand_html(root: Path, ligand_name: str) -> str:
     return f'''<section class="ligand-card"><div class="eyebrow">Ligand identity</div><h2>{escape(ligand_name)}</h2><p class="muted">2D chemical identity and the parameterized 3D geometry used for this run.</p><div class="ligand-grid"><div class="ligand-2d">{two_d}</div><div><div class="viewer-label">3D ligand · drag to rotate · scroll to zoom</div>{viewer}{identifier}</div></div><p class="asset-note">Source: {source_label}</p></section>'''
 
 
+def interactive_networx_html(analysis: Path) -> str:
+    """Embed the threshold-switchable NETWORX explorer when Step 3 created it."""
+    explorers = sorted((analysis / "NETWORX").glob("*_interactive.html"))
+    if not explorers:
+        return ""
+    explorer = explorers[0]
+    source = escape(explorer.relative_to(analysis).as_posix())
+    return f'''<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Persistent interaction explorer</div><h2>Compare retained interactions</h2><p>Default view: interactions retained in at least 90% of analyzed frames. Switch to 95% or 80% to see exactly which chemical contacts enter or leave the diagram.</p></div></div><iframe title="Interactive ligand interaction explorer" src="{source}" style="display:block;width:100%;height:850px;border:1px solid #285a79;border-radius:16px;background:#05070d" loading="lazy"></iframe><p class="asset-note"><a href="{source}" target="_blank" rel="noopener">Open the full-screen interaction explorer ↗</a></p></section>'''
+
+
 def read_metadata(root: Path) -> dict:
     try:
         return json.loads((root / "pymacs_run.json").read_text()).get("metadata", {})
@@ -567,9 +577,11 @@ def main() -> None:
     if published_ligand_svg:
         (output.parent / "Ligand_2D.svg").write_text(published_ligand_svg, encoding="utf-8")
     ligand_panel = ligand_html(root, ligand_name)
+    network_explorer = interactive_networx_html(analysis)
     galleries = (
         section_html("First look: fold and stability", "Start here", "Read the global structure before drawing conclusions about the ligand.", groups["stability"])
         + ligand_panel
+        + network_explorer
         + section_html("Ligand pose and pocket chemistry", "Binding-site evidence", "Use these together: a pose can move while preserving key interactions, and contacts alone do not establish affinity.", groups["ligand"])
         + section_html("Residue-level protein behavior", "Protein detail", "Inspect local flexibility after checking global stability and the ligand interaction fingerprint.", groups["protein"])
         + section_html("Additional analysis", "Supporting outputs", "These outputs add context and should be interpreted together with the main stability and interaction panels.", groups["other"])

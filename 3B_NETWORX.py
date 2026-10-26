@@ -47,6 +47,7 @@ from rdkit import Chem
 from rdkit.Chem import rdDepictor
 import re
 import math
+from html import escape
 
 HALOGEN_ELEMENTS = {"F", "Cl", "Br", "I"}
 
@@ -2400,6 +2401,16 @@ def build_two_panel_figure(ligand: str, minfrac: float, output: str, no_edges: b
             out_name=clean_out,
         )
         print(f"  ✓ Clean expanded network saved → {clean_out}")
+        make_interactive_network_html(
+            ligand=ligand,
+            df_full=df_full,
+            atom_positions=atom_positions,
+            atom_elements=atom_elements,
+            bonds=bonds,
+            center=center,
+            parent_map=parent_map,
+            outdir=outdir,
+        )
 
     combined_out = os.path.join(outdir, f"{ligand}_combined.pdf")
     figD = plt.figure(figsize=(12, 16))
@@ -2714,6 +2725,200 @@ def draw_expanded_network_panel(ax, ligand, df_full, residue_to_ligatom,
     ax.relim()
     ax.autoscale_view()
     ax.margins(0.16)
+
+
+def _networx_html_point(point, bounds, width=1120, height=820, padding=72):
+    """Map the renderer's ligand-layout coordinate system into an SVG canvas."""
+    x, y = point
+    min_x, max_x, min_y, max_y = bounds
+    span_x = max(max_x - min_x, 1.0)
+    span_y = max(max_y - min_y, 1.0)
+    scale = min((width - 2 * padding) / span_x, (height - 2 * padding) / span_y)
+    return (padding + (x - min_x) * scale, height - padding - (y - min_y) * scale)
+
+
+def fit_residue_badge_font_size(chain, residue, number, preferred_size, radius):
+    """Return the largest whole-pixel three-line badge font that fits a circle.
+
+    This is deliberately conservative: SVG's actual glyph advances differ by
+    browser font, but the safety margin keeps long chain IDs and insertion-code
+    residue numbers inside the fixed-radius badge.  The generated SVG also
+    writes this value inline, preventing a stylesheet from silently shrinking
+    or overriding the fitted result.
+    """
+    preferred = max(8, int(preferred_size))
+    safe_span = float(radius) * 1.70
+    longest_label = max(len(str(chain or "—")), len(str(residue)), len(str(number)), 1)
+    for size in range(preferred, 7, -1):
+        line_spacing = max(12, round(size * 0.92))
+        estimated_width = longest_label * size * 0.65
+        estimated_height = size + 2 * line_spacing
+        if estimated_width <= safe_span and estimated_height <= safe_span:
+            return size
+    return 8
+
+
+def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements,
+                                  bonds, center, parent_map, outdir,
+                                  node_font_size=23, node_radius=45, out_name=None):
+    """Publish a self-contained, threshold-switchable NETWORX diagram.
+
+    The PNG remains the archival journal panel.  This companion uses the same
+    structure-preserving ligand layout and chemically specific edge occupancies
+    so a reader can compare the 95/90/80% persistent-contact views in-browser.
+    """
+    thresholds = (0.95, 0.90, 0.80)
+    normalized_bonds = []
+    for first, second, order in bonds:
+        first = normalize_bond_endpoint(first, list(atom_positions))
+        second = normalize_bond_endpoint(second, list(atom_positions))
+        if first and second:
+            normalized_bonds.append((first, second, order))
+    edges = summarize_interaction_edges(df_full, min(thresholds)).copy()
+    if edges.empty:
+        print("  ⚠ No ≥80% interactions available for interactive NETWORX HTML.")
+        return None
+
+    # Resolve virtual sites/hydrogens exactly as the publication renderer does.
+    raw_map = {str(i): name for i, name in enumerate(edges["LigAtomName"])}
+    resolved_map = fix_edges_to_center_safe(raw_map, atom_positions, atom_elements, center)
+    edges["DisplayAtom"] = [resolved_map[str(i)] for i in range(len(edges))]
+    edges["DisplayAtom"] = [
+        _resolve_h_to_heavy(atom, parent_map, atom_positions, atom_elements, center)
+        for atom in edges["DisplayAtom"]
+    ]
+    edges = edges[edges["DisplayAtom"].isin(atom_positions)].copy()
+    if edges.empty:
+        print("  ⚠ No resolvable ≥80% interactions available for interactive NETWORX HTML.")
+        return None
+
+    # Match the static renderer's one unambiguous chemistry type per anchor.
+    priority = {"H-bond": 3, "Ionic": 2, "Hydrophobic": 1, "Water bridge": 0}
+    edges["_priority"] = edges["Type"].map(priority).fillna(-1)
+    edges = (edges.sort_values(["Fraction", "_priority"], ascending=[False, False])
+             .drop_duplicates(["Residue", "DisplayAtom"], keep="first")
+             .drop(columns="_priority").reset_index(drop=True))
+    residues = sorted(edges["Residue"].unique(), key=residue_number)
+    residue_atoms = {
+        residue: list(dict.fromkeys(group.sort_values("Fraction", ascending=False)["DisplayAtom"].tolist()))
+        for residue, group in edges.groupby("Residue")
+    }
+    residue_positions = auto_place_residues_guided(
+        residues, residue_atoms, atom_positions, center, bonds=normalized_bonds
+    )
+
+    all_points = list(atom_positions.values()) + list(residue_positions.values())
+    min_x = min(point[0] for point in all_points) - 1.1
+    max_x = max(point[0] for point in all_points) + 1.1
+    min_y = min(point[1] for point in all_points) - 1.1
+    max_y = max(point[1] for point in all_points) + 1.1
+    bounds = (min_x, max_x, min_y, max_y)
+    width, height = 1120, 820
+    atom_xy = {name: _networx_html_point(point, bounds, width, height)
+               for name, point in atom_positions.items()}
+    residue_xy = {name: _networx_html_point(point, bounds, width, height)
+                  for name, point in residue_positions.items()}
+
+    bond_svg = []
+    for first, second, order in normalized_bonds:
+        if not first or not second or first.startswith("H") or second.startswith("H"):
+            continue
+        if first not in atom_xy or second not in atom_xy:
+            continue
+        x1, y1 = atom_xy[first]
+        x2, y2 = atom_xy[second]
+        bond_svg.append(f'<line class="bond" x1="{x1:.2f}" y1="{y1:.2f}" x2="{x2:.2f}" y2="{y2:.2f}"/>')
+        # A compact parallel stroke keeps double/triple bonds legible in SVG.
+        try:
+            bond_order = float(order)
+        except (TypeError, ValueError):
+            bond_order = 1.5 if str(order).lower() == "ar" else 1.0
+        if bond_order >= 2:
+            dx, dy = x2 - x1, y2 - y1
+            distance = max((dx * dx + dy * dy) ** .5, 1)
+            # Conventional 2D depictions use one full bond plus a parallel,
+            # inset companion stroke.  The inset is essential for terminal
+            # bonds (for example carbonyls): the second line should never run
+            # right into the atom labels or appear longer than the main bond.
+            ox, oy = -dy / distance * 8, dx / distance * 8
+            inset_x, inset_y = dx / distance * 10, dy / distance * 10
+            bond_svg.append(f'<line class="bond bond-secondary" x1="{x1+ox+inset_x:.2f}" y1="{y1+oy+inset_y:.2f}" x2="{x2+ox-inset_x:.2f}" y2="{y2+oy-inset_y:.2f}"/>')
+            if bond_order >= 3:
+                bond_svg.append(f'<line class="bond bond-secondary" x1="{x1-ox+inset_x:.2f}" y1="{y1-oy+inset_y:.2f}" x2="{x2-ox-inset_x:.2f}" y2="{y2-oy-inset_y:.2f}"/>')
+
+    hetero_svg = []
+    atom_text_colours = {
+        "O": "#ff6478", "N": "#58b9ff",
+        "F": "#87f58c", "Cl": "#87f58c", "Br": "#87f58c", "I": "#87f58c",
+        "P": "#ff927b", "S": "#ffed4a",
+    }
+    for atom, (x, y) in atom_xy.items():
+        if atom.startswith("H"):
+            continue
+        element = atom_elements.get(atom, "C")
+        if element != "C":
+            colour = atom_text_colours.get(str(element), "#ffffff")
+            hetero_svg.append(f'<text class="atom atom-{escape(str(element))}" x="{x:.2f}" y="{y+7:.2f}" font-size="24" style="fill:{colour}">{escape(str(element))}</text>')
+
+    nodes_svg = []
+    for residue in residues:
+        x, y = residue_xy[residue]
+        chain, code, number = residue_badge_lines(residue)
+        category = classify_residue(residue)
+        # Keep the badge schema stable for every node: Chain / residue / number.
+        # Historical files without a ChainID show an em dash rather than an
+        # invented chain label.
+        fitted_font_size = fit_residue_badge_font_size(
+            chain, code, number, node_font_size, node_radius
+        )
+        node_line_spacing = max(12, round(fitted_font_size * 0.92))
+        label = ("<tspan x=\"{:.2f}\" dy=\"-{}\">{}</tspan>"
+                 "<tspan x=\"{:.2f}\" dy=\"{}\">{}</tspan>"
+                 "<tspan x=\"{:.2f}\" dy=\"{}\">{}</tspan>").format(
+                     x, node_line_spacing, escape(chain or "—"), x, node_line_spacing, escape(code),
+                     x, node_line_spacing, escape(number))
+        nodes_svg.append(
+            f'<g class="residue-node category-{category}" data-residue="{escape(residue)}">'
+            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{node_radius}"/><text x="{x:.2f}" y="{y:.2f}" font-size="{fitted_font_size}" style="font-size:{fitted_font_size}px">{label}</text></g>'
+        )
+
+    edge_records = []
+    bundle_order = {}
+    for index, row in edges.iterrows():
+        atom, residue = row["DisplayAtom"], row["Residue"]
+        x1, y1 = atom_xy[atom]
+        x2, y2 = residue_xy[residue]
+        dx, dy = x2 - x1, y2 - y1
+        distance = max((dx * dx + dy * dy) ** .5, 1)
+        ordinal = bundle_order.get(atom, 0)
+        bundle_order[atom] = ordinal + 1
+        curvature = (0.13 + 0.045 * (ordinal // 2)) * (1 if ordinal % 2 == 0 else -1)
+        control_x = (x1 + x2) / 2 - dy / distance * curvature * distance
+        control_y = (y1 + y2) / 2 + dx / distance * curvature * distance
+        type_name = str(row["Type"])
+        style_key = "hbond" if "h-bond" in type_name.lower() else "ionic" if "ionic" in type_name.lower() else "hydrophobic" if "hydrophobic" in type_name.lower() else "water"
+        edge_records.append({
+            "id": int(index), "residue": str(residue), "atom": str(atom), "type": type_name,
+            "fraction": round(float(row["Fraction"]), 6), "path": f"M {x1:.2f} {y1:.2f} Q {control_x:.2f} {control_y:.2f} {x2:.2f} {y2:.2f}",
+            "style": style_key,
+        })
+
+    data_json = json.dumps(edge_records, separators=(",", ":")).replace("</", "<\\/")
+    output = out_name or os.path.join(outdir, f"{ligand}_interactive.html")
+    html = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(ligand)} interaction explorer</title><style>
+:root{{--bg:#05070d;--panel:#101726;--text:#ebf4ff;--muted:#9eb2cc;--cyan:#4bd7ff;--hbond:#8e2431;--hydrophobic:#69b86b;--ionic:#9d6cd3;--water:#4a9bdd}}*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at 80% 0,rgba(75,215,255,.16),transparent 30%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,sans-serif}}main{{max-width:1440px;margin:auto;padding:28px}}header{{display:flex;align-items:end;justify-content:space-between;gap:20px;flex-wrap:wrap}}.eyebrow{{color:var(--cyan);font-weight:900;letter-spacing:.14em;font-size:.72rem}}h1{{font-size:clamp(2rem,4vw,4.4rem);letter-spacing:-.055em;margin:.25rem 0}}.intro{{color:var(--muted);max-width:700px;line-height:1.55}}.controls{{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}}button{{appearance:none;border:1px solid #36506f;background:#101b2b;color:var(--text);padding:10px 14px;border-radius:11px;font:800 .9rem inherit;cursor:pointer}}button:hover,button[aria-pressed=true]{{border-color:var(--cyan);background:#13435c;box-shadow:0 0 22px rgba(75,215,255,.16)}}.layout{{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px}}.diagram,.details{{background:linear-gradient(145deg,#111a2b,#080b13);border:1px solid #263c59;border-radius:20px}}.diagram{{overflow:hidden}}svg{{display:block;width:100%;height:auto;min-height:540px}}.bond{{stroke:#f7fbff;stroke-width:3.4;stroke-linecap:round}}.bond-secondary{{stroke-width:2.5}}.atom{{font-size:20px;font-weight:900;text-anchor:middle;fill:#fff;paint-order:stroke;stroke:#05070d;stroke-width:4px}}.atom-O{{fill:#ef5969}}.atom-N{{fill:#54b6ff}}.atom-S{{fill:#ffd36e}}.atom-P{{fill:#f385bd}}.edge{{fill:none;stroke-width:3.3;stroke-dasharray:8 6;stroke-linecap:round;opacity:.94;cursor:pointer;transition:opacity .16s,stroke-width .16s}}.edge:hover,.edge.selected{{stroke-width:6;filter:drop-shadow(0 0 5px currentColor)}}.edge.hbond{{stroke:var(--hbond)}}.edge.hydrophobic{{stroke:var(--hydrophobic)}}.edge.ionic{{stroke:var(--ionic)}}.edge.water{{stroke:var(--water)}}.edge-label{{font-size:13px;font-weight:900;text-anchor:middle;fill:#fff;paint-order:stroke;stroke:#080b13;stroke-width:4px;pointer-events:none}}.residue-node{{cursor:pointer;transition:opacity .16s}}.residue-node circle{{fill:#e8e8e8;stroke:#05070d;stroke-width:2.2}}.category-hydrophobic circle{{fill:#c9f7c5}}.category-positive circle{{fill:#c5f1ff}}.category-negative circle{{fill:#ffcbc5}}.category-polar circle{{fill:#e8e8e8}}.residue-node text{{text-anchor:middle;font-weight:900;font-size:9.5px;pointer-events:none}}.residue-node.selected circle{{stroke:var(--cyan);stroke-width:5;filter:drop-shadow(0 0 8px var(--cyan))}}.details{{padding:18px}}.details h2{{margin:.1rem 0 .8rem;font-size:1.1rem}}.metric{{font-size:2.4rem;font-weight:900;letter-spacing:-.06em;color:var(--cyan)}}.detail-row{{border-top:1px solid #29415e;padding:12px 0;color:var(--muted)}}.detail-row b{{display:block;color:var(--text);font-size:.82rem;text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}}.legend{{display:grid;gap:8px;margin-top:20px;font-size:.83rem;color:var(--muted)}}.swatch{{display:inline-block;width:25px;border-top:4px dashed currentColor;vertical-align:middle;margin-right:7px}}.note{{font-size:.78rem;color:var(--muted);line-height:1.45;margin:17px 0 0}}@media(max-width:900px){{main{{padding:18px}}.layout{{grid-template-columns:1fr}}.details{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}}.details h2,.legend,.note{{grid-column:1/-1}}}}@media(max-width:500px){{.details{{grid-template-columns:1fr}}svg{{min-height:420px}}}}
+</style></head><body><main><header><div><div class="eyebrow">PYMACS · INTERACTION EXPLORER</div><h1>{escape(ligand)} persistent interactions</h1><p class="intro">Switch the retained-contact threshold to see exactly which chemically classified interactions persist. The diagram defaults to 90%; percentages are the fraction of analyzed frames containing that specific residue–ligand-atom interaction.</p></div></header><div class="controls" role="group" aria-label="Persistent interaction threshold"><button data-threshold="0.95" aria-pressed="false">95% retained</button><button data-threshold="0.90" aria-pressed="true">90% retained</button><button data-threshold="0.80" aria-pressed="false">80% retained</button></div><section class="layout"><div class="diagram"><svg id="network" viewBox="0 0 {width} {height}" role="img" aria-label="Interactive ligand interaction diagram"><g id="bond-layer">{''.join(bond_svg)}</g><g id="edge-layer"></g><g id="atom-layer">{''.join(hetero_svg)}</g><g id="node-layer">{''.join(nodes_svg)}</g></svg></div><aside class="details"><h2>Visible interaction set</h2><div><div class="metric" id="edge-count">—</div><div id="threshold-label">≥ 90% occupancy</div></div><div class="detail-row"><b>Click an interaction or residue</b><span id="selection">Select an edge to inspect its type, ligand atom, and occupancy.</span></div><div class="legend"><span style="color:var(--hbond)"><i class="swatch"></i>Hydrogen bond</span><span style="color:var(--ionic)"><i class="swatch"></i>Ionic</span><span style="color:var(--hydrophobic)"><i class="swatch"></i>Hydrophobic</span><span style="color:var(--water)"><i class="swatch"></i>Water bridge</span></div><p class="note">Residue colors describe amino-acid chemistry. This explorer is a view of the analyzed trajectory, not a binding-affinity estimate.</p></aside></section></main><script>const EDGES={data_json};const layer=document.getElementById('edge-layer'),nodes=[...document.querySelectorAll('.residue-node')],count=document.getElementById('edge-count'),label=document.getElementById('threshold-label'),selection=document.getElementById('selection');let active=.90,selected=null;function select(edge){{selected=edge?.id??null;document.querySelectorAll('.edge').forEach(el=>el.classList.toggle('selected',+el.dataset.id===selected));nodes.forEach(el=>el.classList.toggle('selected',edge&&el.dataset.residue===edge.residue));if(edge)selection.innerHTML=`<b>${{edge.residue}}</b> → ligand atom <b>${{edge.atom}}</b><br>${{edge.type}} · <b>${{(edge.fraction*100).toFixed(1)}}%</b> occupancy`;}}function render(){{const visible=EDGES.filter(e=>e.fraction+1e-9>=active);layer.innerHTML=visible.map(e=>{{const m=e.path.match(/Q ([0-9.]+) ([0-9.]+)/),x=m?m[1]:0,y=m?m[2]:0;return `<g><path class="edge ${{e.style}}" data-id="${{e.id}}" d="${{e.path}}"/><text class="edge-label" x="${{x}}" y="${{y}}">${{Math.round(e.fraction*100)}}%</text></g>`}}).join('');const residues=new Set(visible.map(e=>e.residue));nodes.forEach(n=>n.style.display=residues.has(n.dataset.residue)?'inline':'none');count.textContent=visible.length;label.textContent=`≥ ${{Math.round(active*100)}}% occupancy`;document.querySelectorAll('.edge').forEach(el=>el.onclick=()=>select(EDGES.find(e=>e.id===+el.dataset.id)));nodes.forEach(n=>n.onclick=()=>{{const edge=visible.filter(e=>e.residue===n.dataset.residue).sort((a,b)=>b.fraction-a.fraction)[0];if(edge)select(edge)}});if(selected!==null&&!visible.some(e=>e.id===selected))select(null);}}document.querySelectorAll('[data-threshold]').forEach(button=>button.onclick=()=>{{active=+button.dataset.threshold;document.querySelectorAll('[data-threshold]').forEach(b=>b.setAttribute('aria-pressed',b===button));render()}});render();</script></body></html>'''
+    # Keep label size under the generator's control.  In particular, do not
+    # retain the historical CSS font-size rule that would override the SVG
+    # value and make every comparison preview appear identically tiny.
+    html = html.replace(
+        ".residue-node text{text-anchor:middle;font-weight:900;font-size:9.5px;pointer-events:none}",
+        ".residue-node text{text-anchor:middle;font-weight:900;pointer-events:none}",
+    )
+    with open(output, "w", encoding="utf-8") as handle:
+        handle.write(html)
+    print(f"  ✓ Interactive NETWORX explorer saved → {output}")
+    return output
 
 
 def make_collapsed_network_figure(ligand, df_filt, residue_to_ligatom, outdir, dpi=600):

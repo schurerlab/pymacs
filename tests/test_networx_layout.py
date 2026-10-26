@@ -39,3 +39,35 @@ def test_guided_layout_never_stacks_a_dense_contact_hotspot():
     np.fill_diagonal(pairwise, np.inf)
 
     assert pairwise.min() >= 2 * networx.RESIDUE_RADIUS + 0.18 - 1e-8
+
+
+def test_interactive_html_includes_the_persistence_switches(tmp_path):
+    rows = []
+    for frame in range(20):
+        rows.append((frame, "TYR10", "Hydrophobic", "C1"))
+        if frame < 19:
+            rows.append((frame, "LYS11", "Ionic", "O1"))
+        if frame < 18:
+            rows.append((frame, "ASN12", "H-bond", "O1"))
+        if frame < 17:
+            rows.append((frame, "PHE13", "Hydrophobic", "C1"))
+    framewise = pd.DataFrame(rows, columns=["Time_ns", "Residue", "Type", "LigAtomName"])
+
+    output = networx.make_interactive_network_html(
+        "LIG", framewise,
+        {"C1": (0.0, 0.0), "O1": (1.0, 0.0)},
+        {"C1": "C", "O1": "O"},
+        [("C1", "O1", 1)], (0.5, 0.0), {}, tmp_path,
+    )
+
+    html = Path(output).read_text(encoding="utf-8")
+    assert 'data-threshold="0.95"' in html
+    assert 'data-threshold="0.90" aria-pressed="true"' in html
+    assert 'data-threshold="0.80"' in html
+    assert "TYR10" in html
+    assert "Hydrophobic" in html
+
+
+def test_residue_badge_font_keeps_normal_labels_at_default_and_shrinks_long_ones():
+    assert networx.fit_residue_badge_font_size("A", "LYS", "16", 23, 45) == 23
+    assert networx.fit_residue_badge_font_size("CHAIN", "TRP", "123456", 23, 45) < 23
