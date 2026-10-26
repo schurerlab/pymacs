@@ -30,7 +30,12 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from pymacs_component_utils import load_component_registry
 from pymacs_analysis_cache import record_stage_completion
-from pymacs_native_contacts import contact_fraction, reference_contact_pairs
+from pymacs_native_contacts import (
+    contact_fraction,
+    intragroup_contact_fraction,
+    reference_contact_pairs,
+    reference_protein_ca_pairs,
+)
 from pymacs_interaction_chemistry import (
     EVENT_COLUMNS,
     aggregate_event_occupancy,
@@ -209,6 +214,7 @@ DESCRIPTION_KEYS = {
     "water_bridge_frequency": "protac_water_bridge_frequency",
     "water_bridge_network": "protac_water_bridge_network",
     "native_contact_q": "protac_native_contact_q",
+    "protein_native_contact_q": "protac_native_contact_q",
 }
 
 GMX_BIN = None
@@ -2916,6 +2922,67 @@ def run_native_contact_q(
     return {"csv": q_csv, "plot": q_plot, "summary": summary_path, "native_pairs": len(native_pairs)}
 
 
+def run_protein_native_contact_q(
+    universe: mda.Universe, protein: mda.AtomGroup, frame_indices: Sequence[int],
+    contacts_dir: Path, entries: Sequence[dict], registry: FigureRegistry,
+    cutoff_angstrom: float = 8.0, minimum_sequence_separation: int = 3,
+) -> dict:
+    """Write apo-compatible frame-0 nonlocal protein Cα contact retention Q."""
+    ensure_plotting_available()
+    if not frame_indices:
+        raise ValueError("No sampled frames available for protein Q calculation.")
+    alpha_carbons = protein.select_atoms("name CA")
+    if alpha_carbons.n_atoms < 2:
+        raise ValueError("Protein Q calculation requires at least two Cα atoms.")
+    reference_frame = int(frame_indices[0])
+    universe.trajectory[reference_frame]
+    native_pairs = reference_protein_ca_pairs(
+        alpha_carbons.positions.copy(), alpha_carbons.resids,
+        cutoff_angstrom, minimum_sequence_separation,
+    )
+    if len(native_pairs) == 0:
+        raise ValueError(f"No nonlocal protein Cα contacts within {cutoff_angstrom:.2f} Å.")
+    rows = []
+    for _, frame in iter_with_progress(frame_indices, "Computing protein native-contact Q"):
+        universe.trajectory[frame]
+        rows.append({
+            "Frame": int(frame), "Time_ps": float(universe.trajectory.time),
+            "Time_ns": float(universe.trajectory.time) / 1000.0,
+            "Q_protein_native_contact_fraction": intragroup_contact_fraction(
+                alpha_carbons.positions, native_pairs, cutoff_angstrom),
+            "ReferenceFrame": reference_frame, "ReferenceType": "first_sampled_trajectory_frame",
+            "ContactCutoff_A": cutoff_angstrom,
+            "MinimumSequenceSeparation": minimum_sequence_separation,
+            "NativeProteinCAPairs": int(len(native_pairs)),
+        })
+    q_df = pd.DataFrame(rows)
+    q_csv = contacts_dir / "protein_native_contact_q.csv"
+    q_df.to_csv(q_csv, index=False)
+    summary_path = contacts_dir / "protein_native_contact_q_summary.txt"
+    summary_path.write_text(
+        "Protein Cα native-contact retention Q\n"
+        f"Reference frame: {reference_frame} (first sampled trajectory frame)\n"
+        "Reference type: starting trajectory frame; a protein-fold retention metric\n"
+        f"Cα contact cutoff: {cutoff_angstrom:.2f} Å\n"
+        f"Minimum sequence separation: {minimum_sequence_separation}\n"
+        f"Reference Cα contact pairs: {len(native_pairs)}\n"
+        f"Mean Q_protein: {q_df['Q_protein_native_contact_fraction'].mean():.4f}\n"
+        f"Final Q_protein: {q_df['Q_protein_native_contact_fraction'].iloc[-1]:.4f}\n",
+        encoding="utf-8",
+    )
+    plt.figure(figsize=(10, 5))
+    plt.plot(q_df["Time_ns"], q_df["Q_protein_native_contact_fraction"], color="#005030", linewidth=2)
+    plt.ylim(0, 1.05); plt.xlabel("Time (ns)"); plt.ylabel("Protein native-contact Q")
+    plt.title("Protein Cα native-contact retention relative to the starting model"); plt.tight_layout()
+    q_plot = contacts_dir / "protein_native_contact_q.png"
+    plt.savefig(q_plot, dpi=300); plt.close()
+    register_standard_figure(
+        registry, q_plot, "Protein native-contact Q", "protein_native_contact_q", "", entries,
+        "Fraction of nonlocal frame-0 protein Cα contacts retained in each sampled frame.", 48,
+    )
+    return {"csv": q_csv, "plot": q_plot, "summary": summary_path, "native_pairs": len(native_pairs)}
+
+
 def run_contact_analysis(
     universe: mda.Universe,
     protein: mda.AtomGroup,
@@ -4328,6 +4395,13 @@ def main() -> int:
             )
         except ValueError as exc:
             log(f"⚠️ Skipping native-contact retention Q: {exc}")
+        try:
+            execute_stage(
+                runtime_profiler, "Protein native-contact Q", run_protein_native_contact_q,
+                universe, protein, frame_indices, contacts_dir, entries, figure_registry,
+            )
+        except ValueError as exc:
+            log(f"⚠️ Skipping protein native-contact Q: {exc}")
 
     if args.analyze_water_bridges:
         raw_residue_records = execute_stage(

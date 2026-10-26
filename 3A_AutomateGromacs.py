@@ -157,7 +157,8 @@ from pymacs_analysis_cache import (
     record_stage_completion,
     validate_stage_cache,
 )
-from pymacs_native_contacts import contact_fraction, reference_contact_pairs
+from pymacs_native_contacts import (contact_fraction, intragroup_contact_fraction,
+                                    reference_contact_pairs, reference_protein_ca_pairs)
 from pymacs_interaction_chemistry import (
     EVENT_COLUMNS,
     classify_ligand_residue_events,
@@ -3257,6 +3258,37 @@ else:
             savefig(os.path.join(OUTPUT_DIR, "native_contact_q.png"))
         except Exception as e:
             print(f"Native-contact retention Q skipped: {type(e).__name__}: {e}")
+
+        # Pair the ligand-pose metric with an apo-compatible protein-fold
+        # metric.  It intentionally uses nonlocal Cα contacts, not ligand data.
+        try:
+            phase("STEP E1QP - Protein Native-Contact Q")
+            alpha_carbons = u.select_atoms("protein and name CA")
+            if alpha_carbons.n_atoms < 2:
+                raise ValueError("fewer than two protein Cα atoms")
+            u.trajectory[0]
+            protein_pairs = reference_protein_ca_pairs(alpha_carbons.positions.copy(), alpha_carbons.resids, 8.0, 3)
+            if len(protein_pairs) == 0:
+                raise ValueError("no nonlocal protein Cα contacts within 8.00 A")
+            protein_rows = []
+            for ts in tqdm(u.trajectory, desc="Computing protein native-contact Q"):
+                protein_rows.append({"Frame": int(ts.frame), "Time_ps": float(ts.time), "Time_ns": float(ts.time) / 1000.0,
+                                     "Q_protein_native_contact_fraction": intragroup_contact_fraction(alpha_carbons.positions, protein_pairs, 8.0),
+                                     "ReferenceFrame": 0, "ReferenceType": "first_centered_pocket_trajectory_frame",
+                                     "ContactCutoff_A": 8.0, "MinimumSequenceSeparation": 3,
+                                     "NativeProteinCAPairs": int(len(protein_pairs))})
+            protein_df = pd.DataFrame(protein_rows)
+            protein_df.to_csv(os.path.join(OUTPUT_DIR, "protein_native_contact_q.csv"), index=False)
+            with open(os.path.join(OUTPUT_DIR, "protein_native_contact_q_summary.txt"), "w", encoding="utf-8") as handle:
+                handle.write("Protein Cα native-contact retention Q\nReference type: starting trajectory frame; a protein-fold retention metric\n"
+                             f"Cα contact cutoff: 8.00 A\nMinimum sequence separation: 3\nReference Cα contact pairs: {len(protein_pairs)}\n"
+                             f"Mean Q_protein: {protein_df['Q_protein_native_contact_fraction'].mean():.4f}\nFinal Q_protein: {protein_df['Q_protein_native_contact_fraction'].iloc[-1]:.4f}\n")
+            plt.figure(figsize=(10, 5)); plt.plot(protein_df["Time_ns"], protein_df["Q_protein_native_contact_fraction"], color=MIAMI_GREEN, linewidth=2)
+            plt.ylim(0, 1.05); plt.xlabel("Time (ns)"); plt.ylabel("Protein native-contact Q")
+            plt.title("Protein Cα native-contact retention relative to the starting model")
+            savefig(os.path.join(OUTPUT_DIR, "protein_native_contact_q.png"))
+        except Exception as e:
+            print(f"Protein native-contact Q skipped: {type(e).__name__}: {e}")
 
     # DATAFRAME CONSTRUCTION
     # ============================================================
