@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
 import math
 import os
 import re
@@ -74,6 +75,12 @@ AROMATIC = {"PHE", "TYR", "TRP", "HIS"}
 POSITIVE = {"ARG", "LYS", "HIS"}
 NEGATIVE = {"ASP", "GLU"}
 POLAR = {"SER", "THR", "ASN", "GLN", "CYS"}
+AA1 = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+}
 
 
 def build_parser():
@@ -315,6 +322,8 @@ def interface_numerical_output_paths(outdir: Path) -> list[Path]:
         outdir / "interface_frame_index.csv",
         outdir / "interface_residue_pair_framewise.csv.gz",
         outdir / "interface_residue_pair_presence.npz",
+        outdir / "ValidatedInterfaceInteractionEvents.csv",
+        outdir / "ValidatedInterfaceInteractionOccupancy.csv",
     ]
 
 
@@ -327,6 +336,7 @@ def interface_plot_output_paths(outdir: Path) -> list[Path]:
         outdir / "Interface_RIN_Network.png",
         outdir / "Interface_ChainLevel_Network.png",
         outdir / "Interface_TopResiduePairs_Barplot.png",
+        outdir / "Interface_RIN_Explorer.html",
     ]
 
 
@@ -936,6 +946,74 @@ def plot_top_residue_pairs_barplot(residue_df, outdir):
     plt.close()
 
 
+def interface_chain_sequences(universe, chain_pairs):
+    """Return complete labelled residue sequences for the selected interface chains."""
+    sequences = {}
+    for left, right in chain_pairs:
+        for entry in (left, right):
+            label = entry["display_label"]
+            if label in sequences:
+                continue
+            residues = atomgroup_for_entry(universe, entry).residues
+            seen = set()
+            sequence = []
+            for residue in residues:
+                key = (residue.ix, residue.resname, residue_number(residue))
+                if key in seen:
+                    continue
+                seen.add(key)
+                sequence.append({
+                    "label": residue_label(label, residue),
+                    "name": str(residue.resname).upper(),
+                    "number": residue_number(residue),
+                    "one": AA1.get(str(residue.resname).upper(), "X"),
+                })
+            sequences[label] = {
+                "label": label,
+                "type": entry.get("chain_type", "mixed_or_unknown"),
+                "residues": sequence,
+            }
+    return sequences
+
+
+def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_count, chain_pairs, universe):
+    """Write an interactive, self-contained peptide/protein interface RIN explorer."""
+    outdir = Path(outdir)
+    sequences = interface_chain_sequences(universe, chain_pairs)
+    records = []
+    if events_df is not None and not events_df.empty:
+        valid = events_df[events_df.get("ValidationStatus", "") == "validated"].copy()
+        for col in ("InterfaceResidueA", "InterfaceResidueB", "InteractionClass", "Frame"):
+            if col not in valid:
+                valid[col] = pd.Series(dtype=object)
+        typed = (valid.dropna(subset=["InterfaceResidueA", "InterfaceResidueB"])
+                 .drop_duplicates(["InterfaceResidueA", "InterfaceResidueB", "InteractionClass", "Frame"])
+                 .groupby(["InterfaceResidueA", "InterfaceResidueB", "InteractionClass"], as_index=False)["Frame"].nunique()
+                 .rename(columns={"InterfaceResidueA": "a", "InterfaceResidueB": "b", "InteractionClass": "type", "Frame": "frames"}))
+        for row in typed.itertuples(index=False):
+            records.append({"a": row.a, "b": row.b, "type": row.type,
+                            "fraction": round(float(row.frames) / max(1, frame_count), 6)})
+    # Preserve every observed interface edge, including contacts whose exact
+    # chemistry is deliberately reported only as proximity evidence.
+    typed_pairs = {(edge["a"], edge["b"]) for edge in records}
+    for row in residue_df.itertuples(index=False):
+        pair = (str(row.ResidueA), str(row.ResidueB))
+        if pair not in typed_pairs:
+            records.append({"a": pair[0], "b": pair[1], "type": "Other contact",
+                            "fraction": round(float(row.ContactFraction), 6)})
+
+    pair_options = [
+        {"id": f"{left['display_label']}__{right['display_label']}", "left": left["display_label"], "right": right["display_label"]}
+        for left, right in chain_pairs
+    ]
+    payload = json.dumps({"pairs": pair_options, "chains": sequences, "edges": records}, separators=(",", ":")).replace("</", "<\\/")
+    title = "Interface RIN explorer"
+    html = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><style>
+:root{{--bg:#05070d;--panel:#0e1625;--line:#2a405e;--text:#ecf5ff;--muted:#9bb0c9;--cyan:#4bd7ff;--pep:#ffcf5b;--hbond:#ff5578;--ionic:#c084fc;--hydrophobic:#7dff91;--other:#94a3b8}}*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at 90% 0,rgba(75,215,255,.16),transparent 31%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,sans-serif}}main{{max-width:1500px;margin:auto;padding:28px}}.eyebrow{{color:var(--cyan);font-size:.73rem;font-weight:900;letter-spacing:.14em}}h1{{font-size:clamp(2rem,4vw,4.2rem);letter-spacing:-.06em;margin:.25rem 0}}p{{line-height:1.5;color:var(--muted);max-width:850px}}.controls{{display:flex;gap:9px;flex-wrap:wrap;margin:20px 0}}button{{border:1px solid var(--line);border-radius:10px;background:#101d30;color:var(--text);font:800 .88rem inherit;padding:10px 13px;cursor:pointer}}button:hover,button.active{{border-color:var(--cyan);background:#12425b}}.layout{{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px}}.panel{{background:linear-gradient(145deg,#111b2c,#080c14);border:1px solid var(--line);border-radius:20px}}.diagram{{padding:14px;overflow:auto}}svg{{display:block;width:100%;min-width:720px;height:650px}}.edge{{fill:none;stroke-width:3;stroke-dasharray:8 6;opacity:.85;cursor:pointer}}.edge:hover,.edge.selected{{stroke-width:6;opacity:1}}.hbond{{stroke:var(--hbond)}}.ionic{{stroke:var(--ionic)}}.hydrophobic{{stroke:var(--hydrophobic)}}.other{{stroke:var(--other)}}.node circle{{fill:#d8e6f4;stroke:#07101e;stroke-width:2.5}}.node.left circle{{fill:#ffdb76}}.node text{{font-size:11px;font-weight:900;text-anchor:middle;pointer-events:none;fill:#07101e}}.side{{padding:18px}}.metric{{font-size:2.5rem;font-weight:900;color:var(--cyan);letter-spacing:-.07em}}.detail{{border-top:1px solid var(--line);margin-top:14px;padding-top:14px;color:var(--muted);line-height:1.5}}.legend{{display:grid;gap:8px;margin-top:18px;color:var(--muted);font-size:.85rem}}.swatch{{display:inline-block;width:27px;border-top:4px dashed currentColor;vertical-align:middle;margin-right:7px}}.sequence-panel{{margin-top:16px;padding:18px}}.sequence-title{{font-weight:900}}.sequence{{display:flex;flex-wrap:wrap;gap:4px;margin-top:10px;max-height:170px;overflow:auto;padding:3px}}.aa{{min-width:25px;text-align:center;padding:5px 3px;border-radius:6px;background:#17243a;color:#dbeafe;font:800 .76rem ui-monospace,monospace;cursor:default}}.aa.contact{{background:var(--pep);color:#17110a;box-shadow:0 0 0 1px rgba(255,207,91,.55)}}.aa.selected{{outline:3px solid var(--cyan)}}.empty{{padding:30px;color:var(--muted)}}@media(max-width:900px){{main{{padding:18px}}.layout{{grid-template-columns:1fr}}.side{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}.side h2,.legend{{grid-column:1/-1}}}}@media(max-width:520px){{.side{{display:block}}}}
+</style></head><body><main><div class="eyebrow">PYMACS · INTERACTIVE INTERFACE RIN</div><h1>Persistent protein interface</h1><p>Choose an interface and persistence threshold. Edges retain their chemically validated class when available; gray edges are observed heavy-atom contacts without a more specific validated class. Peptide chains are shown below as their complete connected sequence, with contacting residues highlighted.</p><div class="controls" id="pairs"></div><div class="controls" id="thresholds"><button data-t=".95">95% retained</button><button data-t=".90" class="active">90% retained</button><button data-t=".80">80% retained</button></div><section class="layout"><div class="panel diagram"><svg id="network" viewBox="0 0 1000 650" role="img" aria-label="Interactive residue interface network"></svg></div><aside class="panel side"><h2>Visible interactions</h2><div><div class="metric" id="count">—</div><div id="label">≥ 90% occupancy</div></div><div class="detail" id="detail">Click an edge or residue to inspect its interaction type and occupancy.</div><div class="legend"><span style="color:var(--hbond)"><i class="swatch"></i>Hydrogen bond</span><span style="color:var(--ionic)"><i class="swatch"></i>Ionic</span><span style="color:var(--hydrophobic)"><i class="swatch"></i>Hydrophobic</span><span style="color:var(--other)"><i class="swatch"></i>Other contact</span></div></aside></section><section class="panel sequence-panel" id="sequences"></section></main><script>const DATA={payload};let pair=DATA.pairs[0]?.id,threshold=.90,selected=null;const svg=document.querySelector('#network'),count=document.querySelector('#count'),label=document.querySelector('#label'),detail=document.querySelector('#detail');const esc=s=>String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]));const edgeClass=t=>/h-bond/i.test(t)?'hbond':/ionic/i.test(t)?'ionic':/hydrophobic/i.test(t)?'hydrophobic':'other';function current(){{const p=DATA.pairs.find(x=>x.id===pair);return {{p,edges:DATA.edges.filter(e=>e.a.startsWith(p.left+':')&&e.b.startsWith(p.right+':')&&e.fraction+1e-9>=threshold)}}}}function renderSequence(p,edges){{const contacts=new Set(edges.flatMap(e=>[e.a,e.b]));const chains=[p.left,p.right].map(id=>DATA.chains[id]).filter(Boolean);document.querySelector('#sequences').innerHTML=chains.map(c=>`<div class="sequence-title">${{esc(c.label)}} <span style="color:var(--muted);font-weight:600">(${{esc(c.type)}} · full sequence)</span></div><div class="sequence">${{c.residues.map(r=>`<span class="aa ${{contacts.has(r.label)?'contact':''}} ${{selected===r.label?'selected':''}}" title="${{esc(r.label)}}">${{esc(r.one)}}<sup>${{r.number}}</sup></span>`).join('')}}</div>`).join('')}}function render(){{const {{p,edges}}=current();if(!p){{svg.innerHTML='';return}}const left=[...new Set(edges.map(e=>e.a))],right=[...new Set(edges.map(e=>e.b))];const positions={{}};[left,right].forEach((nodes,side)=>nodes.forEach((node,i)=>positions[node]=[side?770:230,110+i*Math.min(480/Math.max(1,nodes.length-1),58)]));const lines=edges.map((e,i)=>{{const [x1,y1]=positions[e.a],[x2,y2]=positions[e.b],dy=(i%2?1:-1)*(18+i%3*10);return `<path class="edge ${{edgeClass(e.type)}} ${{selected===i?'selected':''}}" data-id="${{i}}" d="M ${{x1}} ${{y1}} Q 500 ${{(y1+y2)/2+dy}} ${{x2}} ${{y2}}"/>`}}).join('');const nodes=[...left,...right].map((n,i)=>{{const [x,y]=positions[n];return `<g class="node ${{left.includes(n)?'left':''}}" data-node="${{esc(n)}}"><circle cx="${{x}}" cy="${{y}}" r="40"/><text x="${{x}}" y="${{y-5}}">${{esc(n.split(':')[1]||n)}}</text><text x="${{x}}" y="${{y+11}}">${{esc(n.split(':')[0])}}</text></g>`}}).join('');svg.innerHTML=`<text x="230" y="45" text-anchor="middle" fill="#ffdb76" font-weight="900">${{esc(p.left)}}</text><text x="770" y="45" text-anchor="middle" fill="#dbeafe" font-weight="900">${{esc(p.right)}}</text>${{lines+nodes}}`;count.textContent=edges.length;label.textContent=`≥ ${{Math.round(threshold*100)}}% occupancy`;svg.querySelectorAll('.edge').forEach(el=>el.onclick=()=>{{const e=edges[+el.dataset.id];selected=+el.dataset.id;detail.innerHTML=`<b>${{esc(e.a)}}</b> ↔ <b>${{esc(e.b)}}</b><br>${{esc(e.type)}} · <b>${{(e.fraction*100).toFixed(1)}}%</b> occupancy`;render()}});svg.querySelectorAll('.node').forEach(el=>el.onclick=()=>{{selected=el.dataset.node;detail.innerHTML=`<b>${{esc(selected)}}</b><br>Highlighted in the complete chain sequence below.`;renderSequence(p,edges)}});if(!edges.length)detail.textContent='No interactions meet this threshold for the selected interface.';renderSequence(p,edges)}}document.querySelector('#pairs').innerHTML=DATA.pairs.map((p,i)=>`<button data-p="${{esc(p.id)}}" class="${{i?'':'active'}}">${{esc(p.left)}} ↔ ${{esc(p.right)}}</button>`).join('');document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{{pair=b.dataset.p;selected=null;document.querySelectorAll('[data-p]').forEach(x=>x.classList.toggle('active',x===b));render()}});document.querySelectorAll('[data-t]').forEach(b=>b.onclick=()=>{{threshold=+b.dataset.t;selected=null;document.querySelectorAll('[data-t]').forEach(x=>x.classList.toggle('active',x===b));render()}});render();</script></body></html>'''
+    (outdir / "Interface_RIN_Explorer.html").write_text(html, encoding="utf-8")
+
+
 def write_interface_manifest(
     manifest_path: Path,
     args,
@@ -1157,6 +1235,11 @@ def main():
         plot_residue_network(cached["residue_df"], outdir, args.min_contact_frac, args.max_edges)
         plot_chain_network(cached["summary_df"], outdir)
         plot_top_residue_pairs_barplot(cached["residue_df"], outdir)
+        events_path = outdir / "ValidatedInterfaceInteractionEvents.csv"
+        cached_events = pd.read_csv(events_path) if events_path.exists() else pd.DataFrame(columns=EVENT_COLUMNS)
+        write_interactive_interface_rin_html(
+            outdir, cached["residue_df"], cached_events, len(frame_indices), chain_pairs, universe
+        )
         stage_times["plotting_s"] = time.perf_counter() - t0
 
         runtime_lines = [
@@ -1350,6 +1433,9 @@ def main():
     plot_residue_network(residue_df, outdir, args.min_contact_frac, args.max_edges)
     plot_chain_network(summary_df, outdir)
     plot_top_residue_pairs_barplot(residue_df, outdir)
+    write_interactive_interface_rin_html(
+        outdir, residue_df, validated_events_df, len(frame_indices), chain_pairs, universe
+    )
     stage_times["plotting_s"] = time.perf_counter() - t0
 
     runtime_lines.extend(
@@ -1381,6 +1467,8 @@ def main():
         "interface_frame_index.csv",
         "interface_residue_pair_framewise.csv.gz",
         "interface_residue_pair_presence.npz",
+        "ValidatedInterfaceInteractionEvents.csv",
+        "ValidatedInterfaceInteractionOccupancy.csv",
         "interface_analysis_manifest.json",
         "interface_runtime_summary.txt",
         "Interface_ChainPair_ContactFractions.png",
@@ -1390,6 +1478,7 @@ def main():
         "Interface_RIN_Network.png",
         "Interface_ChainLevel_Network.png",
         "Interface_TopResiduePairs_Barplot.png",
+        "Interface_RIN_Explorer.html",
     ]
     print("✅ Main outputs:")
     for output in outputs:

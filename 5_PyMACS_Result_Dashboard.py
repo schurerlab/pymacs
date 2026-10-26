@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime as dt
 import json
 import os
 import subprocess
@@ -29,6 +30,108 @@ CYAN, GREEN, MAGENTA, ORANGE = "#35d0ff", "#18ff8b", "#ff2bd6", "#ff8a3d"
 # this only limits the points drawn in the browser.
 MAX_RENDER_POINTS = 2000
 MAX_HEATMAP_TIMEPOINTS = 250
+MAX_EVENT_POINTS = 12000
+MAX_TABLE_ROWS = 50000
+
+# The analysis pipeline intentionally writes both general-purpose calculations
+# and specialised diagnostics.  Some of their traces describe essentially the
+# same question at different selections (for example Protein_RMSD,
+# FullComplex_RMSD and RMSD_<chain>).  They all remain in the run directory,
+# but the browser gallery needs one canonical reading path instead of a wall
+# of near-duplicates.  This list is also written as a small, machine-readable
+# contract for the portal publisher.
+RESULTS_MANIFEST_NAME = "portal_results_manifest.json"
+CANONICAL_RESULT_ORDER = (
+    "DSSP_encoded_numeric.csv",
+    "Protein_RMSD.csv",
+    "RMSF_*_per_residue.csv",
+    "Radius_of_Gyration_Protein_Ligand_Complex.csv",
+    "SSE_Fractions.csv",
+    "*_Ligand_RMSD.csv",
+    "*_Ligand_RMSF.csv",
+    "*_contact_frequency_filtered.csv",
+    "*_contact_map_residue_time.csv",
+    "InteractionTypes_Framewise.csv",
+    "native_contact_q.csv",
+)
+
+
+def existing_result_matches(analysis: Path, pattern: str) -> list[Path]:
+    """Return deterministic matches for a canonical result pattern."""
+    return sorted(path for path in analysis.glob(pattern) if path.is_file())
+
+
+def build_results_manifest(root: Path, analysis: Path, output: Path,
+                           system_name: str, ligand_name: str) -> dict:
+    """Describe the standard, presentation-safe outputs of a completed run.
+
+    This deliberately separates the canonical gallery from supplementary
+    files.  No science is discarded: supplementary diagnostics remain in the
+    analysis directory and data bundle, while the gallery avoids showing three
+    subtly different RMSDs or atom- and residue-level RMSFs as if they were
+    interchangeable measurements.
+    """
+    canonical: list[str] = []
+    for pattern in CANONICAL_RESULT_ORDER:
+        for path in existing_result_matches(analysis, pattern):
+            relative = path.relative_to(root).as_posix()
+            if relative not in canonical:
+                canonical.append(relative)
+    report_relative = output.relative_to(root).as_posix()
+    ligand_svg = analysis / "Ligand_2D.svg"
+    if ligand_svg.is_file():
+        canonical.append(ligand_svg.relative_to(root).as_posix())
+    interface_explorer = analysis / "Interface_RIN" / "Interface_RIN_Explorer.html"
+    if interface_explorer.is_file():
+        canonical.append(interface_explorer.relative_to(root).as_posix())
+    canonical.append(report_relative)
+
+    all_outputs = sorted(
+        path.relative_to(root).as_posix()
+        for path in analysis.rglob("*")
+        if path.is_file() and path.name not in {RESULTS_MANIFEST_NAME}
+    )
+    supplementary = [relative for relative in all_outputs if relative not in canonical]
+    required = {
+        "global_stability": "Analysis_Results/Protein_RMSD.csv",
+        "secondary_structure": "Analysis_Results/DSSP_encoded_numeric.csv",
+        "interactive_report": report_relative,
+    }
+    optional = {
+        "ligand_pose": next((path for path in canonical if path.endswith("_Ligand_RMSD.csv")), None),
+        "ligand_contacts": next((path for path in canonical if path.endswith("InteractionTypes_Framewise.csv")), None),
+        "native_contact_q": next((path for path in canonical if path.endswith("native_contact_q.csv")), None),
+        "interface_rin": next((path for path in canonical if path.endswith("Interface_RIN_Explorer.html")), None),
+    }
+    return {
+        "schema_version": 1,
+        "generated_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "system_name": system_name,
+        "ligand_name": ligand_name,
+        "analysis_complete": all(Path(root / relative).is_file() for relative in required.values()),
+        "report": report_relative,
+        "canonical_assets": canonical,
+        "supplementary_assets": supplementary,
+        "required_outputs": required,
+        "optional_outputs": optional,
+        "notes": {
+            "canonical_policy": "The interactive gallery shows one primary trace per scientific question; supplementary diagnostics remain downloadable.",
+            "native_contact_q": "Optional until native-contact analysis has completed.",
+        },
+    }
+
+
+def canonical_gallery_csvs(analysis: Path) -> set[Path]:
+    """CSV inputs shown in the main gallery; all other CSVs remain exports."""
+    selected: set[Path] = set()
+    for pattern in CANONICAL_RESULT_ORDER:
+        selected.update(existing_result_matches(analysis, pattern))
+    # Matrix outputs are rendered as bespoke heatmaps rather than XY cards.
+    return {
+        path for path in selected
+        if path.name not in {"DSSP_encoded_numeric.csv", "InteractionTypes_Framewise.csv"}
+        and not path.name.endswith("_contact_map_residue_time.csv")
+    }
 
 
 GRAPH_GUIDES = {
@@ -210,13 +313,114 @@ def ligand_html(root: Path, ligand_name: str) -> str:
 
 
 def interactive_networx_html(analysis: Path) -> str:
-    """Embed the threshold-switchable NETWORX explorer when Step 3 created it."""
+    """Embed the explorer source directly; never navigate to an attachment."""
     explorers = sorted((analysis / "NETWORX").glob("*_interactive.html"))
     if not explorers:
         return ""
     explorer = explorers[0]
-    source = escape(explorer.relative_to(analysis).as_posix())
-    return f'''<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Persistent interaction explorer</div><h2>Compare retained interactions</h2><p>Default view: interactions retained in at least 90% of analyzed frames. Switch to 95% or 80% to see exactly which chemical contacts enter or leave the diagram.</p></div></div><iframe title="Interactive ligand interaction explorer" src="{source}" style="display:block;width:100%;height:850px;border:1px solid #285a79;border-radius:16px;background:#05070d" loading="lazy"></iframe><p class="asset-note"><a href="{source}" target="_blank" rel="noopener">Open the full-screen interaction explorer ↗</a></p></section>'''
+    try:
+        document = explorer.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    # srcdoc makes the explorer part of this report.  Its CSS/IDs/scripts are
+    # deliberately isolated, so the Overview and Contacts copies can coexist.
+    return f'''<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Persistent interaction explorer</div><h2>Compare retained interactions</h2><p>Choose the displayed occupancy threshold to inspect the chemically classified residue–ligand-atom interactions. This explorer is embedded in the dossier; it does not open or download a separate page.</p></div></div><iframe title="Interactive ligand interaction explorer" srcdoc="{escape(document, quote=True)}" sandbox="allow-scripts" style="display:block;width:100%;height:850px;border:1px solid #285a79;border-radius:16px;background:#05070d" loading="lazy"></iframe></section>'''
+
+
+def interface_rin_context(analysis: Path) -> dict:
+    """Read the generated RIN explorer and retain one independently viewable panel per chain pair."""
+    interface_dir = analysis / "Interface_RIN"
+    explorer = interface_dir / "Interface_RIN_Explorer.html"
+    if not explorer.is_file():
+        return {"overview": "", "protein_detail": "", "peptide_detail": ""}
+    try:
+        document = explorer.read_text(encoding="utf-8")
+        summary = pd.read_csv(interface_dir / "interface_chain_pair_summary.csv")
+    except (OSError, ValueError, pd.errors.ParserError):
+        return {"overview": "", "protein_detail": "", "peptide_detail": ""}
+    required = {"ChainA_Label", "ChainB_Label"}
+    if summary.empty or not required.issubset(summary.columns):
+        return {"overview": "", "protein_detail": "", "peptide_detail": ""}
+
+    chain_types: dict[str, str] = {}
+    try:
+        manifest = json.loads((interface_dir / "interface_analysis_manifest.json").read_text(encoding="utf-8"))
+        for entry in manifest.get("chain_metadata", []):
+            chain_types[str(entry.get("display_label", ""))] = str(entry.get("chain_type", ""))
+    except (OSError, ValueError, TypeError):
+        pass
+    pairs = []
+    for row in summary.drop_duplicates(["ChainA_Label", "ChainB_Label"]).itertuples(index=False):
+        left, right = str(row.ChainA_Label), str(row.ChainB_Label)
+        pair_id = f"{left}__{right}"
+        types = {chain_types.get(left, "").casefold(), chain_types.get(right, "").casefold()}
+        peptide = any("peptide" in item for item in types)
+        pairs.append((pair_id, left, right, peptide))
+    if not pairs:
+        return {"overview": "", "protein_detail": "", "peptide_detail": ""}
+
+    def embedded(pair_id: str, title: str, *, compact: bool) -> str:
+        # The RIN exporter deliberately keeps every chain pair in one source
+        # file.  Set its initial pair before embedding so a dossier panel is a
+        # readable A:B view rather than a crowded all-chain graph.
+        focused = document.replace(
+            "let pair=DATA.pairs[0]?.id,threshold=.90,selected=null;",
+            f"let pair={json.dumps(pair_id)},threshold=.90,selected=null;",
+            1,
+        )
+        if compact:
+            focused = focused.replace(".controls{display:flex", "#pairs{display:none}.controls{display:flex", 1)
+        return (
+            f'<iframe title="{escape(title)}" srcdoc="{escape(focused, quote=True)}" '
+            'sandbox="allow-scripts" style="display:block;width:100%;height:880px;border:1px solid #285a79;'
+            'border-radius:16px;background:#05070d" loading="lazy"></iframe>'
+        )
+
+    first_id, first_left, first_right, first_peptide = pairs[0]
+    first_kind = "Peptide–protein" if first_peptide else "Protein–protein"
+    overview = f'''<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Interface overview</div><h2>{escape(first_kind)} · {escape(first_left)} ↔ {escape(first_right)}</h2><p>This is the first analyzed interface. Each chain pair has its own panel in the Interface networks tab, avoiding a single unreadable all-protein graph.</p></div></div>{embedded(first_id, f'{first_left} to {first_right} interface explorer', compact=True)}</section>'''
+    protein_panels, peptide_panels = [], []
+    for index, (pair_id, left, right, peptide) in enumerate(pairs):
+        kind = "Peptide–protein interface" if peptide else "Protein–protein interface"
+        note = (
+            "The complete peptide sequence is shown below the RIN; highlighted residues contact the protein at the active threshold."
+            if peptide else
+            "This pair is isolated from other chains so its persistent interface chemistry stays readable."
+        )
+        panel = (
+            f'<details class="interface-pair"{" open" if index == 0 else ""}><summary>{escape(left)} ↔ {escape(right)} <span>{escape(kind)}</span></summary>'
+            f'<p class="muted">{escape(note)}</p>{embedded(pair_id, f'{left} to {right} interface explorer', compact=True)}</details>'
+        )
+        (peptide_panels if peptide else protein_panels).append(panel)
+
+    def detail(title: str, eyebrow: str, text: str, panels: list[str]) -> str:
+        if not panels:
+            return ""
+        return f'''<section class="gallery-section interface-gallery"><div class="section-head"><div><div class="eyebrow">{escape(eyebrow)}</div><h2>{escape(title)}</h2><p>{escape(text)}</p></div></div>{''.join(panels)}</section>'''
+
+    return {
+        "overview": overview,
+        "protein_detail": detail("One network per protein pair", "Protein–protein interfaces", "Open a chain-pair container to inspect its contact persistence and validated interaction types without mixing other proteins into the graph.", protein_panels),
+        "peptide_detail": detail("Peptide sequence and protein interface", "Peptide–protein interfaces", "Each panel keeps the full peptide sequence together, highlights contacting residues, and shows only its selected protein interface.", peptide_panels),
+    }
+
+
+def final_structure_html(root: Path, ligand_name: str) -> str:
+    """Embed the final complex or apo PDB in the report's 3Dmol viewer."""
+    candidates = (root / "Final_Trajectory.pdb", root / "binding_pocket_only.pdb")
+    structure = next((path for path in candidates if path.is_file()), None)
+    if structure is None:
+        return (
+            '<section class="structure-card"><div class="eyebrow">Final structure</div>'
+            '<h2>3D complex / apo viewer</h2><p class="muted">No final PDB was published for this run.</p></section>'
+        )
+    try:
+        payload = base64.b64encode(structure.read_bytes()).decode("ascii")
+    except OSError:
+        return ""
+    ligand = "".join(ch for ch in ligand_name if ch.isalnum())[:4]
+    ligand_attr = escape(ligand)
+    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Final structure</div><h2>3D complex / apo viewer</h2><p>Drag to rotate, scroll to zoom, and choose a focused view. The model is the final published PDB, not a representative image.</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure display"><button type="button" data-structure-view="complex">Full structure</button><button type="button" data-structure-view="protein">Protein</button>{f'<button type="button" data-structure-view="pocket">Ligand + pocket</button>' if ligand else ''}</div><div class="complex-3d js-complex-3d" data-ligand="{ligand_attr}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · final published coordinate snapshot.</p></section>'''
 
 
 def read_metadata(root: Path) -> dict:
@@ -317,6 +521,282 @@ def numeric_plot(csv_file: Path, color: str) -> str | None:
         yaxis={"title": y_name, "gridcolor": GRID, "zerolinecolor": GRID},
         hovermode="x unified", height=360,
     )
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def _read_table(csv_file: Path) -> pd.DataFrame | None:
+    try:
+        # Frame-wise contact tables can contain millions of rows.  A bounded
+        # scientific sample keeps the dashboard responsive; the exact CSV is
+        # still linked from every card for full-resolution analysis.
+        table = pd.read_csv(csv_file, nrows=MAX_TABLE_ROWS)
+        return table if not table.empty else None
+    except Exception:
+        return None
+
+
+def _sample_table(table: pd.DataFrame, maximum: int = MAX_RENDER_POINTS) -> pd.DataFrame:
+    if len(table) <= maximum:
+        return table
+    return table.iloc[np.linspace(0, len(table) - 1, maximum, dtype=int)]
+
+
+def multiseries_plot(csv_file: Path, title: str, x_column: str, y_columns: list[str],
+                     y_title: str, colors: list[str] | None = None) -> str | None:
+    """Render selected scientific columns as hoverable lines, never raw table rows."""
+    table = _read_table(csv_file)
+    if table is None or x_column not in table or not any(column in table for column in y_columns):
+        return None
+    table = table.copy()
+    table[x_column] = pd.to_numeric(table[x_column], errors="coerce")
+    table = table.dropna(subset=[x_column]).sort_values(x_column)
+    table = _sample_table(table)
+    if len(table) < 2:
+        return None
+    palette = colors or [CYAN, GREEN, MAGENTA, ORANGE, "#8b5cf6", "#facc15"]
+    figure = go.Figure()
+    for index, column in enumerate(y_columns):
+        if column not in table:
+            continue
+        values = pd.to_numeric(table[column], errors="coerce")
+        if not values.notna().any():
+            continue
+        figure.add_trace(go.Scatter(
+            x=table[x_column], y=values, mode="lines", name=column.replace("_", " "),
+            line={"color": palette[index % len(palette)], "width": 2},
+            hovertemplate=f"{escape(x_column)}=%{{x:.4g}}<br>{escape(column)}=%{{y:.4g}}<extra></extra>",
+        ))
+    if not figure.data:
+        return None
+    figure.update_layout(
+        title=title, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
+        margin={"l": 60, "r": 20, "t": 55, "b": 52}, hovermode="x unified", height=380,
+        xaxis={"title": x_column.replace("_", " "), "gridcolor": GRID},
+        yaxis={"title": y_title, "gridcolor": GRID},
+        legend={"orientation": "h", "y": 1.13},
+    )
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def categorical_bar_plot(csv_file: Path, title: str, category: str, values: list[str],
+                         y_title: str, stacked: bool = False,
+                         colors: list[str] | None = None) -> str | None:
+    table = _read_table(csv_file)
+    if table is None or category not in table or not any(column in table for column in values):
+        return None
+    table = table.copy().head(80)
+    figure = go.Figure()
+    for index, column in enumerate(values):
+        if column not in table:
+            continue
+        y = pd.to_numeric(table[column], errors="coerce").fillna(0)
+        figure.add_trace(go.Bar(
+            x=table[category].astype(str), y=y, name=column.replace("_", " "),
+            marker_color=(colors or [CYAN, GREEN, MAGENTA, ORANGE, "#8b5cf6"])[index % len(colors or [CYAN, GREEN, MAGENTA, ORANGE, "#8b5cf6"])],
+            hovertemplate=f"{escape(category)}=%{{x}}<br>{escape(column)}=%{{y:.4g}}<extra></extra>",
+        ))
+    if not figure.data:
+        return None
+    figure.update_layout(
+        title=title, barmode="stack" if stacked else "group", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 115},
+        xaxis={"title": category.replace("_", " "), "gridcolor": GRID, "tickangle": -45},
+        yaxis={"title": y_title, "gridcolor": GRID}, height=420, legend={"orientation": "h", "y": 1.13},
+    )
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def contact_persistence_plot(events_file: Path, denominator_file: Path,
+                             interaction_file: Path | None, protein_name: str) -> str | None:
+    """Compute residue-labelled 0–1 persistence from framewise contact events.
+
+    Older pipeline tables can contain local row indices and a micro-fraction.
+    The framewise event files retain the original residue labels, so use those
+    as the authority for both the x axis and hover text.
+    """
+    def residue_frames(path: Path) -> tuple[dict[str, set[float]], set[float]]:
+        observed: dict[str, set[float]] = {}
+        frames: set[float] = set()
+        try:
+            for chunk in pd.read_csv(path, usecols=["Time_ns", "Residue"], chunksize=100_000):
+                chunk["Time_ns"] = pd.to_numeric(chunk["Time_ns"], errors="coerce")
+                chunk = chunk.dropna(subset=["Time_ns", "Residue"])
+                for residue, times in chunk.groupby("Residue")["Time_ns"]:
+                    values = set(times.astype(float).tolist())
+                    observed.setdefault(str(residue), set()).update(values)
+                    frames.update(values)
+        except Exception:
+            return {}, set()
+        return observed, frames
+
+    observed, _ = residue_frames(events_file)
+    _, all_frames = residue_frames(denominator_file)
+    if not observed or not all_frames:
+        return None
+    type_colors = {"H-bond": CYAN, "Ionic": MAGENTA, "Hydrophobic": ORANGE}
+    types: dict[str, str] = {}
+    if interaction_file and interaction_file.is_file():
+        try:
+            interactions = pd.read_csv(interaction_file, usecols=["Residue", "Type"])
+            for residue, values in interactions.dropna().groupby("Residue")["Type"]:
+                counts = values.astype(str).value_counts()
+                # Use the chemistry observed most often for this residue.
+                # A previous "any H-bond wins" priority made transient
+                # H-bonds visually dominate the persistence chart.
+                types[str(residue)] = str(counts.index[0]) if not counts.empty else "Contact"
+        except Exception:
+            pass
+    rows = sorted(((residue, len(times) / len(all_frames), types.get(residue, "Contact"))
+                   for residue, times in observed.items()), key=lambda item: item[0])
+    if not rows:
+        return None
+    residues, fractions, interaction_types = map(list, zip(*rows))
+    colors = [type_colors.get(kind, GREEN) for kind in interaction_types]
+    figure = go.Figure(go.Bar(
+        x=residues, y=fractions, marker_color=colors,
+        customdata=np.column_stack([interaction_types, np.asarray(fractions) * 100]),
+        hovertemplate="Residue=%{x}<br>Contact persistence=%{y:.3f} (%{customdata[1]:.1f} of sampled frames)<br>Most frequent interaction chemistry=%{customdata[0]}<extra></extra>",
+    ))
+    figure.update_layout(
+        title=f"{protein_name} ligand-contact persistence", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
+        margin={"l": 60, "r": 20, "t": 55, "b": 115}, height=420,
+        xaxis={"title": f"{protein_name} residue", "gridcolor": GRID, "tickangle": -45},
+        yaxis={"title": "Contact persistence (fraction of sampled frames)", "range": [0, 1], "gridcolor": GRID},
+    )
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def distance_carousel_html(analysis: Path) -> str:
+    """Render the precomputed residue set as native, hoverable Plotly bars."""
+    directory = analysis / "RESIDUE_Contact_Distance"
+    residues = [image.stem.removeprefix("dist_") for image in sorted(directory.glob("dist_*.png"))] if directory.is_dir() else []
+    source = analysis / "AllContacts_Framewise.csv"
+    if not residues or not source.is_file():
+        return ""
+    wanted = set(residues)
+    samples: dict[str, list[float]] = {residue: [] for residue in residues}
+    # Exact source data stays downloadable; retain a generous, deterministic
+    # browser sample from every residue so publication remains lightweight.
+    try:
+        for chunk in pd.read_csv(source, usecols=["Residue", "Distance"], chunksize=100_000):
+            chunk["Distance"] = pd.to_numeric(chunk["Distance"], errors="coerce")
+            for residue, values in chunk.dropna().groupby("Residue")["Distance"]:
+                residue = str(residue)
+                if residue not in wanted or len(samples[residue]) >= 12_000:
+                    continue
+                samples[residue].extend(values.iloc[:12_000 - len(samples[residue])].astype(float).tolist())
+    except Exception:
+        return ""
+    slides: list[str] = []
+    for index, residue in enumerate(residues):
+        values = np.asarray(samples[residue], dtype=float)
+        if values.size < 2:
+            continue
+        counts, edges = np.histogram(values, bins=32)
+        centres = (edges[:-1] + edges[1:]) / 2
+        shares = counts / counts.sum() * 100
+        figure = go.Figure(go.Bar(
+            x=centres, y=counts, width=np.diff(edges) * 0.92, marker_color=CYAN,
+            customdata=np.column_stack([edges[:-1], edges[1:], shares]),
+            hovertemplate=(f"Residue={escape(residue)}<br>Distance interval=%{{customdata[0]:.2f}}–%{{customdata[1]:.2f}} Å"
+                           "<br>Observed contact events=%{y}<br>Share of displayed events=%{customdata[2]:.2f}%<extra></extra>"),
+        ))
+        figure.update_layout(
+            title=f"{residue} ligand–residue distance distribution", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+            font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, height=480,
+            margin={"l": 65, "r": 25, "t": 60, "b": 55},
+            xaxis={"title": "Ligand–residue distance (Å)", "gridcolor": GRID},
+            yaxis={"title": "Observed contact events", "gridcolor": GRID},
+            annotations=[{"text": f"n={len(values):,} displayed events · mean={values.mean():.2f} Å · median={np.median(values):.2f} Å", "showarrow": False, "x": 0.5, "xref": "paper", "y": 1.12, "yref": "paper", "font": {"color": MUTED}}],
+        )
+        graph = plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+        slides.append(f'<div class="distance-slide{" is-active" if not slides else ""}" data-distance-slide>{graph}</div>')
+    if not slides:
+        return ""
+    source_link = source.name
+    return f'''<style>.distance-carousel{{border-radius:21px;padding:20px;margin-top:18px;background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.distance-carousel-controls{{display:flex;align-items:center;gap:10px;justify-content:center;margin:0 0 12px}}.distance-carousel-controls button{{border:1px solid #285a79;border-radius:10px;background:#0a253a;color:#cfe8ff;padding:9px 12px;font:800 .82rem inherit;cursor:pointer}}.distance-carousel-controls button:hover{{background:#116887;color:#fff;border-color:#35d0ff}}.distance-carousel-controls span{{min-width:150px;text-align:center;color:#7aa6d9;font-size:.88rem}}.distance-carousel-stage{{border:1px solid rgba(53,208,255,.28);border-radius:16px;background:#070b14;overflow:hidden}}.distance-slide{{display:none;margin:0;padding:7px}}.distance-slide.is-active{{display:block}}</style><section class="distance-carousel" aria-label="Per-residue ligand contact-distance distributions">
+<div class="section-head"><div><div class="eyebrow">Interactive residue maps</div><h2>Residue interaction distance carousel</h2><p>Hover each cyan bar for its distance interval, observed-event count, and share of the displayed events. The mean and median summarize the selected residue above the plot.</p></div></div>
+<div class="distance-carousel-controls"><button type="button" data-distance-prev aria-label="Previous residue map">← Previous</button><span data-distance-status></span><button type="button" data-distance-next aria-label="Next residue map">Next →</button></div>
+<div class="distance-carousel-stage">{"".join(slides)}</div><a href="{escape(source_link)}" download style="display:inline-block;color:#35d0ff;font-size:.8rem;font-weight:800;margin:10px 3px 5px">Download exact source CSV for all residue distance distributions</a>{guide_html("contact_frequency")}</section><script>(()=>{{const root=document.currentScript.previousElementSibling,slides=[...root.querySelectorAll('[data-distance-slide]')],status=root.querySelector('[data-distance-status]');let index=0;const render=()=>{{slides.forEach((slide,i)=>slide.classList.toggle('is-active',i===index));status.textContent=`${{index+1}} / ${{slides.length}} · ${{slides[index].querySelector('.plotly-graph-div').layout.title.text}}`;requestAnimationFrame(()=>slides[index].querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot)))}};root.querySelector('[data-distance-prev]').addEventListener('click',()=>{{index=(index-1+slides.length)%slides.length;render()}});root.querySelector('[data-distance-next]').addEventListener('click',()=>{{index=(index+1)%slides.length;render()}});render()}})();</script>'''
+
+
+def contact_events_plot(csv_file: Path, title: str, distance_mode: bool = False) -> str | None:
+    """Show individual calculated contact events with residue/atom hover context."""
+    table = _read_table(csv_file)
+    required = {"Time_ns", "Residue", "Distance"}
+    if table is None or not required.issubset(table.columns):
+        return None
+    table = table.copy()
+    table["Time_ns"] = pd.to_numeric(table["Time_ns"], errors="coerce")
+    table["Distance"] = pd.to_numeric(table["Distance"], errors="coerce")
+    table = table.dropna(subset=["Time_ns", "Distance", "Residue"])
+    table = _sample_table(table, MAX_EVENT_POINTS)
+    if table.empty:
+        return None
+    y = table["Distance"] if distance_mode else table["Residue"].astype(str)
+    custom = np.column_stack([
+        table.get("LigAtomName", pd.Series("–", index=table.index)).astype(str),
+        table.get("ProtAtomName", pd.Series("–", index=table.index)).astype(str),
+        table["Distance"].round(3),
+    ])
+    figure = go.Figure(go.Scattergl(
+        x=table["Time_ns"], y=y, mode="markers", marker={"size": 5, "color": table["Distance"], "colorscale": "Turbo", "showscale": True, "colorbar": {"title": "Distance (Å)"}},
+        customdata=custom,
+        hovertemplate="Time=%{x:.3f} ns<br>Residue=%{y}<br>Ligand atom=%{customdata[0]}<br>Protein atom=%{customdata[1]}<br>Distance=%{customdata[2]} Å<extra></extra>",
+    ))
+    figure.update_layout(
+        title=title, paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
+        margin={"l": 85, "r": 35, "t": 55, "b": 52}, height=440,
+        xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Distance (Å)" if distance_mode else "Protein residue", "gridcolor": GRID},
+    )
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def distance_histogram_plot(csv_file: Path) -> str | None:
+    table = _read_table(csv_file)
+    if table is None or "Distance" not in table:
+        return None
+    values = pd.to_numeric(table["Distance"], errors="coerce").dropna()
+    if values.empty:
+        return None
+    figure = go.Figure(go.Histogram(x=values, nbinsx=70, marker_color=CYAN,
+        hovertemplate="Distance=%{x:.3f} Å<br>Events=%{y}<extra></extra>"))
+    figure.update_layout(title="Composite ligand–residue distance distribution", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=380,
+        xaxis={"title": "Distance (Å)", "gridcolor": GRID}, yaxis={"title": "Observed events", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def interaction_degree_plot(csv_file: Path) -> str | None:
+    table = _read_table(csv_file)
+    if table is None or not {"Time_ns", "Residue"}.issubset(table.columns):
+        return None
+    degree = table.dropna(subset=["Time_ns", "Residue"]).groupby("Time_ns")["Residue"].nunique().reset_index(name="Interaction_degree")
+    # Render directly to avoid creating an on-disk derived analysis artifact.
+    figure = go.Figure(go.Scatter(x=degree["Time_ns"], y=degree["Interaction_degree"], mode="lines", line={"color": MAGENTA, "width": 2},
+        hovertemplate="Time=%{x:.3f} ns<br>Unique contacting residues=%{y}<extra></extra>"))
+    figure.update_layout(title="Interaction degree over time", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=380,
+        xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Unique contacting residues", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def persistence_distance_plot(contacts_file: Path, frequency_file: Path) -> str | None:
+    contacts, frequency = _read_table(contacts_file), _read_table(frequency_file)
+    if contacts is None or frequency is None or not {"Residue", "Distance"}.issubset(contacts.columns) or not {"Residue", "PercentFrames"}.issubset(frequency.columns):
+        return None
+    means = contacts.assign(Distance=pd.to_numeric(contacts["Distance"], errors="coerce")).groupby("Residue", as_index=False)["Distance"].mean()
+    merged = means.merge(frequency[["Residue", "PercentFrames"]], on="Residue", how="inner").dropna()
+    if merged.empty:
+        return None
+    figure = go.Figure(go.Scatter(x=merged["Distance"], y=merged["PercentFrames"], mode="markers+text", text=merged["Residue"], textposition="top center",
+        marker={"size": 10, "color": merged["PercentFrames"], "colorscale": "Viridis", "showscale": True, "colorbar": {"title": "% frames"}},
+        hovertemplate="Residue=%{text}<br>Mean distance=%{x:.3f} Å<br>Contact frequency=%{y:.2f}%<extra></extra>"))
+    figure.update_layout(title="Contact persistence versus mean distance", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 65, "r": 25, "t": 55, "b": 52}, height=410,
+        xaxis={"title": "Mean ligand–residue distance (Å)", "gridcolor": GRID}, yaxis={"title": "Contact frequency (%)", "gridcolor": GRID})
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
@@ -482,18 +962,38 @@ def section_html(title: str, eyebrow: str, text: str, cards: list[str]) -> str:
     return f'<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">{escape(eyebrow)}</div><h2>{escape(title)}</h2><p>{escape(text)}</p></div></div><div class="grid">{"".join(cards)}</div></section>'
 
 
-def build_document(system_name: str, ligand_name: str, cards: list[str], galleries: str) -> str:
+def tabbed_sections(sections: list[tuple[str, str, str]]) -> str:
+    """Build one dashboard surface with tabs, without duplicating plot markup."""
+    visible = [(ident, label, body) for ident, label, body in sections if body]
+    if not visible:
+        return ""
+    tabs = "".join(
+        f'<button type="button" role="tab" id="tab-{ident}" aria-controls="panel-{ident}" '
+        f'aria-selected="{str(index == 0).lower()}" data-dashboard-tab="{ident}">{escape(label)}</button>'
+        for index, (ident, label, _) in enumerate(visible)
+    )
+    panels = "".join(
+        f'<section id="panel-{ident}" role="tabpanel" aria-labelledby="tab-{ident}" '
+        f'class="dashboard-panel{" is-active" if index == 0 else ""}"{ "" if index == 0 else " hidden"}>{body}</section>'
+        for index, (ident, _, body) in enumerate(visible)
+    )
+    return f'<section id="analysis-tabs" class="dashboard-tabs-shell"><div class="dashboard-tabs" role="tablist" aria-label="Result analyses">{tabs}</div>{panels}</section>'
+
+
+def build_document(system_name: str, ligand_name: str, cards: list[str], dashboard: str) -> str:
     """Return the Kyle-hosted, self-contained single-run reading room."""
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(system_name)} · PyMACS results</title><script>{plotlyjs()}</script><script src="/static/3Dmol-min.js"></script><style>
-:root{{--bg:#05060a;--panel:#0b1020;--grid:#1c2a4a;--text:#cfe8ff;--muted:#7aa6d9;--cyan:#35d0ff;--green:#18ff8b;--yellow:#ffe66d;--magenta:#ff2bd6;--orange:#ff8a3d}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 90% 0,rgba(53,208,255,.15),transparent 30%),radial-gradient(circle at 4% 25%,rgba(255,43,214,.10),transparent 27%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}}.page{{max-width:1560px;margin:auto;padding:32px 24px 70px}}.hero,.card,.ligand-card,.gallery-section{{background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.hero{{position:relative;overflow:hidden;border-radius:25px;padding:34px;margin-bottom:20px}}.hero:before{{content:"";position:absolute;inset:-48%;background:conic-gradient(from 180deg,transparent,rgba(53,208,255,.16),transparent,rgba(255,43,214,.13),transparent);animation:slow-spin 28s linear infinite;pointer-events:none}}.hero>*{{position:relative;z-index:1}}@keyframes slow-spin{{to{{transform:rotate(360deg)}}}}.eyebrow{{color:var(--green);font-size:.75rem;font-weight:900;letter-spacing:.16em;text-transform:uppercase}}h1{{font-size:clamp(2.5rem,5.2vw,5.2rem);letter-spacing:-.065em;line-height:.92;margin:.35rem 0 1rem}}h2{{letter-spacing:-.025em;margin:.2rem 0 .45rem;font-size:1.5rem}}p{{line-height:1.55}}.sub,.section-head p,.muted,.asset-note{{color:var(--muted);max-width:960px}}.pills{{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}}.pill{{border:1px solid rgba(53,208,255,.28);padding:8px 11px;border-radius:999px;background:rgba(53,208,255,.08);font-size:.88rem}}details.guide,.overview{{margin:11px 0 2px;border:1px solid rgba(53,208,255,.22);border-radius:13px;background:rgba(5,10,23,.68)}}details.guide summary,.overview summary{{cursor:pointer;padding:10px 12px;color:var(--cyan);font-weight:800;font-size:.88rem}}details.guide p,.overview p{{margin:0;padding:0 12px 11px;color:var(--muted);font-size:.87rem}}.overview{{margin-top:22px;max-width:1020px}}.overview ol{{margin:0;padding:0 28px 15px;color:var(--muted);line-height:1.55}}.gallery-section,.ligand-card{{border-radius:21px;padding:20px;margin-top:18px}}.section-head{{border-left:3px solid var(--green);padding-left:13px;margin-bottom:16px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}}.card{{border-radius:17px;padding:13px;overflow:hidden}}.card .js-plotly-plot{{cursor:zoom-in}}.card a{{display:inline-block;color:var(--cyan);font-size:.8rem;font-weight:800;margin:8px 10px 5px}}.heatmap-note{{margin:7px 10px;color:var(--muted);font-size:.82rem;line-height:1.4}}.ligand-grid{{display:grid;grid-template-columns:minmax(300px,1fr) minmax(300px,1fr);gap:18px;align-items:stretch}}.ligand-2d,.ligand-3d{{min-height:330px;border:1px solid rgba(255,230,109,.30);border-radius:17px;background:radial-gradient(circle at center,rgba(255,230,109,.08),rgba(5,6,10,.7) 70%);overflow:hidden;position:relative}}.ligand-2d svg{{display:block;width:100%;height:330px;max-width:100%}}.ligand-3d{{border-color:rgba(53,208,255,.30)}}.viewer-label{{color:var(--yellow);font-size:.78rem;font-weight:900;text-transform:uppercase;letter-spacing:.1em;margin:2px 0 8px}}.missing-visual{{padding:24px;color:var(--muted)}}.asset-note{{font-size:.8rem;margin:.7rem 0 0}}code{{display:block;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 12px 12px;color:var(--yellow)}}.graph-modal{{display:none;position:fixed;z-index:9999;inset:0;padding:3vh 3vw;background:rgba(0,0,0,.78);backdrop-filter:blur(7px)}}.graph-modal.open{{display:flex;align-items:center;justify-content:center}}.graph-modal-panel{{position:relative;width:min(1500px,94vw);height:min(900px,92vh);padding:20px 16px 12px;border:1px solid var(--cyan);background:#080d1b;box-shadow:0 0 70px rgba(53,208,255,.18);border-radius:20px}}.graph-modal-close{{position:absolute;right:17px;top:13px;z-index:2;border:1px solid var(--cyan);border-radius:999px;background:#101b33;color:var(--text);font-weight:800;padding:8px 12px;cursor:pointer}}.graph-modal-plot{{width:100%;height:100%}}@media(max-width:700px){{.page{{padding:18px 12px 42px}}.grid,.ligand-grid{{grid-template-columns:1fr}}.hero{{padding:24px 19px}}.graph-modal{{padding:1vh 1vw}}.graph-modal-panel{{width:98vw;height:96vh;padding:14px 4px 4px}}}}
-</style></head><body><main class="page"><section class="hero"><div class="eyebrow">PyMACS · single-system results</div><h1>{escape(system_name)}</h1><p class="sub">A guided reading room for this simulation. Start with global stability, then inspect ligand pose and pocket chemistry. The raw data remain downloadable, but every published result is visible here first.</p><div class="pills"><span class="pill">Ligand / PROTAC: {escape(ligand_name)}</span><span class="pill">{len(cards)} interactive analyses</span><span class="pill">Kyle-local, fast delivery</span></div><details class="overview"><summary>ⓘ How to read this result—start here</summary><ol><li><b>Check the fold:</b> protein RMSD, radius of gyration, and secondary-structure evolution should be considered together.</li><li><b>Check the pose:</b> interpret ligand RMSD/RMSF with persistent contacts—not in isolation.</li><li><b>Check the chemistry:</b> solid-color interaction types show which residues make hydrophobic, ionic, or hydrogen-bond interactions over time.</li><li><b>Do not overclaim:</b> these trajectories test stability of a modeled system; they do not by themselves establish binding affinity or experimental activity.</li></ol></details></section>{galleries}</main><div class="graph-modal" id="graph-modal" aria-hidden="true"><div class="graph-modal-panel"><button class="graph-modal-close" id="graph-modal-close" type="button">Close ×</button><div class="graph-modal-plot" id="graph-modal-plot"></div></div></div><script>
+:root{{--bg:#05060a;--panel:#0b1020;--grid:#1c2a4a;--text:#cfe8ff;--muted:#7aa6d9;--cyan:#35d0ff;--green:#18ff8b;--yellow:#ffe66d;--magenta:#ff2bd6;--orange:#ff8a3d}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 90% 0,rgba(53,208,255,.15),transparent 30%),radial-gradient(circle at 4% 25%,rgba(255,43,214,.10),transparent 27%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}}.page{{max-width:1560px;margin:auto;padding:32px 24px 70px}}.hero,.card,.ligand-card,.gallery-section,.structure-card,.dashboard-tabs-shell{{background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.hero{{position:relative;overflow:hidden;border-radius:25px;padding:34px;margin-bottom:20px}}.hero:before{{content:"";position:absolute;inset:-48%;background:conic-gradient(from 180deg,transparent,rgba(53,208,255,.16),transparent,rgba(255,43,214,.13),transparent);animation:slow-spin 28s linear infinite;pointer-events:none}}.hero>*{{position:relative;z-index:1}}@keyframes slow-spin{{to{{transform:rotate(360deg)}}}}.eyebrow{{color:var(--green);font-size:.75rem;font-weight:900;letter-spacing:.16em;text-transform:uppercase}}h1{{font-size:clamp(2.5rem,5.2vw,5.2rem);letter-spacing:-.065em;line-height:.92;margin:.35rem 0 1rem}}h2{{letter-spacing:-.025em;margin:.2rem 0 .45rem;font-size:1.5rem}}p{{line-height:1.55}}.sub,.section-head p,.muted,.asset-note{{color:var(--muted);max-width:960px}}.pills,.portal-actions{{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}}.pill,.portal-action{{border:1px solid rgba(53,208,255,.28);padding:8px 11px;border-radius:999px;background:rgba(53,208,255,.08);font-size:.88rem}}.portal-actions{{margin-top:12px}}.portal-action{{color:var(--text);font-weight:800;text-decoration:none;transition:transform .16s ease,background .16s ease}}.portal-action:hover{{transform:translateY(-1px);background:rgba(53,208,255,.20)}}.portal-action--primary{{background:linear-gradient(90deg,#18b7e6,#1988e6);border-color:transparent;color:#03101b}}details.guide,.overview{{margin:11px 0 2px;border:1px solid rgba(53,208,255,.22);border-radius:13px;background:rgba(5,10,23,.68)}}details.guide summary,.overview summary{{cursor:pointer;padding:10px 12px;color:var(--cyan);font-weight:800;font-size:.88rem}}details.guide p,.overview p{{margin:0;padding:0 12px 11px;color:var(--muted);font-size:.87rem}}.overview{{margin-top:22px;max-width:1020px}}.overview ol{{margin:0;padding:0 28px 15px;color:var(--muted);line-height:1.55}}.gallery-section,.ligand-card,.structure-card{{border-radius:21px;padding:20px;margin-top:18px}}.section-head{{border-left:3px solid var(--green);padding-left:13px;margin-bottom:16px}}.interface-pair{{margin:12px 0;border:1px solid rgba(53,208,255,.24);border-radius:15px;background:rgba(5,10,23,.58);padding:0 14px 14px}}.interface-pair summary{{cursor:pointer;padding:14px 2px 10px;color:var(--cyan);font-weight:900;font-size:1rem}}.interface-pair summary span{{color:var(--muted);font-size:.8rem;font-weight:700;margin-left:8px}}.dashboard-tabs-shell{{margin-top:18px;border-radius:21px;overflow:hidden}}.dashboard-tabs{{display:flex;gap:7px;overflow:auto;padding:14px 16px 0;border-bottom:1px solid #23375d}}.dashboard-tabs button,.structure-toolbar button{{border:1px solid #285a79;border-radius:10px 10px 0 0;background:#0a253a;color:#cfe8ff;padding:10px 13px;font:800 .82rem inherit;white-space:nowrap;cursor:pointer}}.dashboard-tabs button[aria-selected="true"],.dashboard-tabs button:hover{{background:#116887;color:#fff;border-color:var(--cyan)}}.dashboard-panel{{padding:2px 20px 20px}}.dashboard-panel[hidden]{{display:none}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}}.card{{border-radius:17px;padding:13px;overflow:hidden}}.card .js-plotly-plot{{cursor:zoom-in}}.card a{{display:inline-block;color:var(--cyan);font-size:.8rem;font-weight:800;margin:8px 10px 5px}}.heatmap-note{{margin:7px 10px;color:var(--muted);font-size:.82rem;line-height:1.4}}.ligand-grid{{display:grid;grid-template-columns:minmax(300px,1fr) minmax(300px,1fr);gap:18px;align-items:stretch}}.ligand-2d,.ligand-3d,.complex-3d{{min-height:330px;border:1px solid rgba(255,230,109,.30);border-radius:17px;background:radial-gradient(circle at center,rgba(255,230,109,.08),rgba(5,6,10,.7) 70%);overflow:hidden;position:relative}}.ligand-2d svg{{display:block;width:100%;height:330px;max-width:100%}}.ligand-3d,.complex-3d{{border-color:rgba(53,208,255,.30)}}.complex-3d{{height:min(62vw,650px);min-height:410px}}.structure-toolbar{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 11px}}.structure-toolbar button{{border-radius:10px;padding:8px 11px}}.structure-toolbar button:hover,.structure-toolbar button.is-active{{background:#116887;color:#fff;border-color:var(--cyan)}}.viewer-label{{color:var(--yellow);font-size:.78rem;font-weight:900;text-transform:uppercase;letter-spacing:.1em;margin:2px 0 8px}}.missing-visual{{padding:24px;color:var(--muted)}}.asset-note{{font-size:.8rem;margin:.7rem 0 0}}code{{display:block;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 12px 12px;color:var(--yellow)}}.graph-modal{{display:none;position:fixed;z-index:9999;inset:0;padding:3vh 3vw;background:rgba(0,0,0,.78);backdrop-filter:blur(7px)}}.graph-modal.open{{display:flex;align-items:center;justify-content:center}}.graph-modal-panel{{position:relative;width:min(1500px,94vw);height:min(900px,92vh);padding:20px 16px 12px;border:1px solid var(--cyan);background:#080d1b;box-shadow:0 0 70px rgba(53,208,255,.18);border-radius:20px}}.graph-modal-close{{position:absolute;right:17px;top:13px;z-index:2;border:1px solid var(--cyan);border-radius:999px;background:#101b33;color:var(--text);font-weight:800;padding:8px 12px;cursor:pointer}}.graph-modal-plot{{width:100%;height:100%}}@media(max-width:700px){{.page{{padding:18px 12px 42px}}.grid,.ligand-grid{{grid-template-columns:1fr}}.hero{{padding:24px 19px}}.dashboard-panel{{padding:2px 12px 12px}}.complex-3d{{height:68vw;min-height:330px}}.graph-modal{{padding:1vh 1vw}}.graph-modal-panel{{width:98vw;height:96vh;padding:14px 4px 4px}}}}
+</style></head><body><main class="page"><section class="hero"><div class="eyebrow">PyMACS · single-system results</div><h1>{escape(system_name)}</h1><p class="sub">A guided reading room for this simulation. Start with global stability, then inspect ligand pose and pocket chemistry. Every graph is a native Plotly analysis: hover for values, use the legend to isolate traces, and double-click for a large view.</p><div class="pills"><span class="pill">Ligand / PROTAC: {escape(ligand_name)}</span><span class="pill">{len(cards)} interactive analyses</span><span class="pill">Kyle-local, fast delivery</span></div><!--PORTAL_ACTIONS--><details class="overview"><summary>ⓘ How to read this result—start here</summary><ol><li><b>Check the fold:</b> protein RMSD, radius of gyration, and secondary-structure evolution should be considered together.</li><li><b>Check the pose:</b> interpret ligand RMSD/RMSF with persistent contacts—not in isolation.</li><li><b>Check the chemistry:</b> solid-color interaction types show which residues make hydrophobic, ionic, or hydrogen-bond interactions over time.</li><li><b>Do not overclaim:</b> these trajectories test stability of a modeled system; they do not by themselves establish binding affinity or experimental activity.</li></ol></details></section>{dashboard}</main><div class="graph-modal" id="graph-modal" aria-hidden="true"><div class="graph-modal-panel"><button class="graph-modal-close" id="graph-modal-close" type="button">Close ×</button><div class="graph-modal-plot" id="graph-modal-plot"></div></div></div><script>
 (() => {{
  const modal=document.getElementById('graph-modal'),destination=document.getElementById('graph-modal-plot');
  const close=()=>{{modal.classList.remove('open');modal.setAttribute('aria-hidden','true');Plotly.purge(destination)}};
  const open=source=>{{const layout=Object.assign({{}},source.layout,{{autosize:true,height:null,margin:{{l:70,r:35,t:65,b:60}}}});Plotly.react(destination,source.data,layout,{{responsive:true,displaylogo:false}});modal.classList.add('open');modal.setAttribute('aria-hidden','false');requestAnimationFrame(()=>Plotly.Plots.resize(destination))}};
  document.querySelectorAll('.js-plotly-plot').forEach(source=>source.addEventListener('dblclick',event=>{{event.preventDefault();event.stopImmediatePropagation();open(source)}},true));
  document.getElementById('graph-modal-close').addEventListener('click',close);modal.addEventListener('click',event=>{{if(event.target===modal)close()}});document.addEventListener('keydown',event=>{{if(event.key==='Escape')close()}});
+ document.querySelectorAll('[data-dashboard-tab]').forEach(button=>button.addEventListener('click',()=>{{const target=button.dataset.dashboardTab;document.querySelectorAll('[data-dashboard-tab]').forEach(item=>item.setAttribute('aria-selected',String(item===button)));document.querySelectorAll('.dashboard-panel').forEach(panel=>{{const active=panel.id===`panel-${{target}}`;panel.hidden=!active;panel.classList.toggle('is-active',active);if(active)panel.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot))}})}}));
  document.querySelectorAll('.js-ligand-3d').forEach(el=>{{try{{const raw=atob(el.dataset.structureB64),viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}});viewer.addModel(raw,el.dataset.format);viewer.setStyle({{}},{{stick:{{radius:.105,color:'#ffe66d'}},sphere:{{scale:.16,color:'#ffe66d'}}}});viewer.setStyle({{elem:'N'}},{{stick:{{radius:.105,color:'#35d0ff'}},sphere:{{scale:.16,color:'#35d0ff'}}}});viewer.setStyle({{elem:'O'}},{{stick:{{radius:.105,color:'#ff3b5c'}},sphere:{{scale:.16,color:'#ff3b5c'}}}});viewer.setStyle({{elem:'Cl'}},{{stick:{{radius:.105,color:'#18ff8b'}},sphere:{{scale:.20,color:'#18ff8b'}}}});viewer.zoomTo();viewer.render();addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D ligand preview unavailable.'}}}});
+ document.querySelectorAll('.js-complex-3d').forEach(el=>{{try{{const viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}}),raw=atob(el.dataset.structureB64),ligand=el.dataset.ligand;viewer.addModel(raw,'pdb');const render=mode=>{{viewer.setStyle({{}},{{}});viewer.setStyle({{hetflag:false}},{{cartoon:{{color:'spectrum'}}}});if(mode==='complex')viewer.setStyle({{hetflag:true}},{{stick:{{radius:.16,colorscheme:'Jmol'}}}});if(mode==='pocket'&&ligand){{viewer.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.28}}}});viewer.setStyle({{resn:ligand}},{{stick:{{radius:.20,colorscheme:'Jmol'}},sphere:{{scale:.25,colorscheme:'Jmol'}}}});viewer.setStyle({{within:{{distance:5,sel:{{resn:ligand}}}}}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}})}}viewer.zoomTo(mode==='pocket'&&ligand?{{resn:ligand}}:{{}});viewer.render();el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.classList.toggle('is-active',button.dataset.structureView===mode))}};el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.addEventListener('click',()=>render(button.dataset.structureView)));render('complex');addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D final-structure preview unavailable.'}}}});
 }})();
 </script></body></html>'''
 
@@ -509,16 +1009,34 @@ def main() -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     metadata = read_metadata(root)
     system_name = str(metadata.get("system_name") or root.name)
+    interface_rin = interface_rin_context(analysis)
+    has_interface_rin = bool(interface_rin["protein_detail"] or interface_rin["peptide_detail"])
     setup = {}
     try:
         setup = json.loads((root / "pymacs_run.json").read_text()).get("setup", {})
     except (OSError, ValueError, TypeError):
         pass
     ligand_name = str(metadata.get("ligand_name") or metadata.get("ligand_residue") or setup.get("ligand") or "No ligand label")
+    chain_labels = []
+    for entry in str(setup.get("chain_map") or "").split(","):
+        chain, separator, label = entry.strip().partition(":")
+        if chain and separator and label:
+            chain_labels.append(label.strip())
+    protein_name = " / ".join(chain_labels) or "Protein"
+    # Full-complex RMSD is meaningful for multiple macromolecular chains or
+    # a PROTAC assembly.  A small-molecule ligand is not an extra protein
+    # chain, so a one-chain ligand–protein job must not show this card.
+    is_multichain_system = len(chain_labels) > 1 or str(setup.get("mode") or "").casefold() == "protac"
     csv_files = sorted(path for path in analysis.rglob("*.csv") if path.is_file())
+    # Every card below is explicitly mapped to a scientific table.  Never
+    # revive the legacy arbitrary-column fallback for raw analysis tables.
+    gallery_csvs: set[Path] = set()
     colours = [CYAN, GREEN, MAGENTA, ORANGE]
     heatmap_cards = []
-    groups: dict[str, list[str]] = {"stability": [], "ligand": [], "protein": [], "other": []}
+    groups: dict[str, list[str]] = {"overview": [], "stability": [], "flexibility": [], "secondary": [], "contacts": [], "chemistry": [], "distances": [], "coupled": [], "structure": []}
+    def add(group: str, graph: str | None, title: str, source: Path, label: str = "Download exact source CSV", note: str = "") -> None:
+        if graph:
+            groups[group].append(dashboard_card(graph, title, source.relative_to(output.parent).as_posix(), label, note))
     # Matrix outputs are promoted to dedicated scientific heatmaps.  They are
     # deliberately sampled along time so the report stays quick to publish and
     # open; the full matrix CSV remains downloadable from the card.
@@ -548,26 +1066,107 @@ def main() -> None:
         graph = heatmap_plot(contact_file, "contacts")
         if graph:
             heatmap_cards.append(dashboard_card(graph, contact_file.stem, contact_file.relative_to(output.parent).as_posix(), "Download full contact matrix CSV"))
+
+    # The former portal tabs are all rendered here from their scientific CSVs.
+    # Each card selects the semantic dimensions of its source rather than
+    # joining arbitrary numeric columns into a generic line chart.
+    stability_specs = [
+        ("Protein_RMSD.csv", "Protein RMSD", "Time_ps", ["Protein_RMSD"], "RMSD (Å)"),
+        ("LIG_Complex_RMSD_Overlay.csv", "Protein–ligand RMSD overlay", "Time_ns", ["Protein_RMSD", "Ligand_RMSD"], "RMSD (Å)"),
+        ("Radius_of_Gyration_Protein_Ligand_Complex.csv", "Radius of gyration", "Time_ns", ["Rg_Protein_Å", "Rg_Ligand_Å", "Rg_Complex_Å"], "Radius of gyration (Å)"),
+        ("native_contact_q.csv", "Native-contact Q(x)", "Time_ns", ["Q_native_contact_fraction"], "Contact fraction"),
+    ]
+    if is_multichain_system:
+        stability_specs.insert(1, ("FullComplex_RMSD.csv", "Full-complex RMSD", "Time_ps", ["RMSD_Å"], "RMSD (Å)"))
+    for file_name, title, x, ys, y_title in stability_specs:
+        source = analysis / file_name
+        colors = [GREEN, ORANGE, MAGENTA] if "overlay" in title.lower() or "gyration" in title.lower() else [GREEN]
+        if source.is_file(): add("stability", multiseries_plot(source, title.replace("Protein", protein_name), x, ys, y_title, colors=colors), title, source)
+    protein_rmsd = analysis / "Protein_RMSD.csv"
+    if protein_rmsd.is_file():
+        add("overview", multiseries_plot(protein_rmsd, f"{protein_name} RMSD", "Time_ps", ["Protein_RMSD"], "RMSD (Å)", colors=[GREEN]), f"{protein_name} RMSD", protein_rmsd)
+    if interaction_file.is_file():
+        add("overview", heatmap_plot(interaction_file, "interactions"), "Interaction chemistry overview", interaction_file, "Download full interaction-event CSV")
+    for source in sorted(analysis.glob("RMSD_*.csv")):
+        if source.name not in {"RMSD_BTK.csv"}: continue
+        add("stability", multiseries_plot(source, f"{protein_name} chain RMSD", "Time_ps", ["RMSD_Å"], "RMSD (Å)", colors=[GREEN]), f"{protein_name} chain RMSD", source)
+    for source in sorted(analysis.glob("*_Ligand_RMSD.csv")):
+        add("stability", multiseries_plot(source, "Ligand RMSD", "Time_ps", ["Ligand_RMSD"], "RMSD (Å)", colors=[ORANGE]), "Ligand RMSD", source)
+
+    for source in sorted(analysis.glob("RMSF_*_per_residue.csv")):
+        add("flexibility", categorical_bar_plot(source, f"{protein_name} RMSF per residue", "Residue", ["RMSF_Å"], "RMSF (Å)", colors=[GREEN]), f"{protein_name} RMSF per residue", source)
+    for source in sorted(analysis.glob("RMSF_*.csv")):
+        if source.name.endswith("_per_residue.csv"): continue
+        add("flexibility", categorical_bar_plot(source, f"{protein_name} backbone-atom RMSF", "Atom_Index", ["RMSF_Å"], "RMSF (Å)", colors=[GREEN]), f"{protein_name} backbone-atom RMSF", source, note="This is the atom-resolved backbone selection used by the analysis; use the adjacent residue plot for residue-level interpretation.")
+    for source in sorted(analysis.glob("*_Ligand_RMSF.csv")):
+        add("flexibility", categorical_bar_plot(source, "Ligand RMSF", "Atom", ["RMSF"], "RMSF (Å)", colors=[ORANGE]), "Ligand RMSF", source)
+
+    sse_fractions = analysis / "SSE_Fractions.csv"
+    if sse_fractions.is_file(): add("secondary", multiseries_plot(sse_fractions, "SSE fractions", "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction"), "SSE fractions", sse_fractions)
+    persistence = analysis / "Residue_SSE_Persistence.csv"
+    if persistence.is_file(): add("secondary", categorical_bar_plot(persistence, "Residue SSE persistence", "Residue_Index", ["Helix_Persistence", "Sheet_Persistence", "Coil_Persistence"], "Fraction", stacked=True), "Residue SSE persistence", persistence)
+    for source in sorted(analysis.glob("SSE_chain_*_fractions.csv")):
+        add("secondary", multiseries_plot(source, source.stem.replace("_", " "), "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction"), source.stem.replace("_", " "), source)
+
+    frequency = analysis / "LIG_contact_frequency_filtered.csv"
+    if frequency.is_file(): add("contacts", categorical_bar_plot(frequency, "Ligand-contact frequency", "Residue", ["PercentFrames"], "Frames with contact (%)"), "Ligand-contact frequency", frequency)
+    filtered = analysis / "FilteredContacts_Framewise.csv"
+    all_contacts = analysis / "AllContacts_Framewise.csv"
+    persistence_graph = contact_persistence_plot(filtered, all_contacts, interaction_file if interaction_file.is_file() else None, protein_name) if filtered.is_file() and all_contacts.is_file() else None
+    if persistence_graph: add("contacts", persistence_graph, "Ligand-contact persistence", filtered, note="Persistence is recomputed from sampled frames (0–1) using the original residue labels. A bar color now means the most frequently observed classified chemistry for that residue: H-bond blue, ionic pink, hydrophobic orange.")
+    if filtered.is_file(): add("contacts", contact_events_plot(filtered, "Specific ligand contact events"), "Specific ligand contact events", filtered, note="Hover a marker for the contacting ligand atom, protein atom, distance, residue, and time.")
+
+    summary = analysis / "InteractionTypes_Summary.csv"
+    if summary.is_file(): add("chemistry", categorical_bar_plot(summary, "Interaction-type abundance by residue", "Residue", ["H-bond", "Hydrophobic", "Ionic"], "Observed interaction events", stacked=True), "Interaction-type abundance by residue", summary)
+    if interaction_file.is_file():
+        add("chemistry", detailed_interaction_plot(interaction_file), "Specific interaction-type events", interaction_file, note="Each residue/type pairing stays separate, so simultaneous chemistry is never collapsed into one line.")
+        table = _read_table(interaction_file)
+        if table is not None and "Type" in table:
+            counts = table["Type"].value_counts().rename_axis("Type").reset_index(name="Events")
+            figure = go.Figure(go.Bar(x=counts["Type"], y=counts["Events"], marker_color=[CYAN, MAGENTA, ORANGE][:len(counts)], hovertemplate="Interaction type=%{x}<br>Observed events=%{y}<extra></extra>"))
+            figure.update_layout(title="Interaction-type distribution", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=380, xaxis={"title": "Interaction type", "gridcolor": GRID}, yaxis={"title": "Observed events", "gridcolor": GRID})
+            add("chemistry", plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False}), "Interaction-type distribution", interaction_file)
+
+    if all_contacts.is_file():
+        add("distances", distance_histogram_plot(all_contacts), "Composite ligand–residue distance distribution", all_contacts)
+        add("distances", contact_events_plot(all_contacts, "All ligand–residue distance events", distance_mode=True), "All ligand–residue distance events", all_contacts, note="Hover provides the exact atom pair, residue, time, and observed separation.")
+        add("distances", interaction_degree_plot(all_contacts), "Interaction degree over time", all_contacts)
+    if filtered.is_file(): add("distances", contact_events_plot(filtered, "Persistent-contact distance explorer", distance_mode=True), "Persistent-contact distance explorer", filtered)
+    if filtered.is_file() and frequency.is_file(): add("distances", persistence_distance_plot(filtered, frequency), "Contact persistence versus mean distance", filtered, note="Contact frequency is joined to each residue's mean observed filtered-contact distance.")
+
+    coupling = analysis / "LIG_SSE_Contact_Coupling_Timeseries.csv"
+    if coupling.is_file():
+        add("coupled", multiseries_plot(coupling, "SSE versus ligand-contact dynamics", "Time_ns", ["Helix_Fraction", "Sheet_Fraction", "Coil_Fraction", "Raw_Contacts"], "Fraction / contact count"), "SSE versus ligand-contact dynamics", coupling)
+        add("coupled", multiseries_plot(coupling, "Smoothed contacts", "Time_ns", ["Raw_Contacts", "Smoothed_Contacts"], "Contact count"), "Smoothed contacts", coupling)
+        add("coupled", multiseries_plot(coupling, "Rolling correlation", "Time_ns", ["Rolling_Corr_Contacts_vs_Sheet"], "Correlation"), "Rolling correlation", coupling)
+    changepoints = analysis / "LIG_ChangePoint_Summary.csv"
+    if changepoints.is_file(): add("coupled", categorical_bar_plot(changepoints, "Change-point segments", "Segment", ["MeanContacts", "MeanHelix", "MeanSheet", "MeanCoil"], "Mean value"), "Change-point segments", changepoints, note="Hover the bars to compare the average contact and secondary-structure values for each detected trajectory segment.")
     for index, csv_file in enumerate(csv_files):
+        # Keep raw frame-wise tables and alternate selections in the download
+        # bundle.  The main gallery is intentionally canonical and therefore
+        # never presents several near-identical RMSD/RMSF panels as separate
+        # primary conclusions.
+        if csv_file not in gallery_csvs:
+            continue
         graph = numeric_plot(csv_file, colours[index % len(colours)])
         if graph:
             card = dashboard_card(graph, csv_file.stem, csv_file.relative_to(output.parent).as_posix())
             stem = csv_file.stem.lower()
             if "ligand" in stem or "contact" in stem or "interaction" in stem:
-                groups["ligand"].append(card)
-            elif "rmsd" in stem or "rmsf" in stem or "gyration" in stem or "sse" in stem or "dssp" in stem:
-                groups["stability"].append(card)
-            elif "protein" in stem or "residue" in stem:
-                groups["protein"].append(card)
+                groups["contacts"].append(card)
+            elif "rmsf" in stem:
+                groups["flexibility"].append(card)
+            elif "sse" in stem or "dssp" in stem:
+                groups["secondary"].append(card)
             else:
-                groups["other"].append(card)
+                groups["overview"].append(card)
     # Matrix outputs are the fastest way to understand whether a ligand keeps
     # the starting pocket chemistry and whether the protein retains its fold,
     # so they deliberately lead the report instead of being buried in exports.
-    groups["stability"] = heatmap_cards[:1] + groups["stability"]
-    groups["ligand"] = heatmap_cards[1:] + groups["ligand"]
+    groups["secondary"] = heatmap_cards[:1] + groups["secondary"]
+    groups["contacts"] = heatmap_cards[1:] + groups["contacts"]
     cards = [card for values in groups.values() for card in values]
-    if not cards:
+    if not cards and not has_interface_rin:
         cards.append('<article class="card"><h2>Analysis data is still being written</h2><p>No tabular analysis output was available when this report was generated. Re-run this report after 3A finishes.</p></article>')
     # Publish the chemistry drawing separately as well as embedding it in the
     # self-contained report.  The Kyle results dossier can then show the same
@@ -576,18 +1175,42 @@ def main() -> None:
     published_ligand_svg = ligand_svg(ligand_structure, ligand_smiles)
     if published_ligand_svg:
         (output.parent / "Ligand_2D.svg").write_text(published_ligand_svg, encoding="utf-8")
-    ligand_panel = ligand_html(root, ligand_name)
-    network_explorer = interactive_networx_html(analysis)
-    galleries = (
-        section_html("First look: fold and stability", "Start here", "Read the global structure before drawing conclusions about the ligand.", groups["stability"])
-        + ligand_panel
-        + network_explorer
-        + section_html("Ligand pose and pocket chemistry", "Binding-site evidence", "Use these together: a pose can move while preserving key interactions, and contacts alone do not establish affinity.", groups["ligand"])
-        + section_html("Residue-level protein behavior", "Protein detail", "Inspect local flexibility after checking global stability and the ligand interaction fingerprint.", groups["protein"])
-        + section_html("Additional analysis", "Supporting outputs", "These outputs add context and should be interpreted together with the main stability and interaction panels.", groups["other"])
+    overview_title = "First look: interface and fold" if has_interface_rin else "First look: fold and binding"
+    overview_text = (
+        "Read global structure and the first persistent chain interface before opening individual chain-pair views."
+        if has_interface_rin else "Read global structure and interaction chemistry before drawing conclusions about the ligand."
     )
-    html = build_document(system_name, ligand_name, cards, galleries)
+    overview = section_html(overview_title, "Start here", overview_text, groups["overview"])
+    # Interface-only systems should never acquire a misleading empty ligand card.
+    ligand_panel = "" if has_interface_rin and ligand_name == "No ligand label" else ligand_html(root, ligand_name)
+    network_explorer = interactive_networx_html(analysis)
+    structure_panel = final_structure_html(root, ligand_name)
+    stability = section_html("Stability", "Trajectory stability", "Compare global protein, complex, ligand, compactness, and native-contact trends.", groups["stability"])
+    flexibility = section_html("Flexibility", "Residue and ligand mobility", "Inspect protein and ligand RMSF at atom and residue levels.", groups["flexibility"])
+    secondary = section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"])
+    contacts = section_html("Contacts & binding", "Binding-site evidence", "Use contact frequency, persistence, and atom-resolved event views together.", groups["contacts"])
+    chemistry = section_html("Contact chemistry", "Interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"])
+    distances = section_html("Distances", "Atom-resolved separations", "Explore every calculated ligand–protein separation without collapsing atom-pair context.", groups["distances"]) + distance_carousel_html(analysis)
+    coupled = section_html("Coupled dynamics", "Structure and contacts", "Compare secondary structure with ligand contacts and detected trajectory segments.", groups["coupled"])
+    dashboard = tabbed_sections([
+        ("overview", "Overview", overview + interface_rin["overview"] + network_explorer),
+        ("stability", "Stability", stability),
+        ("flexibility", "Flexibility", flexibility),
+        ("secondary", "Secondary structure", secondary),
+        ("contacts", "Contacts & binding", ligand_panel + contacts + network_explorer),
+        ("chemistry", "Contact chemistry", chemistry),
+        ("distances", "Distances", distances),
+        ("coupled", "Coupled dynamics", coupled),
+        ("interfaces", "Protein interfaces", interface_rin["protein_detail"]),
+        ("peptide-interfaces", "Peptide interfaces", interface_rin["peptide_detail"]),
+        ("structure", "Structure", structure_panel),
+    ])
+    html = build_document(system_name, ligand_name, cards, dashboard)
     output.write_text(html, encoding="utf-8")
+    manifest = build_results_manifest(root, analysis, output, system_name, ligand_name)
+    (analysis / RESULTS_MANIFEST_NAME).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     # Retain a stable compatibility entry point for existing external links.
     if heatmap_cards:
         (output.parent / "PyMACS_Heatmap_Explorer.html").write_text(html, encoding="utf-8")

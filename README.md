@@ -784,6 +784,10 @@ PNG outputs:
 - `Interface_ChainLevel_Network.png`
 - `Interface_TopResiduePairs_Barplot.png`
 
+Interactive output:
+
+- `Interface_RIN_Explorer.html` — self-contained interface network with chain-pair and persistence controls, clickable interaction edges, and complete residue sequences (contacting peptide residues are highlighted).
+
 Quick interpretation guide:
 
 - Chain-pair summary tells whether two chains remain associated over time.
