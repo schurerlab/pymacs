@@ -157,6 +157,7 @@ from pymacs_analysis_cache import (
     record_stage_completion,
     validate_stage_cache,
 )
+from pymacs_progress import ProgressReporter, STANDARD_ANALYSIS_STAGES, standard_stage_id
 from pymacs_native_contacts import (contact_fraction, intragroup_contact_fraction,
                                     reference_contact_pairs, reference_protein_ca_pairs)
 from pymacs_interaction_chemistry import (
@@ -223,6 +224,8 @@ def print_gmx_preflight():
 
 
 def phase(msg):
+    if PROGRESS is not None:
+        PROGRESS.start(standard_stage_id(msg), msg)
     print("\n" + "="*70)
     print(f"🧩 {msg.upper()} — {datetime.now().strftime('%H:%M:%S')}")
     print("="*70)
@@ -1048,6 +1051,7 @@ TRAJ_FILE   = args.traj
 POCKET_PDB  = args.pocket_pdb
 POCKET_XTC  = args.pocket_xtc
 OUTPUT_DIR  = args.outdir
+PROGRESS = ProgressReporter(OUTPUT_DIR, pipeline="standard_md_analysis", stages=STANDARD_ANALYSIS_STAGES)
 CONTACT_CUTOFF = float(args.contact_cutoff)
 POCKET_CUTOFF_ANG = float(args.pocket_cutoff)
 POCKET_CUTOFF_NM = POCKET_CUTOFF_ANG / 10.0
@@ -1901,7 +1905,7 @@ def _stage_signature(data_parameters=None):
 
 
 def _record_stage_manifest(stage_name, numerical_outputs, plot_outputs=None, data_parameters=None, legacy_adopted=False):
-    return record_stage_completion(
+    manifest = record_stage_completion(
         ANALYSIS_MANIFEST_PATH,
         stage_name=stage_name,
         analysis_script=Path(__file__).name,
@@ -1915,6 +1919,8 @@ def _record_stage_manifest(stage_name, numerical_outputs, plot_outputs=None, dat
         mode=_analysis_mode(),
         legacy_adopted=legacy_adopted,
     )
+    PROGRESS.complete(stage_name)
+    return manifest
 
 
 def _stage_cache_ready(stage_name, checkpoint_name, numerical_outputs, plot_outputs=None, data_parameters=None):
@@ -4579,6 +4585,7 @@ if "u" in globals():
 gc.collect()
 print("\n✅ Pocket analysis complete — all memory released.")
 print("✅ All analyses complete. Outputs saved to:", os.path.abspath(OUTPUT_DIR))
+PROGRESS.finish()
 
 print("\n🧾 Pipeline Summary:")
 print("✅ Step A: Final_Trajectory.xtc/pdb — OK")

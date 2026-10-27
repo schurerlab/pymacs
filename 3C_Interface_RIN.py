@@ -32,6 +32,7 @@ from pymacs_analysis_cache import (
     validate_stage_cache,
     write_json_atomic,
 )
+from pymacs_progress import ProgressReporter
 from pymacs_interaction_chemistry import (
     EVENT_COLUMNS,
     aggregate_event_occupancy,
@@ -1098,6 +1099,11 @@ def main():
         )
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+    progress = ProgressReporter(
+        outdir, pipeline="interface_rin",
+        stages=("load_inputs", "contact_scan", "write_tables", "render_figures", "write_manifest"),
+    )
+    progress.start("load_inputs", "Load trajectory and interface selections")
     manifest_path = outdir / "interface_analysis_manifest.json"
     numerical_outputs = interface_numerical_output_paths(outdir)
     plot_outputs = interface_plot_output_paths(outdir)
@@ -1112,6 +1118,7 @@ def main():
     atomindex_entries = parse_atomindex_entries(args.atomindex)
     polymer_entries = detect_polymer_entries(atomindex_entries)
     stage_times["parse_atomindex_s"] = time.perf_counter() - t0
+    progress.complete("load_inputs")
 
     print(f"🧬 Chains parsed from atomIndex.txt: {len(polymer_entries)}")
     for entry in polymer_entries:
@@ -1217,6 +1224,11 @@ def main():
             print("✅ Input trajectory/topology compatible")
             print("♻️ Reusing cached interface data")
             print("✅ Interface plots already present; no trajectory rescan needed.")
+            progress.complete("contact_scan")
+            progress.complete("write_tables")
+            progress.complete("render_figures")
+            progress.complete("write_manifest")
+            progress.finish()
             return 0
 
         print("✅ Existing interface dataset found")
@@ -1228,6 +1240,7 @@ def main():
             print("🎨 One or more interface figures are missing; regenerating figures from cached data.")
 
         t0 = time.perf_counter()
+        progress.start("render_figures", "Regenerate interface figures from cached contact data")
         plot_chain_pair_heatmap(cached["summary_df"], outdir)
         plot_contact_timeseries(cached["timeseries_df"], outdir)
         plot_min_distance_timeseries(cached["timeseries_df"], outdir, args.contact_cutoff)
@@ -1241,6 +1254,7 @@ def main():
             outdir, cached["residue_df"], cached_events, len(frame_indices), chain_pairs, universe
         )
         stage_times["plotting_s"] = time.perf_counter() - t0
+        progress.complete("render_figures")
 
         runtime_lines = [
             f"input_topology={Path(args.topo).resolve()}",
@@ -1272,6 +1286,10 @@ def main():
             plot_parameters,
             legacy_adopted=bool(cache_status["legacy_adopt"]),
         )
+        progress.complete("contact_scan")
+        progress.complete("write_tables")
+        progress.complete("write_manifest")
+        progress.finish()
         return 0
     else:
         if legacy_outputs_present:
@@ -1284,6 +1302,7 @@ def main():
             print("🔄 No reusable interface cache found; running trajectory contact scan.")
 
     t0 = time.perf_counter()
+    progress.start("contact_scan", "Scan trajectory frames for interface contacts")
     summary_rows = []
     timeseries_rows = []
     residue_rows = []
@@ -1307,6 +1326,7 @@ def main():
         if analyzed_times_ns is None:
             analyzed_times_ns = result["times_ns"]
     stage_times["analyze_contacts_s"] = time.perf_counter() - t0
+    progress.complete("contact_scan")
     analyzed_times_ns = analyzed_times_ns or [float(universe.trajectory[index].time) / 1000.0 for index in frame_indices]
     frame_index_df = build_interface_frame_index(frame_indices, analyzed_times_ns)
 
@@ -1412,6 +1432,7 @@ def main():
     runtime_lines.append(f"total_runtime_s={time.perf_counter() - start_time:.3f}")
 
     t0 = time.perf_counter()
+    progress.start("write_tables", "Write interface numerical outputs")
     write_interface_outputs(
         outdir,
         summary_df,
@@ -1424,8 +1445,10 @@ def main():
         runtime_lines,
     )
     stage_times["write_csv_s"] = time.perf_counter() - t0
+    progress.complete("write_tables")
 
     t0 = time.perf_counter()
+    progress.start("render_figures", "Render interface figures and explorer")
     plot_chain_pair_heatmap(summary_df, outdir)
     plot_contact_timeseries(timeseries_df, outdir)
     plot_min_distance_timeseries(timeseries_df, outdir, args.contact_cutoff)
@@ -1437,6 +1460,7 @@ def main():
         outdir, residue_df, validated_events_df, len(frame_indices), chain_pairs, universe
     )
     stage_times["plotting_s"] = time.perf_counter() - t0
+    progress.complete("render_figures")
 
     runtime_lines.extend(
         [
@@ -1445,6 +1469,7 @@ def main():
         ]
     )
     (outdir / "interface_runtime_summary.txt").write_text("\n".join(runtime_lines) + "\n")
+    progress.start("write_manifest", "Write interface completion manifest")
     write_interface_manifest(
         manifest_path,
         args,
@@ -1458,6 +1483,8 @@ def main():
         data_parameters,
         plot_parameters,
     )
+    progress.complete("write_manifest")
+    progress.finish()
 
     outputs = [
         "interface_chain_pair_summary.csv",

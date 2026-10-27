@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from pymacs_component_utils import load_component_registry
 from pymacs_analysis_cache import record_stage_completion
+from pymacs_progress import ProgressReporter
 from pymacs_native_contacts import (
     contact_fraction,
     intragroup_contact_fraction,
@@ -44,6 +45,16 @@ from pymacs_interaction_chemistry import (
 )
 
 PLOTTING_IMPORT_ERROR = None
+PROGRESS = None
+PROTAC_PROGRESS_STAGES = (
+    "Ligand preflight / auto-detection", "Write ligand preflight QC files",
+    "Load topology and trajectory", "Validate PROTAC inputs and role ranges",
+    "Generate centered Final_Trajectory", "Preprocessing / subset structure generation",
+    "Ligand contacts / contact map / network", "Native-contact retention Q",
+    "Protein native-contact Q", "Water-bridge analysis", "RMSD / RMSF",
+    "Radius of gyration", "PCA", "Write figure manifest", "Write runtime profile",
+    "Write analysis manifest",
+)
 try:
     import matplotlib
 
@@ -392,6 +403,8 @@ class FigureRegistry:
 
 
 def execute_stage(profiler: RuntimeProfiler, stage: str, func, *args, **kwargs):
+    if PROGRESS is not None:
+        PROGRESS.start(stage, stage)
     log(f"▶ {stage}...")
     started = time.perf_counter()
     try:
@@ -399,10 +412,14 @@ def execute_stage(profiler: RuntimeProfiler, stage: str, func, *args, **kwargs):
     except Exception as exc:
         elapsed = time.perf_counter() - started
         profiler.record(stage, elapsed, status="FAILED", details=str(exc))
+        if PROGRESS is not None:
+            PROGRESS.fail(f"{stage}: {exc}")
         log(f"❌ {stage} failed after {elapsed:.2f} s: {exc}")
         raise
     elapsed = time.perf_counter() - started
     profiler.record(stage, elapsed, status="OK")
+    if PROGRESS is not None:
+        PROGRESS.complete(stage)
     log(f"✅ {stage} completed in {elapsed:.2f} s")
     return result
 
@@ -4163,6 +4180,8 @@ def main() -> int:
         return 1
 
     outdir = ensure_dir(Path(args.outdir).resolve())
+    global PROGRESS
+    PROGRESS = ProgressReporter(outdir, pipeline="protac_analysis", stages=PROTAC_PROGRESS_STAGES)
     rms_dir = ensure_dir(outdir / "RMSD_RMSF")
     contacts_dir = ensure_dir(outdir / "Contacts")
     networks_dir = ensure_dir(outdir / "Networks")
@@ -4490,7 +4509,8 @@ def main() -> int:
 
     execute_stage(runtime_profiler, "Write figure manifest", figure_registry.write)
     execute_stage(runtime_profiler, "Write runtime profile", runtime_profiler.write)
-    write_analysis_manifest(args, outdir)
+    execute_stage(runtime_profiler, "Write analysis manifest", write_analysis_manifest, args, outdir)
+    PROGRESS.finish()
     log(f"Analysis complete. Outputs written under {outdir}")
     return 0
 
