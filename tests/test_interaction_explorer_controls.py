@@ -38,6 +38,9 @@ def test_ligand_explorer_offers_full_persistence_range_without_suppression():
     assert "ring_inset_center" in source
     assert 'id="move-info"' in source
     assert 'id="move-popover"' in source
+    assert 'id="export-legend-horizontal"' in source
+    assert 'id="export-legend-vertical"' in source
+    assert "function downloadLegend(orientation)" in source
     assert "Double-click anywhere on the diagram to clear" in source
     assert "svg.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();select(null)})" in source
     assert "label_clearance = 0.0 if element == \"C\"" in source
@@ -49,6 +52,9 @@ def test_dashboard_embed_allows_export_and_has_room_for_the_full_explorer():
     source = (ROOT / "5_PyMACS_Result_Dashboard.py").read_text(encoding="utf-8")
     assert 'sandbox="allow-scripts allow-downloads"' in source
     assert "height:1320px" in source
+    assert 'if chain else \'\'' in source
+    assert "if(mode==='complex'){{viewer.setStyle" in source
+    assert "viewer.zoomTo()}}if(mode==='chain'" in source
 
 
 def test_interface_explorer_keeps_chain_chemistry_modes_mutually_exclusive():
