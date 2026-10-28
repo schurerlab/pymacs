@@ -2930,6 +2930,12 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
     )
 
     bond_svg = []
+    heavy_degree = {}
+    for first, second, _order in normalized_bonds:
+        if first in atom_xy and second in atom_xy and not first.startswith("H") and not second.startswith("H"):
+            heavy_degree[first] = heavy_degree.get(first, 0) + 1
+            heavy_degree[second] = heavy_degree.get(second, 0) + 1
+    ligand_svg_center = _networx_fixed_ligand_point(center, ligand_bounds, width, height)
     for first, second, order in normalized_bonds:
         if not first or not second or first.startswith("H") or second.startswith("H"):
             continue
@@ -2951,6 +2957,15 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
             # bonds (for example carbonyls): the second line should never run
             # right into the atom labels or appear longer than the main bond.
             ox, oy = -dy / distance * 8, dx / distance * 8
+            # For ring bonds the inset companion belongs on the inside of the
+            # ring.  Choose the normal pointing toward the molecular centre
+            # instead of relying on bond-file orientation, which otherwise
+            # flips six-membered ring double bonds outside the ring.
+            if heavy_degree.get(first, 0) >= 2 and heavy_degree.get(second, 0) >= 2:
+                midpoint_x, midpoint_y = (x1 + x2) / 2, (y1 + y2) / 2
+                to_center_x, to_center_y = ligand_svg_center[0] - midpoint_x, ligand_svg_center[1] - midpoint_y
+                if ox * to_center_x + oy * to_center_y < 0:
+                    ox, oy = -ox, -oy
             inset_x, inset_y = dx / distance * 10, dy / distance * 10
             bond_svg.append(f'<line class="bond bond-secondary" x1="{x1+ox+inset_x:.2f}" y1="{y1+oy+inset_y:.2f}" x2="{x2+ox-inset_x:.2f}" y2="{y2+oy-inset_y:.2f}"/>')
             if bond_order >= 3:
@@ -2988,7 +3003,7 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
                      x, node_line_spacing, escape(chain or "—"), x, node_line_spacing, escape(code),
                      x, node_line_spacing, escape(number))
         nodes_svg.append(
-            f'<g class="residue-node category-{category}" data-residue="{escape(residue)}">'
+            f'<g class="residue-node category-{category}" data-residue="{escape(residue)}" data-x="{x:.2f}" data-y="{y:.2f}">'
             f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{effective_node_radius:.2f}"/><text x="{x:.2f}" y="{y:.2f}" font-size="{fitted_font_size}" style="font-size:{fitted_font_size}px">{label}</text></g>'
         )
 
@@ -3040,6 +3055,8 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
         edge_records.append({
             "id": int(index), "residue": str(residue), "atom": str(atom), "type": type_name,
             "fraction": round(float(row["Fraction"]), 6), "path": f"M {x1:.2f} {y1:.2f} Q {control_x:.2f} {control_y:.2f} {x2:.2f} {y2:.2f}",
+            "x1": round(x1, 2), "y1": round(y1, 2), "x2": round(x2, 2), "y2": round(y2, 2),
+            "cx": round(control_x, 2), "cy": round(control_y, 2),
             "label_x": round(label_x, 2) if label_x is not None else None,
             "label_y": round(label_y, 2) if label_y is not None else None,
             "style": style_key,
@@ -3099,6 +3116,42 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
         ".category-hydrophobic circle{fill:#c9f7c5}.category-positive circle{fill:#c5f1ff}.category-negative circle{fill:#ffcbc5}.category-polar circle{fill:#e8e8e8}",
         ".category-hydrophobic circle{fill:#93ff8f}.category-positive circle{fill:#70eaff}.category-negative circle{fill:#ff8b82}.category-polar circle{fill:#e6d8ff}",
     )
+    html = html.replace(
+        "</style>",
+        ".explorer-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:-8px 0 18px}.explorer-tools label{font-weight:800;color:var(--muted);font-size:.86rem}.explorer-tools select{border:1px solid #36506f;border-radius:9px;background:#101b2b;color:var(--text);padding:8px;font:800 .86rem inherit}.diagram.drag-enabled{outline:2px dashed var(--cyan);outline-offset:4px}.diagram.drag-enabled .residue-node{cursor:grab}.diagram.drag-enabled .residue-node.dragging{cursor:grabbing}.export-note{color:var(--muted);font-size:.78rem;margin:0}</style>",
+        1,
+    )
+    html = html.replace(
+        f'<div class="controls" role="group" aria-label="Persistent interaction threshold">{threshold_buttons}</div>',
+        f'<div class="controls" role="group" aria-label="Persistent interaction threshold">{threshold_buttons}</div>'
+        '<div class="explorer-tools" aria-label="Diagram controls">'
+        '<button id="drag-toggle" type="button" aria-pressed="false">Move nodes: off</button>'
+        '<label for="label-size">Occupancy labels <select id="label-size"><option value="13">Compact</option><option value="17" selected>Standard</option><option value="23">Large</option></select></label>'
+        '<button id="export-svg" type="button">Save transparent SVG</button>'
+        '<p class="export-note">Node moves are temporary and reset when you change the retained threshold.</p></div>',
+    )
+    # The interaction explorer is deliberately self-contained so the dashboard
+    # can embed it as srcdoc.  This client-side layer makes the annotations
+    # manipulable without altering any scientific coordinates or source data.
+    interactive_script = r'''<script>
+const EDGES=__DATA__;
+const svg=document.getElementById('network'),layer=document.getElementById('edge-layer'),diagram=document.querySelector('.diagram'),nodes=[...document.querySelectorAll('.residue-node')],count=document.getElementById('edge-count'),label=document.getElementById('threshold-label'),selection=document.getElementById('selection'),dragToggle=document.getElementById('drag-toggle'),labelSize=document.getElementById('label-size');
+const defaults=Object.fromEntries(nodes.map(n=>[n.dataset.residue,{x:+n.dataset.x,y:+n.dataset.y}]));
+let active=__DEFAULT__,selected=null,dragMode=false,layoutChanged=false,dragging=null,labelPixels=17;
+let positions=Object.fromEntries(Object.entries(defaults).map(([key,value])=>[key,{...value}]));
+const resetLayout=()=>{positions=Object.fromEntries(Object.entries(defaults).map(([key,value])=>[key,{...value}]));layoutChanged=false};
+function select(edge){selected=edge?.id??null;document.querySelectorAll('.edge').forEach(el=>el.classList.toggle('selected',+el.dataset.id===selected));nodes.forEach(el=>el.classList.toggle('selected',!!edge&&el.dataset.residue===edge.residue));selection.innerHTML=edge?`<b>${edge.residue}</b> → ligand atom <b>${edge.atom}</b><br>${edge.type} · <b>${(edge.fraction*100).toFixed(1)}%</b> occupancy`:'Select an edge or residue to inspect its type, ligand atom, and occupancy.'}
+function geometry(edge){const target=positions[edge.residue]||{x:edge.x2,y:edge.y2},midX=(edge.x1+target.x)/2,midY=(edge.y1+target.y)/2,baseMidX=(edge.x1+edge.x2)/2,baseMidY=(edge.y1+edge.y2)/2,controlX=midX+(edge.cx-baseMidX),controlY=midY+(edge.cy-baseMidY),labelX=edge.label_x===null?null:controlX+(edge.label_x-edge.cx),labelY=edge.label_y===null?null:controlY+(edge.label_y-edge.cy);return{target,controlX,controlY,labelX,labelY}}
+function pathFor(edge,g){return `M ${edge.x1} ${edge.y1} Q ${g.controlX.toFixed(2)} ${g.controlY.toFixed(2)} ${g.target.x.toFixed(2)} ${g.target.y.toFixed(2)}`}
+function render(){const visible=EDGES.filter(e=>e.fraction+1e-9>=active);layer.innerHTML=visible.map(edge=>{const g=geometry(edge),text=g.labelX===null?'':`<text class="edge-label" x="${g.labelX.toFixed(2)}" y="${g.labelY.toFixed(2)}" style="font-size:${labelPixels}px">${Math.round(edge.fraction*100)}%</text>`;return `<g><path class="edge ${edge.style}" data-id="${edge.id}" d="${pathFor(edge,g)}"/>${text}</g>`}).join('');const residues=new Set(visible.map(e=>e.residue));nodes.forEach(node=>{const base=defaults[node.dataset.residue],point=positions[node.dataset.residue]||base;node.style.display=residues.has(node.dataset.residue)?'inline':'none';node.setAttribute('transform',`translate(${(point.x-base.x).toFixed(2)} ${(point.y-base.y).toFixed(2)})`)});count.textContent=visible.length;label.textContent=`≥ ${Math.round(active*100)}% occupancy`;if(!visible.length){selection.textContent=`No atom-specific interaction reaches ${Math.round(active*100)}% occupancy. Strongest observed edge: __MAX__%.`;selected=null}document.querySelectorAll('.edge').forEach(el=>el.onclick=()=>select(EDGES.find(e=>e.id===+el.dataset.id)));if(selected!==null&&!visible.some(e=>e.id===selected))select(null)}
+function pointFromEvent(event){const point=svg.createSVGPoint();point.x=event.clientX;point.y=event.clientY;return point.matrixTransform(svg.getScreenCTM().inverse())}
+function bindNodes(){nodes.forEach(node=>{if(node.dataset.bound)return;node.dataset.bound='1';node.addEventListener('click',event=>{if(node.dataset.suppress==='1'){node.dataset.suppress='0';return}const edge=EDGES.filter(item=>item.residue===node.dataset.residue&&item.fraction+1e-9>=active).sort((a,b)=>b.fraction-a.fraction)[0];if(edge)select(edge)});node.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();select(null)});node.addEventListener('pointerdown',event=>{if(!dragMode)return;event.preventDefault();event.stopPropagation();dragging=node.dataset.residue;node.classList.add('dragging');svg.setPointerCapture(event.pointerId)});});svg.addEventListener('pointermove',event=>{if(!dragging)return;const point=pointFromEvent(event),margin=20;positions[dragging]={x:Math.max(margin,Math.min(1100,point.x)),y:Math.max(margin,Math.min(800,point.y))};layoutChanged=true;render()});svg.addEventListener('pointerup',event=>{if(!dragging)return;const node=nodes.find(item=>item.dataset.residue===dragging);if(node){node.classList.remove('dragging');node.dataset.suppress='1'}dragging=null;try{svg.releasePointerCapture(event.pointerId)}catch(_error){}})}
+dragToggle.onclick=()=>{dragMode=!dragMode;dragToggle.setAttribute('aria-pressed',String(dragMode));dragToggle.textContent=`Move nodes: ${dragMode?'on':'off'}`;diagram.classList.toggle('drag-enabled',dragMode)};
+labelSize.onchange=()=>{labelPixels=+labelSize.value;render()};
+document.getElementById('export-svg').onclick=()=>{const copy=svg.cloneNode(true);copy.setAttribute('xmlns','http://www.w3.org/2000/svg');copy.setAttribute('style','background:transparent');copy.querySelectorAll('.bond').forEach(el=>el.setAttribute('stroke','#111827'));copy.querySelectorAll('.edge-label').forEach(el=>{el.setAttribute('fill','#111827');el.setAttribute('stroke','#ffffff');el.setAttribute('stroke-width','3px')});copy.querySelectorAll('.residue-node text').forEach(el=>el.setAttribute('fill','#111827'));copy.insertAdjacentHTML('afterbegin','<style>.bond{stroke:#111827;stroke-width:3.4;stroke-linecap:round}.bond-secondary{stroke-width:2.5}.edge{fill:none;stroke-width:3.3;stroke-dasharray:8 6}.hbond{stroke:#ff4d6d}.hydrophobic{stroke:#29a845}.ionic{stroke:#8b4fd3}.water{stroke:#168cc8}.edge-label{font-family:Arial,sans-serif;font-weight:900;text-anchor:middle}.residue-node circle{stroke:#111827;stroke-width:2.2}.residue-node text{font-family:Arial,sans-serif;font-weight:900;text-anchor:middle}.atom{font-family:Arial,sans-serif;font-weight:900;text-anchor:middle}</style>');const blob=new Blob([`<?xml version="1.0" encoding="UTF-8"?>\n${copy.outerHTML}`],{type:'image/svg+xml'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='__LIGAND___interaction_view.svg';link.click();setTimeout(()=>URL.revokeObjectURL(url),500)};
+document.querySelectorAll('[data-threshold]').forEach(button=>button.onclick=()=>{const next=+button.dataset.threshold;if(next===active)return;if(layoutChanged&&!window.confirm('Changing the retained threshold resets your node arrangement. Continue?'))return;active=next;resetLayout();document.querySelectorAll('[data-threshold]').forEach(item=>item.setAttribute('aria-pressed',item===button));render()});bindNodes();render();
+</script>'''.replace("__DATA__", data_json).replace("__DEFAULT__", f"{default_threshold:.2f}").replace("__MAX__", f"{max_occupancy * 100:.1f}").replace("__LIGAND__", escape(ligand))
+    html = re.sub(r"<script>const EDGES=.*?</script>", interactive_script, html, count=1, flags=re.DOTALL)
     with open(output, "w", encoding="utf-8") as handle:
         handle.write(html)
     print(f"  ✓ Interactive NETWORX explorer saved → {output}")
