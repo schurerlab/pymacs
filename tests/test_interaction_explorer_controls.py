@@ -13,10 +13,13 @@ def test_ligand_explorer_offers_full_persistence_range_without_suppression():
     assert "Hydrogens/virtual sites are not drawn" in source
     assert 'id="drag-toggle"' in source
     assert 'id="label-size"' in source
+    assert 'type="range"' in source
+    assert "labelSize.addEventListener('input'" in source
     assert 'id="export-svg"' in source
     assert "Changing the retained threshold resets your node arrangement" in source
     assert "node.addEventListener('dblclick'" in source
-    assert "ligand_svg_center" in source
+    assert "ring_inset_center" in source
+    assert "move-hint" in source
 
 
 def test_interface_explorer_keeps_chain_chemistry_modes_mutually_exclusive():
