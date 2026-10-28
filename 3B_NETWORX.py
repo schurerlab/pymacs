@@ -2832,11 +2832,12 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
 
     The PNG remains the archival journal panel.  This companion uses the same
     structure-preserving ligand layout and chemically specific edge occupancies
-    so a reader can compare the 90/80/70% persistent-contact views in-browser.
+    so a reader can inspect the entire 10–90% persistence range in-browser.
     """
-    # These are deliberately strict, high-confidence retained-contact views.
-    # Never silently lower them: an empty view is a valid scientific result.
-    thresholds = (0.90, 0.80, 0.70)
+    # The interaction explorer is intentionally inclusive.  Its purpose is to
+    # let a reader decide which persistence cutoff answers their question;
+    # it must never disappear merely because a stringent cutoff is empty.
+    thresholds = tuple(step / 100 for step in range(10, 100, 10))
     normalized_bonds = []
     for first, second, order in bonds:
         first = normalize_bond_endpoint(first, list(atom_positions))
@@ -3004,7 +3005,7 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
         })
 
     data_json = json.dumps(edge_records, separators=(",", ":")).replace("</", "<\\/")
-    default_threshold = thresholds[1]
+    default_threshold = 0.50
     empty_message = (
         f"No atom-specific interaction reaches {int(default_threshold * 100)}% occupancy. "
         f"The strongest observed residue–ligand-atom/type interaction is {max_occupancy * 100:.1f}%."
