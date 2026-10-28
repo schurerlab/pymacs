@@ -11,13 +11,14 @@ def test_ligand_explorer_offers_full_persistence_range_without_suppression():
     assert "must never disappear" in source
     assert "760.0 / span_x" in source
     assert "Hydrogens/virtual sites are not drawn" in source
-    assert 'id="drag-toggle"' in source
+    assert 'id="drag-toggle"' not in source
     assert 'id="label-size"' in source
     assert 'type="range"' in source
     assert "labelSize.addEventListener('input'" in source
-    assert 'min="17" max="42" value="21"' in source
+    assert 'min="20" max="64" value="26"' in source
     assert "node.setPointerCapture" in source
     assert "event.detail>=2" in source
+    assert "labelSize.oninput" in source
     assert 'id="export-svg"' in source
     assert "Changing the retained threshold resets your node arrangement" in source
     assert "node.addEventListener('dblclick'" in source
