@@ -1232,18 +1232,23 @@ if PARTNER_MODE:
     print(f"🧬 Final ligand selected: {ligand_code}")
     print(f"🧬 Context cofactors retained in trajectory: {', '.join(CONTEXT_COFACTORS) if CONTEXT_COFACTORS else 'None'}")
 
-    print("\n📌 You may now choose a full compound name for labeling graphs/output.")
-    print("   • Press ENTER to use the ligand code above (recommended only for short names).")
-    print("   • Or type a more descriptive compound name (e.g., Paprotrain, CPD32_Inhibitor).")
-
-    compound_input = input("🏷️  Enter compound display name (or press ENTER to use resname): ").strip()
-
-    if compound_input:
-        compound_name = compound_input
-        print(f"🏷️ Using custom compound name for all plots + summaries: {compound_name}")
-    else:
+    # Batch jobs must never wait for stdin.  Honour the explicit display name
+    # supplied by the scheduler; in headless mode fall back deterministically
+    # to the ligand code.  The interactive prompt remains only for terminal
+    # use where no label was provided.
+    if args.compound_name:
+        compound_name = str(args.compound_name).strip()
+        print(f"🏷️ Using CLI compound name for all plots + summaries: {compound_name}")
+    elif args.headless or os.environ.get("PYMACS_NONINTERACTIVE"):
         compound_name = ligand_code
-        print(f"🏷️ Using ligand resname for all plots + summaries: {compound_name}")
+        print(f"🏷️ Headless analysis: using ligand resname for all plots + summaries: {compound_name}")
+    else:
+        print("\n📌 You may now choose a full compound name for labeling graphs/output.")
+        print("   • Press ENTER to use the ligand code above (recommended only for short names).")
+        print("   • Or type a more descriptive compound name (e.g., Paprotrain, CPD32_Inhibitor).")
+        compound_input = input("🏷️  Enter compound display name (or press ENTER to use resname): ").strip()
+        compound_name = compound_input or ligand_code
+        print(f"🏷️ Using {'custom compound name' if compound_input else 'ligand resname'} for all plots + summaries: {compound_name}")
 
     print(f"\n🧬 RESNAME for topology selections: {ligand_code}")
     print(f"🏷️ Compound name for figures/output: {compound_name}\n")
