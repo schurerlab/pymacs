@@ -27,6 +27,8 @@ def test_ligand_explorer_offers_full_persistence_range_without_suppression():
     assert "exportedCircle.style.setProperty('fill',style.fill,'important')" in source
     assert "sourceLabels=[...svg.querySelectorAll('.edge-label')]" in source
     assert "atomColours={N:'#58b9ff',O:'#ff6478',S:'#e5c400',P:'#ff927b'}" in source
+    assert "labelTrims={F:11,Cl:18,Br:18,I:8,P:12}" in source
+    assert "firstTrim=Math.min(labelTrims[line.dataset.firstElement]||0" in source
     assert "copy.querySelectorAll('.atom-N,.atom-O,.atom-S,.atom-C').forEach(atom=>atom.remove())" in source
     assert 'data-first-element' in source
     assert "Changing the retained threshold resets your node arrangement. Continue?" not in source
