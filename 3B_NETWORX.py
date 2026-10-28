@@ -3078,8 +3078,19 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
 
     for index, row in edges.iterrows():
         atom, residue = row["DisplayAtom"], row["Residue"]
-        x1, y1 = atom_xy[atom]
+        atom_x, atom_y = atom_xy[atom]
         x2, y2 = residue_xy[residue]
+        dx, dy = x2 - atom_x, y2 - atom_y
+        distance = max((dx * dx + dy * dy) ** .5, 1)
+        # Start contact curves at the *edge* of a drawn heteroatom label,
+        # rather than behind its glyph.  This is especially important for
+        # two-letter halogens such as Cl/Br and for P, where a central origin
+        # makes the label hard to read in both the explorer and SVG export.
+        element = str(atom_elements.get(atom, "C"))
+        label_clearance = 0.0 if element == "C" else (22.0 if len(element) > 1 else 17.0)
+        label_clearance = min(label_clearance, max(distance - 12.0, 0.0))
+        x1 = atom_x + dx / distance * label_clearance
+        y1 = atom_y + dy / distance * label_clearance
         dx, dy = x2 - x1, y2 - y1
         distance = max((dx * dx + dy * dy) ** .5, 1)
         ordinal = bundle_order.get(atom, 0)
@@ -3166,7 +3177,7 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
         '<label for="label-size">Occupancy labels <input id="label-size" type="range" min="20" max="64" value="26" step="1" aria-label="Occupancy-label font size"><output id="label-size-value" class="label-size-value">26 px</output></label>'
         '<button id="move-info" class="move-info" type="button" aria-label="Diagram interaction tips" aria-expanded="false">ⓘ</button>'
         '<button id="export-svg" type="button">Save transparent SVG</button>'
-        '<span id="move-popover" class="move-popover" hidden>Drag residue nodes or dashed interaction curves to rearrange the view. Ligand atoms stay fixed. Choosing a different retained threshold resets these temporary edits.</span></div>',
+        '<span id="move-popover" class="move-popover" hidden>Drag residue nodes or dashed interaction curves to rearrange the view. Ligand atoms stay fixed. Double-click anywhere on the diagram to clear a selected node or interaction. Choosing a different retained threshold resets these temporary edits.</span></div>',
     )
     # The interaction explorer is deliberately self-contained so the dashboard
     # can embed it as srcdoc.  This client-side layer makes the annotations
@@ -3186,7 +3197,7 @@ function updateVisibleEdge(edge){const g=geometry(edge),path=layer.querySelector
 function pointFromEvent(event){const point=svg.createSVGPoint();point.x=event.clientX;point.y=event.clientY;return point.matrixTransform(svg.getScreenCTM().inverse())}
 function nodeForEvent(event){return nodes.find(node=>node===event.target||node.contains(event.target))||null}
 function endDrag(event){if(!dragging)return;const target=dragging.target;if(dragging.kind==='node'){target.classList.remove('dragging');target.dataset.suppress='1'}else target.classList.remove('dragging');try{target.releasePointerCapture(event.pointerId)}catch(_error){}dragging=null}
-function bindNodes(){svg.addEventListener('click',event=>{const node=nodeForEvent(event);if(!node)return;if(event.detail>=2){event.preventDefault();select(null);return}if(node.dataset.suppress==='1'){node.dataset.suppress='0';return}const edge=EDGES.filter(item=>item.residue===node.dataset.residue&&item.fraction+1e-9>=active).sort((a,b)=>b.fraction-a.fraction)[0];if(edge)select(edge)});svg.addEventListener('dblclick',event=>{if(nodeForEvent(event)||event.target.closest?.('.edge')){event.preventDefault();event.stopPropagation();select(null)}});svg.addEventListener('pointerdown',event=>{const node=nodeForEvent(event);if(node){event.preventDefault();event.stopPropagation();dragging={kind:'node',residue:node.dataset.residue,target:node};node.classList.add('dragging');try{node.setPointerCapture(event.pointerId)}catch(_error){}return}const edgePath=event.target.closest?.('.edge');if(!edgePath)return;event.preventDefault();event.stopPropagation();dragging={kind:'edge',id:+edgePath.dataset.id,target:edgePath};edgePath.classList.add('dragging');try{edgePath.setPointerCapture(event.pointerId)}catch(_error){}});svg.addEventListener('pointermove',event=>{if(!dragging)return;const point=pointFromEvent(event),margin=20;if(dragging.kind==='node'){positions[dragging.residue]={x:Math.max(margin,Math.min(1100,point.x)),y:Math.max(margin,Math.min(800,point.y))};render()}else{const edge=EDGES.find(item=>item.id===dragging.id);if(edge){edgeControls[edge.id]={x:Math.max(margin,Math.min(1100,point.x)),y:Math.max(margin,Math.min(800,point.y))};updateVisibleEdge(edge)}}layoutChanged=true});svg.addEventListener('pointerup',endDrag);svg.addEventListener('pointercancel',endDrag)}
+function bindNodes(){svg.addEventListener('click',event=>{const node=nodeForEvent(event);if(!node)return;if(event.detail>=2){event.preventDefault();select(null);return}if(node.dataset.suppress==='1'){node.dataset.suppress='0';return}const edge=EDGES.filter(item=>item.residue===node.dataset.residue&&item.fraction+1e-9>=active).sort((a,b)=>b.fraction-a.fraction)[0];if(edge)select(edge)});svg.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();select(null)});svg.addEventListener('pointerdown',event=>{const node=nodeForEvent(event);if(node){event.preventDefault();event.stopPropagation();dragging={kind:'node',residue:node.dataset.residue,target:node};node.classList.add('dragging');try{node.setPointerCapture(event.pointerId)}catch(_error){}return}const edgePath=event.target.closest?.('.edge');if(!edgePath)return;event.preventDefault();event.stopPropagation();dragging={kind:'edge',id:+edgePath.dataset.id,target:edgePath};edgePath.classList.add('dragging');try{edgePath.setPointerCapture(event.pointerId)}catch(_error){}});svg.addEventListener('pointermove',event=>{if(!dragging)return;const point=pointFromEvent(event),margin=20;if(dragging.kind==='node'){positions[dragging.residue]={x:Math.max(margin,Math.min(1100,point.x)),y:Math.max(margin,Math.min(800,point.y))};render()}else{const edge=EDGES.find(item=>item.id===dragging.id);if(edge){edgeControls[edge.id]={x:Math.max(margin,Math.min(1100,point.x)),y:Math.max(margin,Math.min(800,point.y))};updateVisibleEdge(edge)}}layoutChanged=true});svg.addEventListener('pointerup',endDrag);svg.addEventListener('pointercancel',endDrag)}
 function updateLabelSize(value){labelPixels=Number(value);labelSizeValue.value=`${labelPixels} px`;labelSizeValue.textContent=`${labelPixels} px`;document.querySelectorAll('.edge-label').forEach(item=>{item.setAttribute('font-size',String(labelPixels));item.style.fontSize=`${labelPixels}px`})}
 labelSize.oninput=event=>updateLabelSize(event.currentTarget.value);
 labelSize.addEventListener('input',event=>updateLabelSize(event.currentTarget.value));
