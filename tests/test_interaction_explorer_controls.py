@@ -20,6 +20,9 @@ def test_ligand_explorer_offers_full_persistence_range_without_suppression():
     assert "event.detail>=2" in source
     assert "labelSize.oninput" in source
     assert "(?:const EMPTY_MESSAGE=.*?;)?const EDGES" in source
+    assert "sourceNodes=[...svg.querySelectorAll('.residue-node')]" in source
+    assert "exportedCircle.style.fill=style.fill" in source
+    assert "Changing the retained threshold resets your node arrangement. Continue?" not in source
     assert 'id="export-svg"' in source
     assert "Changing the retained threshold resets your node arrangement" in source
     assert "node.addEventListener('dblclick'" in source
