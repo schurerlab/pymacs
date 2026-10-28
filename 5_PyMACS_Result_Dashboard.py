@@ -12,6 +12,7 @@ import base64
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import textwrap
 from dataclasses import dataclass
@@ -80,6 +81,33 @@ class PartnerContext:
         return {"ligand": "ligand–protein", "peptide": "peptide–protein", "protein_chain": "chain-pair", "none": "intramolecular"}[self.partner_kind]
 
 
+def atomindex_components(root: Path) -> list[dict[str, str]]:
+    """Read component names and simulation chains from atomIndex's provenance comment."""
+    entries: list[dict[str, str]] = []
+    try:
+        lines = (root / "atomIndex.txt").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return entries
+    for raw in lines:
+        body, _, comment = raw.partition("#")
+        match = re.match(r"^\s*(\S+)\s+\d+\s*-\s*\d+\s*$", body)
+        if not match:
+            continue
+        metadata = dict(re.findall(r"(\w+)=([^\s#]+)", comment))
+        entries.append({"label": match.group(1), **metadata})
+    return entries
+
+
+def component_display_labels(root: Path, context: PartnerContext) -> list[str]:
+    labels = []
+    for entry in atomindex_components(root):
+        chain = entry.get("current_chain") or entry.get("source_chain") or "?"
+        is_partner = context.partner_kind == "peptide" and chain in context.partner_chain_ids
+        role = "peptide" if is_partner else "receptor" if context.partner_kind == "peptide" else entry.get("chain_type", "protein")
+        labels.append(f"{entry['label']} ({role}, chain {chain})")
+    return labels
+
+
 def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict,
                     simulation: dict | None = None) -> PartnerContext:
     """Infer the report partner from authoritative run/interface metadata, not filenames alone."""
@@ -114,6 +142,9 @@ def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict,
             configured.append((chain.strip(), label.strip()))
     if not chain_ids:
         chain_ids = [chain for chain, _ in configured]
+    atomindex_entries = atomindex_components(root)
+    if not chain_ids:
+        chain_ids = [entry["current_chain"] for entry in atomindex_entries if entry.get("current_chain")]
     peptide_identity: dict = {}
     for identity_path in (analysis / "portal_peptide_identity.json", root / ".chainmap.peptide.json"):
         try:
@@ -135,9 +166,11 @@ def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict,
     mode = str((simulation or {}).get("mode") or setup.get("mode") or "").casefold()
     if ligand and ligand.casefold() not in {"none", "no ligand label", "proteinonly"}:
         return PartnerContext("ligand", ligand, tuple(chain_ids), tuple(pairs), "ligand_complex")
+    atomindex_peptide = next((entry for entry in atomindex_entries
+                              if entry.get("current_chain") in peptide_chain_ids or entry.get("chain_type", "").casefold() == "peptide"), None)
     if peptide_pairs or mode == "peptide" or identity_name or has_peptide_metrics:
         peptide_labels = [label for pair in peptide_pairs for label in pair if "peptide" in chain_types.get(label, "")]
-        label = identity_name or next(iter(peptide_labels), "Peptide")
+        label = identity_name or (atomindex_peptide or {}).get("label") or next(iter(peptide_labels), "Peptide")
         return PartnerContext("peptide", label, tuple(peptide_chain_ids or chain_ids), tuple(pairs), "peptide_protein_complex")
     if pairs or len(chain_ids) > 1:
         label = " / ".join(chain_ids) if chain_ids else "Chain interface"
@@ -720,6 +753,52 @@ def multiseries_plot(csv_file: Path, title: str, x_column: str, y_columns: list[
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
+def interface_rin_plots(analysis: Path) -> list[tuple[str, str, Path, str]]:
+    """Render each chain pair independently so multi-interface systems remain readable."""
+    interface_dir = analysis / "Interface_RIN"
+    time_path = interface_dir / "interface_contact_timeseries.csv"
+    pair_path = interface_dir / "interface_residue_pair_contacts.csv"
+    node_path = interface_dir / "interface_node_summary.csv"
+    results: list[tuple[str, str, Path, str]] = []
+    try:
+        time_data = pd.read_csv(time_path)
+    except (OSError, ValueError, pd.errors.ParserError):
+        time_data = pd.DataFrame()
+    if {"ChainA_Label", "ChainB_Label", "Time_ns"}.issubset(time_data.columns):
+        for (left, right), table in time_data.groupby(["ChainA_Label", "ChainB_Label"], sort=False):
+            table = _sample_table(table.sort_values("Time_ns"))
+            for column, title, unit in (
+                ("ContactCount", "interface contacts over time", "Residue-pair contacts"),
+                ("MinDistance_A", "closest interface distance over time", "Closest distance (Å)"),
+            ):
+                if column not in table:
+                    continue
+                figure = go.Figure(go.Scatter(x=table["Time_ns"], y=pd.to_numeric(table[column], errors="coerce"), mode="lines", line={"color": CYAN if column == "ContactCount" else ORANGE, "width": 2}, hovertemplate=f"Time=%{{x:.3f}} ns<br>{escape(column)}=%{{y:.4g}}<extra></extra>"))
+                figure.update_layout(title=f"{left} ↔ {right}: {title}", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=360, xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": unit, "gridcolor": GRID})
+                results.append(("contacts" if column == "ContactCount" else "distances", f"{left} ↔ {right}: {title}", time_path, plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})))
+    try:
+        pairs = pd.read_csv(pair_path)
+    except (OSError, ValueError, pd.errors.ParserError):
+        pairs = pd.DataFrame()
+    if {"ChainA_Label", "ChainB_Label", "Pair_ID", "ContactFraction"}.issubset(pairs.columns):
+        for (left, right), table in pairs.groupby(["ChainA_Label", "ChainB_Label"], sort=False):
+            table = table.nlargest(30, "ContactFraction").sort_values("ContactFraction")
+            figure = go.Figure(go.Bar(y=table["Pair_ID"], x=table["ContactFraction"], orientation="h", marker_color=GREEN, hovertemplate="Residue pair=%{y}<br>Occupancy=%{x:.1%}<extra></extra>"))
+            figure.update_layout(title=f"{left} ↔ {right}: top residue-pair persistence", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 160, "r": 20, "t": 55, "b": 52}, height=max(360, 30 * len(table)), xaxis={"title": "Contact occupancy", "range": [0, 1], "gridcolor": GRID}, yaxis={"title": "Residue pair", "gridcolor": GRID})
+            results.append(("contacts", f"{left} ↔ {right}: top residue-pair persistence", pair_path, plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})))
+    try:
+        nodes = pd.read_csv(node_path)
+    except (OSError, ValueError, pd.errors.ParserError):
+        nodes = pd.DataFrame()
+    if {"Chain_Label", "Residue_Label", "WeightedDegree"}.issubset(nodes.columns):
+        for chain, table in nodes.groupby("Chain_Label", sort=False):
+            table = table.nlargest(30, "WeightedDegree").sort_values("WeightedDegree")
+            figure = go.Figure(go.Bar(y=table["Residue_Label"], x=table["WeightedDegree"], orientation="h", marker_color=MAGENTA, hovertemplate="Residue=%{y}<br>Weighted interface degree=%{x:.3f}<extra></extra>"))
+            figure.update_layout(title=f"{chain}: interface-residue importance", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 130, "r": 20, "t": 55, "b": 52}, height=max(360, 30 * len(table)), xaxis={"title": "Weighted interface degree", "gridcolor": GRID}, yaxis={"title": "Residue", "gridcolor": GRID})
+            results.append(("chemistry", f"{chain}: interface-residue importance", node_path, plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})))
+    return results
+
+
 def categorical_bar_plot(csv_file: Path, title: str, category: str, values: list[str],
                          y_title: str, stacked: bool = False,
                          colors: list[str] | None = None) -> str | None:
@@ -1167,7 +1246,7 @@ def main() -> None:
         chain, separator, label = entry.strip().partition(":")
         if chain and separator and label:
             chain_labels.append(label.strip())
-    protein_name = " / ".join(chain_labels) or "Protein"
+    protein_name = " / ".join(component_display_labels(root, context)) or " / ".join(chain_labels) or "Protein"
     # Full-complex RMSD is meaningful for multiple macromolecular chains or
     # a PROTAC assembly.  A small-molecule ligand is not an extra protein
     # chain, so a one-chain ligand–protein job must not show this card.
@@ -1297,6 +1376,8 @@ def main() -> None:
         add("coupled", multiseries_plot(coupling, "Rolling correlation", "Time_ns", ["Rolling_Corr_Contacts_vs_Sheet"], "Correlation"), "Rolling correlation", coupling)
     changepoints = analysis / "LIG_ChangePoint_Summary.csv"
     if changepoints.is_file(): add("coupled", categorical_bar_plot(changepoints, "Change-point segments", "Segment", ["MeanContacts", "MeanHelix", "MeanSheet", "MeanCoil"], "Mean value"), "Change-point segments", changepoints, note="Hover the bars to compare the average contact and secondary-structure values for each detected trajectory segment.")
+    for group, title, source, graph in interface_rin_plots(analysis):
+        add(group, graph, title, source, note="This panel is isolated to the labelled chain or chain pair; it is not pooled across unrelated interfaces.")
     for index, csv_file in enumerate(csv_files):
         # Keep raw frame-wise tables and alternate selections in the download
         # bundle.  The main gallery is intentionally canonical and therefore

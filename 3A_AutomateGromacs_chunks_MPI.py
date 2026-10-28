@@ -2051,6 +2051,11 @@ def dispatch_to_interface_rin():
     ]
     if args.interface_chain_pairs:
         cmd.extend(["--chain-pairs", args.interface_chain_pairs])
+    if PEPTIDE_INFO and PEPTIDE_INFO.get("chain_id"):
+        # atomIndex preserves component names; this explicit role hint prevents
+        # a peptide made of standard amino acids from being rendered as a
+        # second generic protein chain in the interface dossier.
+        cmd.extend(["--peptide-chains", str(PEPTIDE_INFO["chain_id"])])
     if args.headless:
         cmd.append("--headless")
 

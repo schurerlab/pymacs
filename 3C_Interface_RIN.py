@@ -97,6 +97,7 @@ def build_parser():
     parser.add_argument("--frame-step", type=int, default=1)
     parser.add_argument("--max-edges", type=int, default=100)
     parser.add_argument("--chain-pairs", default=None)
+    parser.add_argument("--peptide-chains", default="", help="Comma-separated current chain IDs explicitly designated as peptides.")
     parser.add_argument("--force-recompute", action="store_true")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -143,6 +144,7 @@ def parse_atomindex_entries(path="atomIndex.txt"):
                     "current_residues": meta.get("current_residues"),
                     "source_chain": meta.get("source_chain"),
                     "source_residues": meta.get("source_residues"),
+                    "source_rescount": meta.get("source_rescount"),
                 }
             )
     return entries
@@ -160,12 +162,20 @@ def is_polymer_entry(entry):
 
 
 def chain_display_label(entry, index):
-    return (
-        entry.get("current_chain")
-        or entry.get("source_chain")
-        or entry.get("label")
-        or f"Chain_{index}"
-    )
+    """Keep the submitted component name visible beside its simulation chain."""
+    name = entry.get("label") or entry.get("source_chain") or f"Chain_{index}"
+    chain = entry.get("current_chain") or entry.get("source_chain") or "?"
+    role = "peptide" if normalize_chain_type(entry.get("chain_type")) == "peptide" else "protein"
+    return f"{name} ({role}, chain {chain})"
+
+
+def apply_peptide_chain_hints(entries, peptide_chains):
+    """Mark known peptide chains without guessing from their length."""
+    requested = {item.strip() for item in str(peptide_chains or "").split(",") if item.strip()}
+    for entry in entries:
+        if entry.get("current_chain") in requested:
+            entry["chain_type"] = "peptide"
+    return entries
 
 
 def detect_polymer_entries(atomindex_entries):
@@ -1116,7 +1126,7 @@ def main():
 
     t0 = time.perf_counter()
     atomindex_entries = parse_atomindex_entries(args.atomindex)
-    polymer_entries = detect_polymer_entries(atomindex_entries)
+    polymer_entries = detect_polymer_entries(apply_peptide_chain_hints(atomindex_entries, args.peptide_chains))
     stage_times["parse_atomindex_s"] = time.perf_counter() - t0
     progress.complete("load_inputs")
 
