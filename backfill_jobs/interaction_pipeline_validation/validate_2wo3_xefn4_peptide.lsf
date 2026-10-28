@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+#BSUB -J pymacs_validate_2wo3_xefn4_3c_5
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 12:00
+#BSUB -n 8
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/triton/home/jxs794/Molecular_Dynamics/2wo3-xEFN4_TOPdock/pymacs_validate_2wo3_xefn4_3c_5.%J.out
+#BSUB -eo /projectnb/triton/home/jxs794/Molecular_Dynamics/2wo3-xEFN4_TOPdock/pymacs_validate_2wo3_xefn4_3c_5.%J.err
+
+source /etc/bashrc
+set -euo pipefail
+cd /projectnb/triton/home/jxs794/Molecular_Dynamics/2wo3-xEFN4_TOPdock
+module purge
+module load gcc-runtime/13.4.0-none-none-gh6rpjx
+module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export OMP_NUM_THREADS=8
+
+## This recovery pair is intentionally split across the authoritative sources:
+## the archived stripped PDB provides the 40,822-atom topology matching the
+## local production trajectory, whose actual filename is md_0_1.xtc.
+TOPOLOGY=/projectnb/triton/home/mrm431/Ephrin-analysis-recovery-20261027/systems/2wo3-xEFN4_TOPdock/Final_Trajectory.pdb
+TRAJECTORY=md_0_1.xtc
+test -s "$TOPOLOGY"
+test -s "$TRAJECTORY"
+
+python /projectnb/triton/home/jxs794/Pymacs/3C_Interface_RIN.py \
+  --topo "$TOPOLOGY" --traj "$TRAJECTORY" \
+  --atomindex atomIndex.txt --outdir Analysis_Results/Interface_RIN \
+  --peptide-chains B --force-recompute --headless
+test -s Analysis_Results/Interface_RIN/Interface_RIN_Explorer.html
+python /projectnb/triton/home/jxs794/Pymacs/5_PyMACS_Result_Dashboard.py --root .
+grep -q "INTERACTIVE INTERFACE RIN" Analysis_Results/PyMACS_Result_Dashboard.html
