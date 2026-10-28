@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import gzip
 import itertools
 import json
 import math
@@ -9,6 +11,7 @@ import os
 import re
 import sys
 import time
+import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
@@ -95,6 +98,8 @@ def build_parser():
     parser.add_argument("--contact-cutoff", type=float, default=4.0)
     parser.add_argument("--min-contact-frac", type=float, default=0.10)
     parser.add_argument("--frame-step", type=int, default=1)
+    parser.add_argument("--chunk-size", type=int, default=1000,
+                        help="Frames per resumable interface scan shard (default: 1000).")
     parser.add_argument("--max-edges", type=int, default=100)
     parser.add_argument("--chain-pairs", default=None)
     parser.add_argument("--peptide-chains", default="", help="Comma-separated current chain IDs explicitly designated as peptides.")
@@ -464,6 +469,118 @@ def write_interface_outputs(
     framewise_df.to_csv(outdir / "interface_residue_pair_framewise.csv.gz", index=False, compression="gzip")
     save_npz_atomic(outdir / "interface_residue_pair_presence.npz", **presence_payload)
     (outdir / "interface_runtime_summary.txt").write_text("\n".join(runtime_lines) + "\n")
+
+
+# The work directory deliberately contains only complete shard files.  A shard
+# is written to a temporary name and renamed atomically, so an interrupted job
+# can safely resume without treating a partial CSV as analysis evidence.
+FRAMEWISE_COLUMNS = ["Pair_ID", "Frame", "Time_ns", "ChainA_Label", "ChainB_Label", "ResidueA", "ResidueB",
+                     "ResidueA_Name", "ResidueB_Name", "ResidueA_Index", "ResidueB_Index", "MinDistance_A", "InteractionClass"]
+TIMESERIES_COLUMNS = ["Time_ns", "Frame", "ChainA_Label", "ChainB_Label", "ContactCount", "MinDistance_A", "InContact"]
+
+
+def _atomic_csv(path, rows, columns):
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    pd.DataFrame(rows, columns=columns).to_csv(tmp, index=False)
+    os.replace(tmp, path)
+
+
+def _append_csv_shards(shards, destination, columns, gzip_output=False):
+    opener = gzip.open if gzip_output else open
+    mode = "wt"
+    with opener(destination, mode, newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=columns)
+        writer.writeheader()
+        for shard in shards:
+            with open(shard, newline="", encoding="utf-8") as source:
+                for row in csv.DictReader(source):
+                    writer.writerow({name: row.get(name, "") for name in columns})
+
+
+def _work_signature(data_signature, args):
+    return compute_signature({"data_signature": data_signature, "chunk_size": int(args.chunk_size)})
+
+
+def scan_interface_shards(universe, chain_pairs, frame_indices, cutoff_ang, workdir, state):
+    """Scan bounded frame ranges, retaining only one shard's Python rows."""
+    workdir = Path(workdir)
+    prepared = []
+    for left_entry, right_entry in chain_pairs:
+        left, right = build_chain_data(universe, left_entry), build_chain_data(universe, right_entry)
+        if left["heavy_group"].n_atoms and right["heavy_group"].n_atoms and left["residues"] and right["residues"]:
+            prepared.append((left_entry, right_entry, left, right))
+    size = max(1, int(state["chunk_size"]))
+    completed = set(state.get("completed_chunks", []))
+    for chunk_no, start in enumerate(range(0, len(frame_indices), size)):
+        stop = min(len(frame_indices), start + size)
+        token = f"{chunk_no:06d}"
+        expected = [workdir / f"framewise_{token}.csv", workdir / f"timeseries_{token}.csv", workdir / f"events_{token}.csv"]
+        if token in completed and all(path.exists() for path in expected):
+            continue
+        frame_rows, time_rows, event_rows = [], [], []
+        for global_pos, frame_index in enumerate(frame_indices[start:stop], start):
+            universe.trajectory[frame_index]
+            time_ns = float(universe.trajectory.time) / 1000.0
+            for left_entry, right_entry, left, right in prepared:
+                pair_label = f"{left_entry['display_label']}__{right_entry['display_label']}"
+                contacts, distances = capped_distance(left["heavy_group"].positions, right["heavy_group"].positions,
+                                                      max_cutoff=cutoff_ang, return_distances=True)
+                minima = {}
+                for (i, j), dist in zip(contacts, distances):
+                    a, b = left["atom_to_residue"][i], right["atom_to_residue"][j]
+                    if a >= 0 and b >= 0 and ((a, b) not in minima or dist < minima[(a, b)]):
+                        minima[(a, b)] = float(dist)
+                minimum = float(np.min(distances)) if len(distances) else (float(np.min(distance_array(left["heavy_group"].positions, right["heavy_group"].positions))) if left["heavy_group"].n_atoms and right["heavy_group"].n_atoms else math.nan)
+                for (a, b), dist in minima.items():
+                    ra, rb = left["residues"][a], right["residues"][b]
+                    pair_id = make_pair_id(left_entry["display_label"], right_entry["display_label"], ra["label"], rb["label"])
+                    cls = classify_residue_pair(ra["residue"], rb["residue"], frame_index, time_ns)
+                    frame_rows.append({"Pair_ID": pair_id, "Frame": frame_index, "Time_ns": time_ns,
+                                       "ChainA_Label": left_entry["display_label"], "ChainB_Label": right_entry["display_label"],
+                                       "ResidueA": ra["label"], "ResidueB": rb["label"], "ResidueA_Name": ra["resname"], "ResidueB_Name": rb["resname"],
+                                       "ResidueA_Index": ra["resnum"], "ResidueB_Index": rb["resnum"], "MinDistance_A": dist, "InteractionClass": cls})
+                    for event in classify_protein_residue_pair_events(ra["residue"], rb["residue"], frame_index, time_ns):
+                        event = dict(event); event.update({"Partner": ra["label"], "Component": pair_label, "InterfaceResidueA": ra["label"], "InterfaceResidueB": rb["label"]})
+                        event_rows.append(event)
+                time_rows.append({"Time_ns": time_ns, "Frame": frame_index, "ChainA_Label": left_entry["display_label"], "ChainB_Label": right_entry["display_label"], "ContactCount": len(minima), "MinDistance_A": minimum, "InContact": int(bool(minima))})
+        _atomic_csv(expected[0], frame_rows, FRAMEWISE_COLUMNS)
+        _atomic_csv(expected[1], time_rows, TIMESERIES_COLUMNS)
+        _atomic_csv(expected[2], event_rows, EVENT_COLUMNS)
+        state.setdefault("completed_chunks", []).append(token)
+        write_json_atomic(workdir / "progress.json", state)
+
+
+def reduce_interface_shards(outdir, workdir, frame_indices, analyzed_times_ns, chain_pairs, cutoff_ang):
+    """Reduce shard CSVs into public artifacts without retaining raw rows."""
+    workdir, outdir = Path(workdir), Path(outdir)
+    frame_shards = sorted(workdir.glob("framewise_*.csv")); time_shards = sorted(workdir.glob("timeseries_*.csv")); event_shards = sorted(workdir.glob("events_*.csv"))
+    _append_csv_shards(frame_shards, outdir / "interface_residue_pair_framewise.csv.gz", FRAMEWISE_COLUMNS, gzip_output=True)
+    _append_csv_shards(time_shards, outdir / "interface_contact_timeseries.csv", TIMESERIES_COLUMNS)
+    _append_csv_shards(event_shards, outdir / "ValidatedInterfaceInteractionEvents.csv", EVENT_COLUMNS)
+    stats, metadata = {}, {}
+    for shard in frame_shards:
+        for row in pd.read_csv(shard).to_dict("records"):
+            key = row["Pair_ID"]; stats.setdefault(key, [0, 0.0, float("inf")]); stats[key][0] += 1; stats[key][1] += float(row["MinDistance_A"]); stats[key][2] = min(stats[key][2], float(row["MinDistance_A"])); metadata[key] = row
+    residue_rows = []
+    for key, values in stats.items():
+        row = metadata[key]; n = values[0]
+        residue_rows.append({"Pair_ID": key, "ChainA_Label": row["ChainA_Label"], "ChainB_Label": row["ChainB_Label"], "ResidueA": row["ResidueA"], "ResidueB": row["ResidueB"], "ResidueA_Name": row["ResidueA_Name"], "ResidueB_Name": row["ResidueB_Name"], "ResidueA_Index": row["ResidueA_Index"], "ResidueB_Index": row["ResidueB_Index"], "ContactFrames": n, "Frames_Analyzed": len(frame_indices), "ContactFraction": n / max(1, len(frame_indices)), "MeanMinDistance_A": values[1] / n, "MinObservedDistance_A": values[2], "InteractionClass": "Evidence in interface_residue_pair_framewise.csv"})
+    residue_df = pd.DataFrame(residue_rows).sort_values(["ContactFraction", "ContactFrames"], ascending=False) if residue_rows else pd.DataFrame(columns=["Pair_ID"])
+    residue_df.to_csv(outdir / "interface_residue_pair_contacts.csv", index=False)
+    pair_to_row = {str(row.Pair_ID): i for i, row in residue_df.iterrows()}
+    matrix = np.zeros((len(residue_df), len(frame_indices)), dtype=np.uint8); frame_to_col = {int(frame): i for i, frame in enumerate(frame_indices)}
+    for shard in frame_shards:
+        for row in pd.read_csv(shard, usecols=["Pair_ID", "Frame"]).itertuples(index=False): matrix[pair_to_row[str(row.Pair_ID)], frame_to_col[int(row.Frame)]] = 1
+    save_npz_atomic(outdir / "interface_residue_pair_presence.npz", contact_matrix=matrix, frame_indices=np.asarray(frame_indices, dtype=np.int64), times_ns=np.asarray(analyzed_times_ns, dtype=float), pair_ids=residue_df.get("Pair_ID", pd.Series(dtype=str)).astype(str).to_numpy(), chain_a_labels=residue_df.get("ChainA_Label", pd.Series(dtype=str)).astype(str).to_numpy(), chain_b_labels=residue_df.get("ChainB_Label", pd.Series(dtype=str)).astype(str).to_numpy(), residue_a_labels=residue_df.get("ResidueA", pd.Series(dtype=str)).astype(str).to_numpy(), residue_b_labels=residue_df.get("ResidueB", pd.Series(dtype=str)).astype(str).to_numpy())
+    frame_index_df = build_interface_frame_index(frame_indices, analyzed_times_ns); frame_index_df.to_csv(outdir / "interface_frame_index.csv", index=False)
+    timeseries_df = pd.read_csv(outdir / "interface_contact_timeseries.csv")
+    summary = timeseries_df.groupby(["ChainA_Label", "ChainB_Label"], as_index=False).agg(Frames_Analyzed=("Frame", "size"), Frames_In_Contact=("InContact", "sum"), ContactFraction=("InContact", "mean"), MeanContactsPerFrame=("ContactCount", "mean"), MaxContactsInFrame=("ContactCount", "max"), MeanMinDistance_A=("MinDistance_A", "mean"), MinObservedDistance_A=("MinDistance_A", "min"))
+    types = {entry["display_label"]: entry.get("chain_type") for pair in chain_pairs for entry in pair}; summary["ChainA_Type"] = summary["ChainA_Label"].map(types); summary["ChainB_Type"] = summary["ChainB_Label"].map(types); summary["ContactCutoff_A"] = float(cutoff_ang); summary = summary.sort_values(["ContactFraction", "MeanContactsPerFrame"], ascending=False); summary.to_csv(outdir / "interface_chain_pair_summary.csv", index=False)
+    node_df = build_node_summary(residue_df); node_df.to_csv(outdir / "interface_node_summary.csv", index=False)
+    events = pd.read_csv(outdir / "ValidatedInterfaceInteractionEvents.csv")
+    aggregate_event_occupancy(events[events.get("ValidationStatus", pd.Series(dtype=str)) == "validated"], len(frame_indices)).to_csv(outdir / "ValidatedInterfaceInteractionOccupancy.csv", index=False)
+    return summary, timeseries_df, residue_df, node_df, frame_index_df, {"contact_matrix": matrix, "frame_indices": np.asarray(frame_indices), "times_ns": np.asarray(analyzed_times_ns)}, events
 
 
 def analyze_chain_pair_contacts(universe, left_entry, right_entry, frame_indices, cutoff_ang):
@@ -1169,6 +1286,7 @@ def main():
     data_parameters = {
         "contact_cutoff_A": float(args.contact_cutoff),
         "frame_step": int(args.frame_step),
+        "chunk_size": int(args.chunk_size),
         "selected_chain_pairs": [
             f"{left['display_label']}:{right['display_label']}" for left, right in chain_pairs
         ],
@@ -1311,119 +1429,33 @@ def main():
         else:
             print("🔄 No reusable interface cache found; running trajectory contact scan.")
 
+    workdir = outdir / ".work"
+    signature = _work_signature(data_signature, args)
+    state_path = workdir / "progress.json"
+    state = read_json_manifest(state_path) if state_path.exists() else None
+    if args.force_recompute or not state or state.get("signature") != signature:
+        if workdir.exists():
+            shutil.rmtree(workdir)
+        workdir.mkdir(parents=True, exist_ok=True)
+        state = {
+            "version": 1, "signature": signature, "chunk_size": int(args.chunk_size),
+            "input_fingerprints": fingerprint_files(input_files),
+            "contact_cutoff_A": float(args.contact_cutoff), "frame_step": int(args.frame_step),
+            "selected_chain_pairs": data_parameters["selected_chain_pairs"],
+            "peptide_chains": str(args.peptide_chains or ""), "completed_chunks": [],
+        }
+        write_json_atomic(state_path, state)
     t0 = time.perf_counter()
-    progress.start("contact_scan", "Scan trajectory frames for interface contacts")
-    summary_rows = []
-    timeseries_rows = []
-    residue_rows = []
-    framewise_rows = []
-    validated_event_rows = []
-    pair_binary_series = {}
-    analyzed_times_ns = None
-
-    for left_entry, right_entry in chain_pairs:
-        result = analyze_chain_pair_contacts(universe, left_entry, right_entry, frame_indices, args.contact_cutoff)
-        if result is None:
-            print(f"⚠️ Skipping pair {left_entry['display_label']}:{right_entry['display_label']} due to empty heavy-atom selections.")
-            continue
-        summary_rows.append(result["summary_row"])
-        timeseries_rows.extend(result["time_rows"])
-        residue_rows.extend(result["residue_rows"])
-        framewise_rows.extend(result["framewise_rows"])
-        validated_event_rows.extend(result["validated_event_rows"])
-        for pair_key, binary_series in result["pair_binary_series"].items():
-            pair_binary_series[f"{result['summary_row']['ChainA_Label']}__{result['summary_row']['ChainB_Label']}::{pair_key[0]}::{pair_key[1]}"] = binary_series
-        if analyzed_times_ns is None:
-            analyzed_times_ns = result["times_ns"]
+    progress.start("contact_scan", "Scan trajectory frames into bounded resumable shards")
+    scan_interface_shards(universe, chain_pairs, frame_indices, args.contact_cutoff, workdir, state)
     stage_times["analyze_contacts_s"] = time.perf_counter() - t0
     progress.complete("contact_scan")
-    analyzed_times_ns = analyzed_times_ns or [float(universe.trajectory[index].time) / 1000.0 for index in frame_indices]
-    frame_index_df = build_interface_frame_index(frame_indices, analyzed_times_ns)
-
-    summary_columns = [
-        "ChainA_Label",
-        "ChainB_Label",
-        "ChainA_Type",
-        "ChainB_Type",
-        "Frames_Analyzed",
-        "Frames_In_Contact",
-        "ContactFraction",
-        "MeanContactsPerFrame",
-        "MaxContactsInFrame",
-        "MeanMinDistance_A",
-        "MinObservedDistance_A",
-        "ContactCutoff_A",
-    ]
-    summary_df = pd.DataFrame(summary_rows, columns=summary_columns)
-    if not summary_df.empty:
-        summary_df = summary_df.sort_values(["ContactFraction", "MeanContactsPerFrame"], ascending=[False, False])
-
-    timeseries_columns = [
-        "Time_ns",
-        "Frame",
-        "ChainA_Label",
-        "ChainB_Label",
-        "ContactCount",
-        "MinDistance_A",
-        "InContact",
-    ]
-    timeseries_df = pd.DataFrame(timeseries_rows, columns=timeseries_columns)
-    if not timeseries_df.empty:
-        timeseries_df = timeseries_df.sort_values(["ChainA_Label", "ChainB_Label", "Frame"])
-
-    residue_columns = [
-        "Pair_ID",
-        "ChainA_Label",
-        "ChainB_Label",
-        "ResidueA",
-        "ResidueB",
-        "ResidueA_Name",
-        "ResidueB_Name",
-        "ResidueA_Index",
-        "ResidueB_Index",
-        "ContactFrames",
-        "Frames_Analyzed",
-        "ContactFraction",
-        "MeanMinDistance_A",
-        "MinObservedDistance_A",
-        "InteractionClass",
-        "_pair_key",
-        "_pair_id",
-        "_series_key",
-    ]
-    residue_df = pd.DataFrame(residue_rows, columns=residue_columns)
-    if not residue_df.empty:
-        residue_df = residue_df.sort_values(["ContactFraction", "ContactFrames"], ascending=[False, False])
-
-    node_df = build_node_summary(residue_df)
-    framewise_columns = [
-        "Pair_ID",
-        "Frame",
-        "Time_ns",
-        "ChainA_Label",
-        "ChainB_Label",
-        "ResidueA",
-        "ResidueB",
-        "ResidueA_Name",
-        "ResidueB_Name",
-        "ResidueA_Index",
-        "ResidueB_Index",
-        "MinDistance_A",
-        "InteractionClass",
-    ]
-    framewise_df = pd.DataFrame(framewise_rows, columns=framewise_columns)
-    if not framewise_df.empty:
-        framewise_df = framewise_df.sort_values(["Frame", "ChainA_Label", "ChainB_Label", "ResidueA_Index", "ResidueB_Index"])
-    presence_payload = build_presence_payload(residue_df, pair_binary_series, frame_indices, analyzed_times_ns)
-    validated_events_df = pd.DataFrame(validated_event_rows)
-    for column in EVENT_COLUMNS:
-        if column not in validated_events_df:
-            validated_events_df[column] = pd.Series(dtype=object)
-    validated_events_df.to_csv(outdir / "ValidatedInterfaceInteractionEvents.csv", index=False)
-    aggregate_event_occupancy(
-        validated_events_df[validated_events_df.get("ValidationStatus", pd.Series(dtype=object)) == "validated"],
-        len(frame_indices),
-    ).to_csv(outdir / "ValidatedInterfaceInteractionOccupancy.csv", index=False)
+    analyzed_times_ns = [float(universe.trajectory[index].time) / 1000.0 for index in frame_indices]
+    t0 = time.perf_counter()
+    progress.start("write_tables", "Reduce interface shards into numerical outputs")
+    summary_df, timeseries_df, residue_df, node_df, frame_index_df, presence_payload, validated_events_df = reduce_interface_shards(outdir, workdir, frame_indices, analyzed_times_ns, chain_pairs, args.contact_cutoff)
+    stage_times["write_csv_s"] = time.perf_counter() - t0
+    progress.complete("write_tables")
 
     runtime_lines = [
         f"input_topology={Path(args.topo).resolve()}",
@@ -1441,21 +1473,7 @@ def main():
     runtime_lines.extend(f"{key}={value:.3f}" for key, value in stage_times.items())
     runtime_lines.append(f"total_runtime_s={time.perf_counter() - start_time:.3f}")
 
-    t0 = time.perf_counter()
-    progress.start("write_tables", "Write interface numerical outputs")
-    write_interface_outputs(
-        outdir,
-        summary_df,
-        timeseries_df,
-        residue_df,
-        node_df,
-        frame_index_df,
-        framewise_df,
-        presence_payload,
-        runtime_lines,
-    )
-    stage_times["write_csv_s"] = time.perf_counter() - t0
-    progress.complete("write_tables")
+    (outdir / "interface_runtime_summary.txt").write_text("\n".join(runtime_lines) + "\n")
 
     t0 = time.perf_counter()
     progress.start("render_figures", "Render interface figures and explorer")

@@ -378,6 +378,12 @@ parser.add_argument(
     help="Analyze every Nth frame in 3C_Interface_RIN.py (default 1).",
 )
 parser.add_argument(
+    "--interface-chunk-size",
+    type=int,
+    default=1000,
+    help="Frames per resumable 3C_Interface_RIN.py chunk (default 1000).",
+)
+parser.add_argument(
     "--interface-max-edges",
     type=int,
     default=100,
@@ -2051,6 +2057,8 @@ def dispatch_to_interface_rin():
         str(args.interface_min_contact_frac),
         "--frame-step",
         str(args.interface_frame_step),
+        "--chunk-size",
+        str(args.interface_chunk_size),
         "--max-edges",
         str(args.interface_max_edges),
     ]
