@@ -2804,6 +2804,36 @@ def _networx_html_point(point, bounds, width=1120, height=820, padding=72):
     return (padding + (x - min_x) * scale, height - padding - (y - min_y) * scale)
 
 
+def _networx_fixed_ligand_point(point, ligand_bounds, width=1120, height=820):
+    """Map a ligand into a fixed, readable centre panel of the SVG.
+
+    Interaction residues may surround a ligand very broadly.  They must never
+    change the ligand's depiction scale: a diagram with one retained contact
+    should show the same molecule at the same size as one with fifty.  Residue
+    badges are the annotations that adapt to crowding instead.
+    """
+    min_x, max_x, min_y, max_y = ligand_bounds
+    span_x = max(max_x - min_x, 1.0)
+    span_y = max(max_y - min_y, 1.0)
+    # A stable 360 × 280 px ligand field keeps bond lengths and atom labels
+    # readable without letting a compact ligand fill the entire canvas.
+    scale = min(360.0 / span_x, 280.0 / span_y)
+    center_x = (min_x + max_x) / 2.0
+    center_y = (min_y + max_y) / 2.0
+    return (width * 0.44 + (point[0] - center_x) * scale,
+            height * 0.53 - (point[1] - center_y) * scale)
+
+
+def adaptive_interactive_badge_radius(residue_count, preferred_radius):
+    """Return a smaller readable badge radius for dense interaction shells."""
+    preferred = float(preferred_radius)
+    # The ligand is intentionally invariant; only its surrounding annotation
+    # density changes.  Preserve large labels for small shells and converge to
+    # compact, still legible badges for dense 10% views.
+    compact = preferred - max(0.0, float(residue_count) - 8.0) * 0.72
+    return max(20.0, min(preferred, compact))
+
+
 def fit_residue_badge_font_size(chain, residue, number, preferred_size, radius):
     """Return the largest whole-pixel three-line badge font that fits a circle.
 
@@ -2873,19 +2903,22 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
         residues, residue_atoms, atom_positions, center, bonds=normalized_bonds
     ) if residues else {})
 
-    all_points = list(atom_positions.values()) + list(residue_positions.values())
-    min_x = min(point[0] for point in all_points) - 1.1
-    max_x = max(point[0] for point in all_points) + 1.1
-    min_y = min(point[1] for point in all_points) - 1.1
-    max_y = max(point[1] for point in all_points) + 1.1
-    bounds = (min_x, max_x, min_y, max_y)
     width, height = 1120, 820
-    atom_xy = {name: _networx_html_point(point, bounds, width, height)
+    ligand_points = list(atom_positions.values())
+    ligand_bounds = (
+        min(point[0] for point in ligand_points), max(point[0] for point in ligand_points),
+        min(point[1] for point in ligand_points), max(point[1] for point in ligand_points),
+    )
+    # Never include residue positions in this transform.  Doing so used the
+    # widest residue shell to scale the entire canvas and made the actual
+    # molecule shrink to an unreadable icon.
+    atom_xy = {name: _networx_fixed_ligand_point(point, ligand_bounds, width, height)
                for name, point in atom_positions.items()}
-    residue_xy = {name: _networx_html_point(point, bounds, width, height)
+    residue_xy = {name: _networx_fixed_ligand_point(point, ligand_bounds, width, height)
                   for name, point in residue_positions.items()}
+    effective_node_radius = adaptive_interactive_badge_radius(len(residues), node_radius)
     residue_xy = resolve_interactive_badge_collisions(
-        residue_xy, atom_xy, width, height, node_radius=node_radius
+        residue_xy, atom_xy, width, height, node_radius=effective_node_radius
     )
 
     bond_svg = []
@@ -2938,9 +2971,9 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
         # Historical files without a ChainID show an em dash rather than an
         # invented chain label.
         fitted_font_size = fit_residue_badge_font_size(
-            chain, code, number, node_font_size, node_radius
+            chain, code, number, node_font_size, effective_node_radius
         )
-        node_line_spacing = max(12, round(fitted_font_size * 0.92))
+        node_line_spacing = max(8, round(fitted_font_size * 0.92))
         label = ("<tspan x=\"{:.2f}\" dy=\"-{}\">{}</tspan>"
                  "<tspan x=\"{:.2f}\" dy=\"{}\">{}</tspan>"
                  "<tspan x=\"{:.2f}\" dy=\"{}\">{}</tspan>").format(
@@ -2948,7 +2981,7 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
                      x, node_line_spacing, escape(number))
         nodes_svg.append(
             f'<g class="residue-node category-{category}" data-residue="{escape(residue)}">'
-            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{node_radius}"/><text x="{x:.2f}" y="{y:.2f}" font-size="{fitted_font_size}" style="font-size:{fitted_font_size}px">{label}</text></g>'
+            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{effective_node_radius:.2f}"/><text x="{x:.2f}" y="{y:.2f}" font-size="{fitted_font_size}" style="font-size:{fitted_font_size}px">{label}</text></g>'
         )
 
     edge_records = []
@@ -2971,7 +3004,7 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
         node_centres = list(residue_xy.values())
         atom_centres = list(atom_xy.values())
         for x, y in candidates:
-            clear_nodes = all(math.hypot(x - nx, y - ny) >= node_radius + 16 for nx, ny in node_centres)
+            clear_nodes = all(math.hypot(x - nx, y - ny) >= effective_node_radius + 16 for nx, ny in node_centres)
             clear_atoms = all(math.hypot(x - ax, y - ay) >= 27 for ax, ay in atom_centres)
             clear_labels = all(math.hypot(x - lx, y - ly) >= 34 for lx, ly in occupied_label_points)
             if clear_nodes and clear_atoms and clear_labels:
