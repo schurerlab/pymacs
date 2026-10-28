@@ -447,7 +447,7 @@ def interactive_networx_html(analysis: Path) -> str:
         return ""
     # srcdoc makes the explorer part of this report.  Its CSS/IDs/scripts are
     # deliberately isolated, so the Overview and Contacts copies can coexist.
-    return f'''<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Persistent interaction explorer</div><h2>Compare retained interactions</h2><p>Choose the displayed occupancy threshold to inspect the chemically classified residue–ligand-atom interactions. This explorer is embedded in the dossier; it does not open or download a separate page.</p></div></div><iframe title="Interactive ligand interaction explorer" srcdoc="{escape(document, quote=True)}" sandbox="allow-scripts" style="display:block;width:100%;height:850px;border:1px solid #285a79;border-radius:16px;background:#05070d" loading="lazy"></iframe></section>'''
+    return f'''<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Persistent interaction explorer</div><h2>Compare retained interactions</h2><p>Choose the displayed occupancy threshold to inspect the chemically classified residue–ligand-atom interactions. The larger embedded canvas supports node rearrangement and SVG export without opening a separate page.</p></div></div><iframe title="Interactive ligand interaction explorer" srcdoc="{escape(document, quote=True)}" sandbox="allow-scripts allow-downloads" style="display:block;width:100%;height:1320px;border:1px solid #285a79;border-radius:16px;background:#05070d" loading="lazy"></iframe></section>'''
 
 
 def interface_rin_context(analysis: Path) -> dict:

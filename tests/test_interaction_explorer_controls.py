@@ -15,11 +15,20 @@ def test_ligand_explorer_offers_full_persistence_range_without_suppression():
     assert 'id="label-size"' in source
     assert 'type="range"' in source
     assert "labelSize.addEventListener('input'" in source
+    assert 'min="17" max="42" value="21"' in source
+    assert "node.setPointerCapture" in source
+    assert "event.detail>=2" in source
     assert 'id="export-svg"' in source
     assert "Changing the retained threshold resets your node arrangement" in source
     assert "node.addEventListener('dblclick'" in source
     assert "ring_inset_center" in source
     assert "move-hint" in source
+
+
+def test_dashboard_embed_allows_export_and_has_room_for_the_full_explorer():
+    source = (ROOT / "5_PyMACS_Result_Dashboard.py").read_text(encoding="utf-8")
+    assert 'sandbox="allow-scripts allow-downloads"' in source
+    assert "height:1320px" in source
 
 
 def test_interface_explorer_keeps_chain_chemistry_modes_mutually_exclusive():
