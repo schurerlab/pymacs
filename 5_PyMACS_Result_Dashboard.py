@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import textwrap
+from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
@@ -53,7 +54,79 @@ CANONICAL_RESULT_ORDER = (
     "*_contact_map_residue_time.csv",
     "InteractionTypes_Framewise.csv",
     "native_contact_q.csv",
+    "protein_native_contact_q.csv",
 )
+
+
+@dataclass(frozen=True)
+class PartnerContext:
+    """One report vocabulary for ligand, peptide, chain-interface, and apo runs."""
+    partner_kind: str
+    partner_label: str
+    partner_chain_ids: tuple[str, ...]
+    interface_pairs: tuple[tuple[str, str], ...]
+    system_class: str
+
+    @property
+    def is_interface(self) -> bool:
+        return self.partner_kind in {"peptide", "protein_chain"}
+
+    @property
+    def contact_tab_label(self) -> str:
+        return {"peptide": "Peptide–protein interface", "protein_chain": "Chain interfaces", "none": "Contacts"}.get(self.partner_kind, "Contacts & binding")
+
+    @property
+    def relationship_label(self) -> str:
+        return {"ligand": "ligand–protein", "peptide": "peptide–protein", "protein_chain": "chain-pair", "none": "intramolecular"}[self.partner_kind]
+
+
+def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict) -> PartnerContext:
+    """Infer the report partner from authoritative run/interface metadata, not filenames alone."""
+    chain_ids: list[str] = []
+    chain_types: dict[str, str] = {}
+    peptide_chain_ids: list[str] = []
+    pairs: list[tuple[str, str]] = []
+    manifest_path = analysis / "Interface_RIN" / "interface_analysis_manifest.json"
+    try:
+        interface_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for entry in interface_manifest.get("chain_metadata", []):
+            label = str(entry.get("display_label") or entry.get("chain_id") or "").strip()
+            chain_id = str(entry.get("chain_id") or "").strip()
+            if label:
+                chain_types[label] = str(entry.get("chain_type") or "").casefold()
+            if chain_id and chain_id not in chain_ids:
+                chain_ids.append(chain_id)
+            if chain_id and "peptide" in str(entry.get("chain_type") or "").casefold():
+                peptide_chain_ids.append(chain_id)
+    except (OSError, ValueError, TypeError):
+        pass
+    summary_path = analysis / "Interface_RIN" / "interface_chain_pair_summary.csv"
+    try:
+        summary = pd.read_csv(summary_path, usecols=["ChainA_Label", "ChainB_Label"])
+        pairs = list(dict.fromkeys((str(row.ChainA_Label), str(row.ChainB_Label)) for row in summary.itertuples(index=False)))
+    except (OSError, ValueError, pd.errors.ParserError):
+        pass
+    configured = []
+    for entry in str(setup.get("chain_map") or "").split(","):
+        chain, separator, label = entry.strip().partition(":")
+        if chain and separator:
+            configured.append((chain.strip(), label.strip()))
+    if not chain_ids:
+        chain_ids = [chain for chain, _ in configured]
+    peptide_pairs = [pair for pair in pairs if any("peptide" in chain_types.get(label, "") for label in pair)]
+    ligand = str(metadata.get("ligand_name") or metadata.get("ligand_residue") or setup.get("ligand") or "").strip()
+    mode = str(setup.get("mode") or "").casefold()
+    if ligand and ligand.casefold() not in {"none", "no ligand label", "proteinonly"}:
+        return PartnerContext("ligand", ligand, tuple(chain_ids), tuple(pairs), "ligand_complex")
+    if peptide_pairs or mode == "peptide":
+        peptide_labels = [label for pair in peptide_pairs for label in pair if "peptide" in chain_types.get(label, "")]
+        label = next(iter(peptide_labels), "Peptide")
+        return PartnerContext("peptide", label, tuple(peptide_chain_ids or chain_ids), tuple(pairs), "peptide_protein_complex")
+    if pairs or len(chain_ids) > 1:
+        label = " / ".join(chain_ids) if chain_ids else "Chain interface"
+        return PartnerContext("protein_chain", label, tuple(chain_ids), tuple(pairs), "protein_complex")
+    label = "/".join(chain_ids) or "Protein"
+    return PartnerContext("none", label, tuple(chain_ids), tuple(), "apo_protein")
 
 
 def existing_result_matches(analysis: Path, pattern: str) -> list[Path]:
@@ -182,8 +255,8 @@ GRAPH_GUIDES = {
     ),
     "q": (
         "Native-contact retention (Q)",
-        "Q is the fraction of protein–ligand heavy-atom contacts from the first analyzed frame that remain within the stated cutoff.",
-        "Higher, sustained Q means the starting modeled interface is retained. Q evaluates persistence relative to that model; it does not establish experimental binding affinity.",
+        "Q is the fraction of reference contacts retained from the first analyzed frame. Depending on the selection, it reports a ligand/partner interface or protein-fold contact retention.",
+        "Higher, sustained Q means the stated reference interface or fold is retained. Q evaluates persistence relative to that model; it does not establish experimental binding affinity.",
     ),
     "generic": (
         "Analysis readout",
@@ -389,7 +462,7 @@ def interface_rin_context(analysis: Path) -> dict:
         )
         panel = (
             f'<details class="interface-pair"{" open" if index == 0 else ""}><summary>{escape(left)} ↔ {escape(right)} <span>{escape(kind)}</span></summary>'
-            f'<p class="muted">{escape(note)}</p>{embedded(pair_id, f'{left} to {right} interface explorer', compact=True)}</details>'
+            f"<p class=\"muted\">{escape(note)}</p>{embedded(pair_id, f'{left} to {right} interface explorer', compact=True)}</details>"
         )
         (peptide_panels if peptide else protein_panels).append(panel)
 
@@ -405,7 +478,7 @@ def interface_rin_context(analysis: Path) -> dict:
     }
 
 
-def final_structure_html(root: Path, ligand_name: str) -> str:
+def final_structure_html(root: Path, context: PartnerContext) -> str:
     """Embed the final complex or apo PDB in the report's 3Dmol viewer."""
     candidates = (root / "Final_Trajectory.pdb", root / "binding_pocket_only.pdb")
     structure = next((path for path in candidates if path.is_file()), None)
@@ -418,9 +491,18 @@ def final_structure_html(root: Path, ligand_name: str) -> str:
         payload = base64.b64encode(structure.read_bytes()).decode("ascii")
     except OSError:
         return ""
-    ligand = "".join(ch for ch in ligand_name if ch.isalnum())[:4]
-    ligand_attr = escape(ligand)
-    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Final structure</div><h2>3D complex / apo viewer</h2><p>Drag to rotate, scroll to zoom, and choose a focused view. The model is the final published PDB, not a representative image.</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure display"><button type="button" data-structure-view="complex">Full structure</button><button type="button" data-structure-view="protein">Protein</button>{f'<button type="button" data-structure-view="pocket">Ligand + pocket</button>' if ligand else ''}</div><div class="complex-3d js-complex-3d" data-ligand="{ligand_attr}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · final published coordinate snapshot.</p></section>'''
+    ligand = "".join(ch for ch in context.partner_label if ch.isalnum())[:4] if context.partner_kind == "ligand" else ""
+    chain_buttons = "".join(f'<button type="button" data-structure-view="chain" data-chain-id="{escape(chain_id)}">Chain {escape(chain_id)}</button>' for chain_id in context.partner_chain_ids)
+    if context.partner_kind == "ligand":
+        focused_button = '<button type="button" data-structure-view="pocket">Ligand + pocket</button>'
+    elif context.partner_kind == "peptide":
+        focused_button = '<button type="button" data-structure-view="partner">Peptide</button><button type="button" data-structure-view="interface">Peptide interface</button>'
+    elif context.partner_kind == "protein_chain":
+        focused_button = '<button type="button" data-structure-view="interface">Selected interface</button>'
+    else:
+        focused_button = ''
+    protein_label = "Protein/receptor" if context.partner_kind == "peptide" else "Protein"
+    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Final structure</div><h2>3D complex / apo viewer</h2><p>Drag to rotate, scroll to zoom, and choose a focused view. The model is the final published PDB, not a representative image.</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure display"><button type="button" data-structure-view="complex">Full complex</button><button type="button" data-structure-view="protein">{protein_label}</button>{chain_buttons}{focused_button}</div><div class="complex-3d js-complex-3d" data-ligand="{escape(ligand)}" data-partner-kind="{escape(context.partner_kind)}" data-partner-chains="{escape(','.join(context.partner_chain_ids))}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · final published coordinate snapshot.</p></section>'''
 
 
 def read_metadata(root: Path) -> dict:
@@ -980,11 +1062,11 @@ def tabbed_sections(sections: list[tuple[str, str, str]]) -> str:
     return f'<section id="analysis-tabs" class="dashboard-tabs-shell"><div class="dashboard-tabs" role="tablist" aria-label="Result analyses">{tabs}</div>{panels}</section>'
 
 
-def build_document(system_name: str, ligand_name: str, cards: list[str], dashboard: str) -> str:
+def build_document(system_name: str, context: PartnerContext, cards: list[str], dashboard: str) -> str:
     """Return the Kyle-hosted, self-contained single-run reading room."""
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(system_name)} · PyMACS results</title><script>{plotlyjs()}</script><script src="/static/3Dmol-min.js"></script><style>
 :root{{--bg:#05060a;--panel:#0b1020;--grid:#1c2a4a;--text:#cfe8ff;--muted:#7aa6d9;--cyan:#35d0ff;--green:#18ff8b;--yellow:#ffe66d;--magenta:#ff2bd6;--orange:#ff8a3d}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 90% 0,rgba(53,208,255,.15),transparent 30%),radial-gradient(circle at 4% 25%,rgba(255,43,214,.10),transparent 27%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}}.page{{max-width:1560px;margin:auto;padding:32px 24px 70px}}.hero,.card,.ligand-card,.gallery-section,.structure-card,.dashboard-tabs-shell{{background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.hero{{position:relative;overflow:hidden;border-radius:25px;padding:34px;margin-bottom:20px}}.hero:before{{content:"";position:absolute;inset:-48%;background:conic-gradient(from 180deg,transparent,rgba(53,208,255,.16),transparent,rgba(255,43,214,.13),transparent);animation:slow-spin 28s linear infinite;pointer-events:none}}.hero>*{{position:relative;z-index:1}}@keyframes slow-spin{{to{{transform:rotate(360deg)}}}}.eyebrow{{color:var(--green);font-size:.75rem;font-weight:900;letter-spacing:.16em;text-transform:uppercase}}h1{{font-size:clamp(2.5rem,5.2vw,5.2rem);letter-spacing:-.065em;line-height:.92;margin:.35rem 0 1rem}}h2{{letter-spacing:-.025em;margin:.2rem 0 .45rem;font-size:1.5rem}}p{{line-height:1.55}}.sub,.section-head p,.muted,.asset-note{{color:var(--muted);max-width:960px}}.pills,.portal-actions{{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}}.pill,.portal-action{{border:1px solid rgba(53,208,255,.28);padding:8px 11px;border-radius:999px;background:rgba(53,208,255,.08);font-size:.88rem}}.portal-actions{{margin-top:12px}}.portal-action{{color:var(--text);font-weight:800;text-decoration:none;transition:transform .16s ease,background .16s ease}}.portal-action:hover{{transform:translateY(-1px);background:rgba(53,208,255,.20)}}.portal-action--primary{{background:linear-gradient(90deg,#18b7e6,#1988e6);border-color:transparent;color:#03101b}}details.guide,.overview{{margin:11px 0 2px;border:1px solid rgba(53,208,255,.22);border-radius:13px;background:rgba(5,10,23,.68)}}details.guide summary,.overview summary{{cursor:pointer;padding:10px 12px;color:var(--cyan);font-weight:800;font-size:.88rem}}details.guide p,.overview p{{margin:0;padding:0 12px 11px;color:var(--muted);font-size:.87rem}}.overview{{margin-top:22px;max-width:1020px}}.overview ol{{margin:0;padding:0 28px 15px;color:var(--muted);line-height:1.55}}.gallery-section,.ligand-card,.structure-card{{border-radius:21px;padding:20px;margin-top:18px}}.section-head{{border-left:3px solid var(--green);padding-left:13px;margin-bottom:16px}}.interface-pair{{margin:12px 0;border:1px solid rgba(53,208,255,.24);border-radius:15px;background:rgba(5,10,23,.58);padding:0 14px 14px}}.interface-pair summary{{cursor:pointer;padding:14px 2px 10px;color:var(--cyan);font-weight:900;font-size:1rem}}.interface-pair summary span{{color:var(--muted);font-size:.8rem;font-weight:700;margin-left:8px}}.dashboard-tabs-shell{{margin-top:18px;border-radius:21px;overflow:hidden}}.dashboard-tabs{{display:flex;gap:7px;overflow:auto;padding:14px 16px 0;border-bottom:1px solid #23375d}}.dashboard-tabs button,.structure-toolbar button{{border:1px solid #285a79;border-radius:10px 10px 0 0;background:#0a253a;color:#cfe8ff;padding:10px 13px;font:800 .82rem inherit;white-space:nowrap;cursor:pointer}}.dashboard-tabs button[aria-selected="true"],.dashboard-tabs button:hover{{background:#116887;color:#fff;border-color:var(--cyan)}}.dashboard-panel{{padding:2px 20px 20px}}.dashboard-panel[hidden]{{display:none}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}}.card{{border-radius:17px;padding:13px;overflow:hidden}}.card .js-plotly-plot{{cursor:zoom-in}}.card a{{display:inline-block;color:var(--cyan);font-size:.8rem;font-weight:800;margin:8px 10px 5px}}.heatmap-note{{margin:7px 10px;color:var(--muted);font-size:.82rem;line-height:1.4}}.ligand-grid{{display:grid;grid-template-columns:minmax(300px,1fr) minmax(300px,1fr);gap:18px;align-items:stretch}}.ligand-2d,.ligand-3d,.complex-3d{{min-height:330px;border:1px solid rgba(255,230,109,.30);border-radius:17px;background:radial-gradient(circle at center,rgba(255,230,109,.08),rgba(5,6,10,.7) 70%);overflow:hidden;position:relative}}.ligand-2d svg{{display:block;width:100%;height:330px;max-width:100%}}.ligand-3d,.complex-3d{{border-color:rgba(53,208,255,.30)}}.complex-3d{{height:min(62vw,650px);min-height:410px}}.structure-toolbar{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 11px}}.structure-toolbar button{{border-radius:10px;padding:8px 11px}}.structure-toolbar button:hover,.structure-toolbar button.is-active{{background:#116887;color:#fff;border-color:var(--cyan)}}.viewer-label{{color:var(--yellow);font-size:.78rem;font-weight:900;text-transform:uppercase;letter-spacing:.1em;margin:2px 0 8px}}.missing-visual{{padding:24px;color:var(--muted)}}.asset-note{{font-size:.8rem;margin:.7rem 0 0}}code{{display:block;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 12px 12px;color:var(--yellow)}}.graph-modal{{display:none;position:fixed;z-index:9999;inset:0;padding:3vh 3vw;background:rgba(0,0,0,.78);backdrop-filter:blur(7px)}}.graph-modal.open{{display:flex;align-items:center;justify-content:center}}.graph-modal-panel{{position:relative;width:min(1500px,94vw);height:min(900px,92vh);padding:20px 16px 12px;border:1px solid var(--cyan);background:#080d1b;box-shadow:0 0 70px rgba(53,208,255,.18);border-radius:20px}}.graph-modal-close{{position:absolute;right:17px;top:13px;z-index:2;border:1px solid var(--cyan);border-radius:999px;background:#101b33;color:var(--text);font-weight:800;padding:8px 12px;cursor:pointer}}.graph-modal-plot{{width:100%;height:100%}}@media(max-width:700px){{.page{{padding:18px 12px 42px}}.grid,.ligand-grid{{grid-template-columns:1fr}}.hero{{padding:24px 19px}}.dashboard-panel{{padding:2px 12px 12px}}.complex-3d{{height:68vw;min-height:330px}}.graph-modal{{padding:1vh 1vw}}.graph-modal-panel{{width:98vw;height:96vh;padding:14px 4px 4px}}}}
-</style></head><body><main class="page"><section class="hero"><div class="eyebrow">PyMACS · single-system results</div><h1>{escape(system_name)}</h1><p class="sub">A guided reading room for this simulation. Start with global stability, then inspect ligand pose and pocket chemistry. Every graph is a native Plotly analysis: hover for values, use the legend to isolate traces, and double-click for a large view.</p><div class="pills"><span class="pill">Ligand / PROTAC: {escape(ligand_name)}</span><span class="pill">{len(cards)} interactive analyses</span><span class="pill">Kyle-local, fast delivery</span></div><!--PORTAL_ACTIONS--><details class="overview"><summary>ⓘ How to read this result—start here</summary><ol><li><b>Check the fold:</b> protein RMSD, radius of gyration, and secondary-structure evolution should be considered together.</li><li><b>Check the pose:</b> interpret ligand RMSD/RMSF with persistent contacts—not in isolation.</li><li><b>Check the chemistry:</b> solid-color interaction types show which residues make hydrophobic, ionic, or hydrogen-bond interactions over time.</li><li><b>Do not overclaim:</b> these trajectories test stability of a modeled system; they do not by themselves establish binding affinity or experimental activity.</li></ol></details></section>{dashboard}</main><div class="graph-modal" id="graph-modal" aria-hidden="true"><div class="graph-modal-panel"><button class="graph-modal-close" id="graph-modal-close" type="button">Close ×</button><div class="graph-modal-plot" id="graph-modal-plot"></div></div></div><script>
+</style></head><body><main class="page"><section class="hero"><div class="eyebrow">PyMACS · single-system results</div><h1>{escape(system_name)}</h1><p class="sub">{escape({"ligand": "Start with global stability, then inspect ligand pose and pocket chemistry.", "peptide": "Start with global stability, then inspect peptide conformation and peptide–protein interface persistence.", "protein_chain": "Start with global and chain stability, then inspect persistent chain interfaces.", "none": "Start with global stability, fold retention, and secondary-structure evolution."}[context.partner_kind])} Every graph is a native Plotly analysis: hover for values, use the legend to isolate traces, and double-click for a large view.</p><div class="pills"><span class="pill">{escape({"ligand": "Ligand / PROTAC", "peptide": "Peptide", "protein_chain": "Chains / interfaces", "none": "Protein / chain"}[context.partner_kind])}: {escape(context.partner_label)}</span><span class="pill">{len(cards)} interactive analyses</span><span class="pill">Kyle-local, fast delivery</span></div><!--PORTAL_ACTIONS--><details class="overview"><summary>ⓘ How to read this result—start here</summary><ol><li><b>Check the fold:</b> protein RMSD, radius of gyration, and secondary-structure evolution should be considered together.</li><li><b>Check the partner:</b> interpret {escape(context.relationship_label)} RMSD/RMSF and contact persistence together—not in isolation.</li><li><b>Check the chemistry:</b> solid-color interaction types show which residues make hydrophobic, ionic, or hydrogen-bond interactions over time.</li><li><b>Do not overclaim:</b> these trajectories test stability of a modeled system; they do not by themselves establish binding affinity or experimental activity.</li></ol></details></section>{dashboard}</main><div class="graph-modal" id="graph-modal" aria-hidden="true"><div class="graph-modal-panel"><button class="graph-modal-close" id="graph-modal-close" type="button">Close ×</button><div class="graph-modal-plot" id="graph-modal-plot"></div></div></div><script>
 (() => {{
  const modal=document.getElementById('graph-modal'),destination=document.getElementById('graph-modal-plot');
  const close=()=>{{modal.classList.remove('open');modal.setAttribute('aria-hidden','true');Plotly.purge(destination)}};
@@ -993,7 +1075,7 @@ def build_document(system_name: str, ligand_name: str, cards: list[str], dashboa
  document.getElementById('graph-modal-close').addEventListener('click',close);modal.addEventListener('click',event=>{{if(event.target===modal)close()}});document.addEventListener('keydown',event=>{{if(event.key==='Escape')close()}});
  document.querySelectorAll('[data-dashboard-tab]').forEach(button=>button.addEventListener('click',()=>{{const target=button.dataset.dashboardTab;document.querySelectorAll('[data-dashboard-tab]').forEach(item=>item.setAttribute('aria-selected',String(item===button)));document.querySelectorAll('.dashboard-panel').forEach(panel=>{{const active=panel.id===`panel-${{target}}`;panel.hidden=!active;panel.classList.toggle('is-active',active);if(active)panel.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot))}})}}));
  document.querySelectorAll('.js-ligand-3d').forEach(el=>{{try{{const raw=atob(el.dataset.structureB64),viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}});viewer.addModel(raw,el.dataset.format);viewer.setStyle({{}},{{stick:{{radius:.105,color:'#ffe66d'}},sphere:{{scale:.16,color:'#ffe66d'}}}});viewer.setStyle({{elem:'N'}},{{stick:{{radius:.105,color:'#35d0ff'}},sphere:{{scale:.16,color:'#35d0ff'}}}});viewer.setStyle({{elem:'O'}},{{stick:{{radius:.105,color:'#ff3b5c'}},sphere:{{scale:.16,color:'#ff3b5c'}}}});viewer.setStyle({{elem:'Cl'}},{{stick:{{radius:.105,color:'#18ff8b'}},sphere:{{scale:.20,color:'#18ff8b'}}}});viewer.zoomTo();viewer.render();addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D ligand preview unavailable.'}}}});
- document.querySelectorAll('.js-complex-3d').forEach(el=>{{try{{const viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}}),raw=atob(el.dataset.structureB64),ligand=el.dataset.ligand;viewer.addModel(raw,'pdb');const render=mode=>{{viewer.setStyle({{}},{{}});viewer.setStyle({{hetflag:false}},{{cartoon:{{color:'spectrum'}}}});if(mode==='complex')viewer.setStyle({{hetflag:true}},{{stick:{{radius:.16,colorscheme:'Jmol'}}}});if(mode==='pocket'&&ligand){{viewer.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.28}}}});viewer.setStyle({{resn:ligand}},{{stick:{{radius:.20,colorscheme:'Jmol'}},sphere:{{scale:.25,colorscheme:'Jmol'}}}});viewer.setStyle({{within:{{distance:5,sel:{{resn:ligand}}}}}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}})}}viewer.zoomTo(mode==='pocket'&&ligand?{{resn:ligand}}:{{}});viewer.render();el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.classList.toggle('is-active',button.dataset.structureView===mode))}};el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.addEventListener('click',()=>render(button.dataset.structureView)));render('complex');addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D final-structure preview unavailable.'}}}});
+ document.querySelectorAll('.js-complex-3d').forEach(el=>{{try{{const viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}}),raw=atob(el.dataset.structureB64),ligand=el.dataset.ligand,kind=el.dataset.partnerKind,chains=el.dataset.partnerChains.split(',').filter(Boolean);viewer.addModel(raw,'pdb');const render=(mode,chain='')=>{{viewer.setStyle({{}},{{}});viewer.setStyle({{hetflag:false}},{{cartoon:{{color:'spectrum'}}}});if(mode==='complex')viewer.setStyle({{hetflag:true}},{{stick:{{radius:.16,colorscheme:'Jmol'}}}});if(mode==='chain'&&chain){{viewer.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.18}}}});viewer.setStyle({{chain}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}});viewer.zoomTo({{chain}})}}if(mode==='partner'&&chains.length){{viewer.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.18}}}});viewer.setStyle({{chain:chains[0]}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.10}}}});viewer.zoomTo({{chain:chains[0]}})}}if(mode==='interface'&&chains.length>1){{const sel={{chain:chains[0]}};viewer.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.22}}}});viewer.setStyle({{chain:chains[0]}},{{cartoon:{{color:'#35d0ff'}}}});viewer.setStyle({{within:{{distance:5,sel}}}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.10}}}});viewer.zoomTo({{within:{{distance:7,sel}}}})}}if(mode==='pocket'&&ligand){{viewer.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.28}}}});viewer.setStyle({{resn:ligand}},{{stick:{{radius:.20,colorscheme:'Jmol'}},sphere:{{scale:.25,colorscheme:'Jmol'}}}});viewer.setStyle({{within:{{distance:5,sel:{{resn:ligand}}}}}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}});viewer.zoomTo({{resn:ligand}})}}if(mode==='protein')viewer.zoomTo();viewer.render();el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.classList.toggle('is-active',button.dataset.structureView===mode&&(mode!=='chain'||button.dataset.chainId===chain)))}};el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.addEventListener('click',()=>render(button.dataset.structureView,button.dataset.chainId||'')));render('complex');addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D final-structure preview unavailable.'}}}});
 }})();
 </script></body></html>'''
 
@@ -1016,7 +1098,8 @@ def main() -> None:
         setup = json.loads((root / "pymacs_run.json").read_text()).get("setup", {})
     except (OSError, ValueError, TypeError):
         pass
-    ligand_name = str(metadata.get("ligand_name") or metadata.get("ligand_residue") or setup.get("ligand") or "No ligand label")
+    context = partner_context(root, analysis, setup, metadata)
+    ligand_name = context.partner_label if context.partner_kind == "ligand" else "No ligand label"
     chain_labels = []
     for entry in str(setup.get("chain_map") or "").split(","):
         chain, separator, label = entry.strip().partition(":")
@@ -1026,7 +1109,7 @@ def main() -> None:
     # Full-complex RMSD is meaningful for multiple macromolecular chains or
     # a PROTAC assembly.  A small-molecule ligand is not an extra protein
     # chain, so a one-chain ligand–protein job must not show this card.
-    is_multichain_system = len(chain_labels) > 1 or str(setup.get("mode") or "").casefold() == "protac"
+    is_multichain_system = context.partner_kind == "protein_chain" or len(chain_labels) > 1 or str(setup.get("mode") or "").casefold() == "protac"
     csv_files = sorted(path for path in analysis.rglob("*.csv") if path.is_file())
     # Every card below is explicitly mapped to a scientific table.  Never
     # revive the legacy arbitrary-column fallback for raw analysis tables.
@@ -1074,7 +1157,8 @@ def main() -> None:
         ("Protein_RMSD.csv", "Protein RMSD", "Time_ps", ["Protein_RMSD"], "RMSD (Å)"),
         ("LIG_Complex_RMSD_Overlay.csv", "Protein–ligand RMSD overlay", "Time_ns", ["Protein_RMSD", "Ligand_RMSD"], "RMSD (Å)"),
         ("Radius_of_Gyration_Protein_Ligand_Complex.csv", "Radius of gyration", "Time_ns", ["Rg_Protein_Å", "Rg_Ligand_Å", "Rg_Complex_Å"], "Radius of gyration (Å)"),
-        ("native_contact_q.csv", "Native-contact Q(x)", "Time_ns", ["Q_native_contact_fraction"], "Contact fraction"),
+        ("native_contact_q.csv", f"{context.relationship_label.title()} Q", "Time_ns", ["Q_native_contact_fraction"], "Contact fraction"),
+        ("protein_native_contact_q.csv", "Protein fold/native-contact Q", "Time_ns", ["Q_protein_native_contact_fraction"], "Contact fraction"),
     ]
     if is_multichain_system:
         stability_specs.insert(1, ("FullComplex_RMSD.csv", "Full-complex RMSD", "Time_ps", ["RMSD_Å"], "RMSD (Å)"))
@@ -1091,7 +1175,8 @@ def main() -> None:
         if source.name not in {"RMSD_BTK.csv"}: continue
         add("stability", multiseries_plot(source, f"{protein_name} chain RMSD", "Time_ps", ["RMSD_Å"], "RMSD (Å)", colors=[GREEN]), f"{protein_name} chain RMSD", source)
     for source in sorted(analysis.glob("*_Ligand_RMSD.csv")):
-        add("stability", multiseries_plot(source, "Ligand RMSD", "Time_ps", ["Ligand_RMSD"], "RMSD (Å)", colors=[ORANGE]), "Ligand RMSD", source)
+        partner_rmsd = "Peptide RMSD" if context.partner_kind == "peptide" else "Ligand RMSD"
+        add("stability", multiseries_plot(source, partner_rmsd, "Time_ps", ["Ligand_RMSD"], "RMSD (Å)", colors=[ORANGE]), partner_rmsd, source)
 
     for source in sorted(analysis.glob("RMSF_*_per_residue.csv")):
         add("flexibility", categorical_bar_plot(source, f"{protein_name} RMSF per residue", "Residue", ["RMSF_Å"], "RMSF (Å)", colors=[GREEN]), f"{protein_name} RMSF per residue", source)
@@ -1099,7 +1184,8 @@ def main() -> None:
         if source.name.endswith("_per_residue.csv"): continue
         add("flexibility", categorical_bar_plot(source, f"{protein_name} backbone-atom RMSF", "Atom_Index", ["RMSF_Å"], "RMSF (Å)", colors=[GREEN]), f"{protein_name} backbone-atom RMSF", source, note="This is the atom-resolved backbone selection used by the analysis; use the adjacent residue plot for residue-level interpretation.")
     for source in sorted(analysis.glob("*_Ligand_RMSF.csv")):
-        add("flexibility", categorical_bar_plot(source, "Ligand RMSF", "Atom", ["RMSF"], "RMSF (Å)", colors=[ORANGE]), "Ligand RMSF", source)
+        partner_rmsf = "Peptide residue RMSF" if context.partner_kind == "peptide" else "Ligand RMSF"
+        add("flexibility", categorical_bar_plot(source, partner_rmsf, "Atom", ["RMSF"], "RMSF (Å)", colors=[ORANGE]), partner_rmsf, source)
 
     sse_fractions = analysis / "SSE_Fractions.csv"
     if sse_fractions.is_file(): add("secondary", multiseries_plot(sse_fractions, "SSE fractions", "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction"), "SSE fractions", sse_fractions)
@@ -1175,39 +1261,47 @@ def main() -> None:
     published_ligand_svg = ligand_svg(ligand_structure, ligand_smiles)
     if published_ligand_svg:
         (output.parent / "Ligand_2D.svg").write_text(published_ligand_svg, encoding="utf-8")
-    overview_title = "First look: interface and fold" if has_interface_rin else "First look: fold and binding"
+    overview_title = "First look: interface and fold" if context.is_interface else "First look: fold and binding"
     overview_text = (
         "Read global structure and the first persistent chain interface before opening individual chain-pair views."
-        if has_interface_rin else "Read global structure and interaction chemistry before drawing conclusions about the ligand."
+        if context.is_interface else ("Read global structure and interaction chemistry before drawing conclusions about the ligand." if context.partner_kind == "ligand" else "Read protein stability, fold retention, and secondary structure together.")
     )
     overview = section_html(overview_title, "Start here", overview_text, groups["overview"])
     # Interface-only systems should never acquire a misleading empty ligand card.
-    ligand_panel = "" if has_interface_rin and ligand_name == "No ligand label" else ligand_html(root, ligand_name)
+    ligand_panel = ligand_html(root, ligand_name) if context.partner_kind == "ligand" else ""
     network_explorer = interactive_networx_html(analysis)
-    structure_panel = final_structure_html(root, ligand_name)
-    stability = section_html("Stability", "Trajectory stability", "Compare global protein, complex, ligand, compactness, and native-contact trends.", groups["stability"])
-    flexibility = section_html("Flexibility", "Residue and ligand mobility", "Inspect protein and ligand RMSF at atom and residue levels.", groups["flexibility"])
+    structure_panel = final_structure_html(root, context)
+    stability = section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"])
+    flexibility = section_html("Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"])
     secondary = section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"])
-    contacts = section_html("Contacts & binding", "Binding-site evidence", "Use contact frequency, persistence, and atom-resolved event views together.", groups["contacts"])
-    chemistry = section_html("Contact chemistry", "Interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"])
-    distances = section_html("Distances", "Atom-resolved separations", "Explore every calculated ligand–protein separation without collapsing atom-pair context.", groups["distances"]) + distance_carousel_html(analysis)
-    coupled = section_html("Coupled dynamics", "Structure and contacts", "Compare secondary structure with ligand contacts and detected trajectory segments.", groups["coupled"])
+    contacts = section_html(context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"])
+    chemistry = section_html("Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"])
+    distances = section_html("Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"]) + distance_carousel_html(analysis)
+    coupled = section_html("Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"])
     dashboard = tabbed_sections([
         ("overview", "Overview", overview + interface_rin["overview"] + network_explorer),
         ("stability", "Stability", stability),
         ("flexibility", "Flexibility", flexibility),
         ("secondary", "Secondary structure", secondary),
-        ("contacts", "Contacts & binding", ligand_panel + contacts + network_explorer),
+        ("contacts", context.contact_tab_label, ligand_panel + contacts + network_explorer + (interface_rin["peptide_detail"] if context.partner_kind == "peptide" else interface_rin["protein_detail"] if context.partner_kind == "protein_chain" else "")),
         ("chemistry", "Contact chemistry", chemistry),
         ("distances", "Distances", distances),
         ("coupled", "Coupled dynamics", coupled),
-        ("interfaces", "Protein interfaces", interface_rin["protein_detail"]),
-        ("peptide-interfaces", "Peptide interfaces", interface_rin["peptide_detail"]),
+        ("interfaces", "Protein interfaces", "" if context.partner_kind == "protein_chain" else interface_rin["protein_detail"]),
+        ("peptide-interfaces", "Peptide interfaces", "" if context.partner_kind == "peptide" else interface_rin["peptide_detail"]),
         ("structure", "Structure", structure_panel),
     ])
-    html = build_document(system_name, ligand_name, cards, dashboard)
+    html = build_document(system_name, context, cards, dashboard)
     output.write_text(html, encoding="utf-8")
     manifest = build_results_manifest(root, analysis, output, system_name, ligand_name)
+    manifest["partner_context"] = {
+        "partner_kind": context.partner_kind,
+        "partner_label": context.partner_label,
+        "partner_chain_ids": list(context.partner_chain_ids),
+        "interface_pairs": [list(pair) for pair in context.interface_pairs],
+        "system_class": context.system_class,
+        "reference_contact_definition": "first analyzed-frame reference contacts when a Q metric is available",
+    }
     (analysis / RESULTS_MANIFEST_NAME).write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
