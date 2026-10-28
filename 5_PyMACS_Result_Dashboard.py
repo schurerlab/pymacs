@@ -80,7 +80,8 @@ class PartnerContext:
         return {"ligand": "ligand–protein", "peptide": "peptide–protein", "protein_chain": "chain-pair", "none": "intramolecular"}[self.partner_kind]
 
 
-def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict) -> PartnerContext:
+def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict,
+                    simulation: dict | None = None) -> PartnerContext:
     """Infer the report partner from authoritative run/interface metadata, not filenames alone."""
     chain_ids: list[str] = []
     chain_types: dict[str, str] = {}
@@ -90,8 +91,8 @@ def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict) -> 
     try:
         interface_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         for entry in interface_manifest.get("chain_metadata", []):
-            label = str(entry.get("display_label") or entry.get("chain_id") or "").strip()
-            chain_id = str(entry.get("chain_id") or "").strip()
+            label = str(entry.get("display_label") or entry.get("current_chain") or "").strip()
+            chain_id = str(entry.get("current_chain") or entry.get("chain_id") or "").strip()
             if label:
                 chain_types[label] = str(entry.get("chain_type") or "").casefold()
             if chain_id and chain_id not in chain_ids:
@@ -113,14 +114,30 @@ def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict) -> 
             configured.append((chain.strip(), label.strip()))
     if not chain_ids:
         chain_ids = [chain for chain, _ in configured]
+    peptide_identity: dict = {}
+    for identity_path in (analysis / "portal_peptide_identity.json", root / ".chainmap.peptide.json"):
+        try:
+            candidate = json.loads(identity_path.read_text(encoding="utf-8"))
+            if isinstance(candidate, dict):
+                peptide_identity = candidate
+                break
+        except (OSError, ValueError, TypeError):
+            continue
+    identity_chain = str(peptide_identity.get("chain_id") or peptide_identity.get("chain") or "").strip()
+    identity_name = str(peptide_identity.get("name") or peptide_identity.get("group_name") or "").strip()
+    if identity_chain and identity_chain not in peptide_chain_ids:
+        peptide_chain_ids.append(identity_chain)
+    has_peptide_metrics = any((analysis / filename).is_file() for filename in (
+        "Peptide_RMSD.csv", "Peptide_RMSF.csv", "peptide_native_contact_q.csv",
+    ))
     peptide_pairs = [pair for pair in pairs if any("peptide" in chain_types.get(label, "") for label in pair)]
     ligand = str(metadata.get("ligand_name") or metadata.get("ligand_residue") or setup.get("ligand") or "").strip()
-    mode = str(setup.get("mode") or "").casefold()
+    mode = str((simulation or {}).get("mode") or setup.get("mode") or "").casefold()
     if ligand and ligand.casefold() not in {"none", "no ligand label", "proteinonly"}:
         return PartnerContext("ligand", ligand, tuple(chain_ids), tuple(pairs), "ligand_complex")
-    if peptide_pairs or mode == "peptide":
+    if peptide_pairs or mode == "peptide" or identity_name or has_peptide_metrics:
         peptide_labels = [label for pair in peptide_pairs for label in pair if "peptide" in chain_types.get(label, "")]
-        label = next(iter(peptide_labels), "Peptide")
+        label = identity_name or next(iter(peptide_labels), "Peptide")
         return PartnerContext("peptide", label, tuple(peptide_chain_ids or chain_ids), tuple(pairs), "peptide_protein_complex")
     if pairs or len(chain_ids) > 1:
         label = " / ".join(chain_ids) if chain_ids else "Chain interface"
@@ -476,6 +493,48 @@ def interface_rin_context(analysis: Path) -> dict:
         "protein_detail": detail("One network per protein pair", "Protein–protein interfaces", "Open a chain-pair container to inspect its contact persistence and validated interaction types without mixing other proteins into the graph.", protein_panels),
         "peptide_detail": detail("Peptide sequence and protein interface", "Peptide–protein interfaces", "Each panel keeps the full peptide sequence together, highlights contacting residues, and shows only its selected protein interface.", peptide_panels),
     }
+
+
+def interface_evidence_html(analysis: Path, context: PartnerContext, rin: dict) -> str:
+    """Make interface-network availability obvious; never silently hide a peptide relationship."""
+    if not context.is_interface:
+        return ""
+    interface_dir = analysis / "Interface_RIN"
+    explorer = interface_dir / "Interface_RIN_Explorer.html"
+    has_maps = any((interface_dir / filename).is_file() for filename in (
+        "Interface_RIN_Network.png", "Interface_ChainLevel_Network.png", "Interface_ResiduePair_ContactHeatmap.png",
+    ))
+    if explorer.is_file() or has_maps:
+        previews = []
+        for filename, label in (
+            ("Interface_RIN_Network.png", "Residue interaction-node map"),
+            ("Interface_ChainLevel_Network.png", "Chain-level interface map"),
+            ("Interface_ResiduePair_ContactHeatmap.png", "Residue-pair occupancy heatmap"),
+        ):
+            path = interface_dir / filename
+            try:
+                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+            except OSError:
+                continue
+            previews.append(
+                f'<figure class="interface-preview"><img alt="{escape(label)}" src="data:image/png;base64,{encoded}"><figcaption>{escape(label)}</figcaption></figure>'
+            )
+        static_maps = f'<div class="interface-preview-grid">{"".join(previews)}</div>' if previews else ""
+        return (
+            '<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Interface evidence</div>'
+            f'<h2>{escape(context.relationship_label.title())} residue maps</h2>'
+            f'<p>{"Start with the interactive residue-node network, then" if explorer.is_file() else "Use the published node maps, then"} use the occupancy heatmap to confirm which residue pairs persist. '
+            'Each selected chain pair remains separate so unrelated interfaces are never merged.</p></div></div>'
+            f'{static_maps}</section>'
+        )
+    expected = "Interface_RIN/Interface_RIN_Explorer.html and the interface residue-pair tables"
+    return (
+        '<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Interface status</div>'
+        f'<h2>{escape(context.relationship_label.title())} analysis was not published</h2>'
+        f'<p>The run is recognized as a {escape(context.system_class.replace("_", " "))}, but its residue-node maps are absent. '
+        f'Expected analysis assets: <code>{escape(expected)}</code>. Re-run the interface RIN stage for the selected peptide/receptor chain pair; '
+        'do not interpret this as evidence of no interaction.</p></div></div></section>'
+    )
 
 
 def final_structure_html(root: Path, context: PartnerContext) -> str:
@@ -1065,7 +1124,7 @@ def tabbed_sections(sections: list[tuple[str, str, str]]) -> str:
 def build_document(system_name: str, context: PartnerContext, cards: list[str], dashboard: str) -> str:
     """Return the Kyle-hosted, self-contained single-run reading room."""
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(system_name)} · PyMACS results</title><script>{plotlyjs()}</script><script src="/static/3Dmol-min.js"></script><style>
-:root{{--bg:#05060a;--panel:#0b1020;--grid:#1c2a4a;--text:#cfe8ff;--muted:#7aa6d9;--cyan:#35d0ff;--green:#18ff8b;--yellow:#ffe66d;--magenta:#ff2bd6;--orange:#ff8a3d}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 90% 0,rgba(53,208,255,.15),transparent 30%),radial-gradient(circle at 4% 25%,rgba(255,43,214,.10),transparent 27%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}}.page{{max-width:1560px;margin:auto;padding:32px 24px 70px}}.hero,.card,.ligand-card,.gallery-section,.structure-card,.dashboard-tabs-shell{{background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.hero{{position:relative;overflow:hidden;border-radius:25px;padding:34px;margin-bottom:20px}}.hero:before{{content:"";position:absolute;inset:-48%;background:conic-gradient(from 180deg,transparent,rgba(53,208,255,.16),transparent,rgba(255,43,214,.13),transparent);animation:slow-spin 28s linear infinite;pointer-events:none}}.hero>*{{position:relative;z-index:1}}@keyframes slow-spin{{to{{transform:rotate(360deg)}}}}.eyebrow{{color:var(--green);font-size:.75rem;font-weight:900;letter-spacing:.16em;text-transform:uppercase}}h1{{font-size:clamp(2.5rem,5.2vw,5.2rem);letter-spacing:-.065em;line-height:.92;margin:.35rem 0 1rem}}h2{{letter-spacing:-.025em;margin:.2rem 0 .45rem;font-size:1.5rem}}p{{line-height:1.55}}.sub,.section-head p,.muted,.asset-note{{color:var(--muted);max-width:960px}}.pills,.portal-actions{{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}}.pill,.portal-action{{border:1px solid rgba(53,208,255,.28);padding:8px 11px;border-radius:999px;background:rgba(53,208,255,.08);font-size:.88rem}}.portal-actions{{margin-top:12px}}.portal-action{{color:var(--text);font-weight:800;text-decoration:none;transition:transform .16s ease,background .16s ease}}.portal-action:hover{{transform:translateY(-1px);background:rgba(53,208,255,.20)}}.portal-action--primary{{background:linear-gradient(90deg,#18b7e6,#1988e6);border-color:transparent;color:#03101b}}details.guide,.overview{{margin:11px 0 2px;border:1px solid rgba(53,208,255,.22);border-radius:13px;background:rgba(5,10,23,.68)}}details.guide summary,.overview summary{{cursor:pointer;padding:10px 12px;color:var(--cyan);font-weight:800;font-size:.88rem}}details.guide p,.overview p{{margin:0;padding:0 12px 11px;color:var(--muted);font-size:.87rem}}.overview{{margin-top:22px;max-width:1020px}}.overview ol{{margin:0;padding:0 28px 15px;color:var(--muted);line-height:1.55}}.gallery-section,.ligand-card,.structure-card{{border-radius:21px;padding:20px;margin-top:18px}}.section-head{{border-left:3px solid var(--green);padding-left:13px;margin-bottom:16px}}.interface-pair{{margin:12px 0;border:1px solid rgba(53,208,255,.24);border-radius:15px;background:rgba(5,10,23,.58);padding:0 14px 14px}}.interface-pair summary{{cursor:pointer;padding:14px 2px 10px;color:var(--cyan);font-weight:900;font-size:1rem}}.interface-pair summary span{{color:var(--muted);font-size:.8rem;font-weight:700;margin-left:8px}}.dashboard-tabs-shell{{margin-top:18px;border-radius:21px;overflow:hidden}}.dashboard-tabs{{display:flex;gap:7px;overflow:auto;padding:14px 16px 0;border-bottom:1px solid #23375d}}.dashboard-tabs button,.structure-toolbar button{{border:1px solid #285a79;border-radius:10px 10px 0 0;background:#0a253a;color:#cfe8ff;padding:10px 13px;font:800 .82rem inherit;white-space:nowrap;cursor:pointer}}.dashboard-tabs button[aria-selected="true"],.dashboard-tabs button:hover{{background:#116887;color:#fff;border-color:var(--cyan)}}.dashboard-panel{{padding:2px 20px 20px}}.dashboard-panel[hidden]{{display:none}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}}.card{{border-radius:17px;padding:13px;overflow:hidden}}.card .js-plotly-plot{{cursor:zoom-in}}.card a{{display:inline-block;color:var(--cyan);font-size:.8rem;font-weight:800;margin:8px 10px 5px}}.heatmap-note{{margin:7px 10px;color:var(--muted);font-size:.82rem;line-height:1.4}}.ligand-grid{{display:grid;grid-template-columns:minmax(300px,1fr) minmax(300px,1fr);gap:18px;align-items:stretch}}.ligand-2d,.ligand-3d,.complex-3d{{min-height:330px;border:1px solid rgba(255,230,109,.30);border-radius:17px;background:radial-gradient(circle at center,rgba(255,230,109,.08),rgba(5,6,10,.7) 70%);overflow:hidden;position:relative}}.ligand-2d svg{{display:block;width:100%;height:330px;max-width:100%}}.ligand-3d,.complex-3d{{border-color:rgba(53,208,255,.30)}}.complex-3d{{height:min(62vw,650px);min-height:410px}}.structure-toolbar{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 11px}}.structure-toolbar button{{border-radius:10px;padding:8px 11px}}.structure-toolbar button:hover,.structure-toolbar button.is-active{{background:#116887;color:#fff;border-color:var(--cyan)}}.viewer-label{{color:var(--yellow);font-size:.78rem;font-weight:900;text-transform:uppercase;letter-spacing:.1em;margin:2px 0 8px}}.missing-visual{{padding:24px;color:var(--muted)}}.asset-note{{font-size:.8rem;margin:.7rem 0 0}}code{{display:block;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 12px 12px;color:var(--yellow)}}.graph-modal{{display:none;position:fixed;z-index:9999;inset:0;padding:3vh 3vw;background:rgba(0,0,0,.78);backdrop-filter:blur(7px)}}.graph-modal.open{{display:flex;align-items:center;justify-content:center}}.graph-modal-panel{{position:relative;width:min(1500px,94vw);height:min(900px,92vh);padding:20px 16px 12px;border:1px solid var(--cyan);background:#080d1b;box-shadow:0 0 70px rgba(53,208,255,.18);border-radius:20px}}.graph-modal-close{{position:absolute;right:17px;top:13px;z-index:2;border:1px solid var(--cyan);border-radius:999px;background:#101b33;color:var(--text);font-weight:800;padding:8px 12px;cursor:pointer}}.graph-modal-plot{{width:100%;height:100%}}@media(max-width:700px){{.page{{padding:18px 12px 42px}}.grid,.ligand-grid{{grid-template-columns:1fr}}.hero{{padding:24px 19px}}.dashboard-panel{{padding:2px 12px 12px}}.complex-3d{{height:68vw;min-height:330px}}.graph-modal{{padding:1vh 1vw}}.graph-modal-panel{{width:98vw;height:96vh;padding:14px 4px 4px}}}}
+:root{{--bg:#05060a;--panel:#0b1020;--grid:#1c2a4a;--text:#cfe8ff;--muted:#7aa6d9;--cyan:#35d0ff;--green:#18ff8b;--yellow:#ffe66d;--magenta:#ff2bd6;--orange:#ff8a3d}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 90% 0,rgba(53,208,255,.15),transparent 30%),radial-gradient(circle at 4% 25%,rgba(255,43,214,.10),transparent 27%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}}.page{{max-width:1560px;margin:auto;padding:32px 24px 70px}}.hero,.card,.ligand-card,.gallery-section,.structure-card,.dashboard-tabs-shell{{background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.hero{{position:relative;overflow:hidden;border-radius:25px;padding:34px;margin-bottom:20px}}.hero:before{{content:"";position:absolute;inset:-48%;background:conic-gradient(from 180deg,transparent,rgba(53,208,255,.16),transparent,rgba(255,43,214,.13),transparent);animation:slow-spin 28s linear infinite;pointer-events:none}}.hero>*{{position:relative;z-index:1}}@keyframes slow-spin{{to{{transform:rotate(360deg)}}}}.eyebrow{{color:var(--green);font-size:.75rem;font-weight:900;letter-spacing:.16em;text-transform:uppercase}}h1{{font-size:clamp(2.5rem,5.2vw,5.2rem);letter-spacing:-.065em;line-height:.92;margin:.35rem 0 1rem}}h2{{letter-spacing:-.025em;margin:.2rem 0 .45rem;font-size:1.5rem}}p{{line-height:1.55}}.sub,.section-head p,.muted,.asset-note{{color:var(--muted);max-width:960px}}.pills,.portal-actions{{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}}.pill,.portal-action{{border:1px solid rgba(53,208,255,.28);padding:8px 11px;border-radius:999px;background:rgba(53,208,255,.08);font-size:.88rem}}.portal-actions{{margin-top:12px}}.portal-action{{color:var(--text);font-weight:800;text-decoration:none;transition:transform .16s ease,background .16s ease}}.portal-action:hover{{transform:translateY(-1px);background:rgba(53,208,255,.20)}}.portal-action--primary{{background:linear-gradient(90deg,#18b7e6,#1988e6);border-color:transparent;color:#03101b}}details.guide,.overview{{margin:11px 0 2px;border:1px solid rgba(53,208,255,.22);border-radius:13px;background:rgba(5,10,23,.68)}}details.guide summary,.overview summary{{cursor:pointer;padding:10px 12px;color:var(--cyan);font-weight:800;font-size:.88rem}}details.guide p,.overview p{{margin:0;padding:0 12px 11px;color:var(--muted);font-size:.87rem}}.overview{{margin-top:22px;max-width:1020px}}.overview ol{{margin:0;padding:0 28px 15px;color:var(--muted);line-height:1.55}}.gallery-section,.ligand-card,.structure-card{{border-radius:21px;padding:20px;margin-top:18px}}.section-head{{border-left:3px solid var(--green);padding-left:13px;margin-bottom:16px}}.interface-pair{{margin:12px 0;border:1px solid rgba(53,208,255,.24);border-radius:15px;background:rgba(5,10,23,.58);padding:0 14px 14px}}.interface-pair summary{{cursor:pointer;padding:14px 2px 10px;color:var(--cyan);font-weight:900;font-size:1rem}}.interface-pair summary span{{color:var(--muted);font-size:.8rem;font-weight:700;margin-left:8px}}.interface-preview-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}}.interface-preview{{margin:0;border:1px solid rgba(53,208,255,.25);border-radius:14px;overflow:hidden;background:#05070d}}.interface-preview img{{display:block;width:100%;height:250px;object-fit:contain;background:#fff}}.interface-preview figcaption{{padding:9px 11px;color:var(--muted);font-size:.84rem;font-weight:800}}.dashboard-tabs-shell{{margin-top:18px;border-radius:21px;overflow:hidden}}.dashboard-tabs{{display:flex;gap:7px;overflow:auto;padding:14px 16px 0;border-bottom:1px solid #23375d}}.dashboard-tabs button,.structure-toolbar button{{border:1px solid #285a79;border-radius:10px 10px 0 0;background:#0a253a;color:#cfe8ff;padding:10px 13px;font:800 .82rem inherit;white-space:nowrap;cursor:pointer}}.dashboard-tabs button[aria-selected="true"],.dashboard-tabs button:hover{{background:#116887;color:#fff;border-color:var(--cyan)}}.dashboard-panel{{padding:2px 20px 20px}}.dashboard-panel[hidden]{{display:none}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}}.card{{border-radius:17px;padding:13px;overflow:hidden}}.card .js-plotly-plot{{cursor:zoom-in}}.card a{{display:inline-block;color:var(--cyan);font-size:.8rem;font-weight:800;margin:8px 10px 5px}}.heatmap-note{{margin:7px 10px;color:var(--muted);font-size:.82rem;line-height:1.4}}.ligand-grid{{display:grid;grid-template-columns:minmax(300px,1fr) minmax(300px,1fr);gap:18px;align-items:stretch}}.ligand-2d,.ligand-3d,.complex-3d{{min-height:330px;border:1px solid rgba(255,230,109,.30);border-radius:17px;background:radial-gradient(circle at center,rgba(255,230,109,.08),rgba(5,6,10,.7) 70%);overflow:hidden;position:relative}}.ligand-2d svg{{display:block;width:100%;height:330px;max-width:100%}}.ligand-3d,.complex-3d{{border-color:rgba(53,208,255,.30)}}.complex-3d{{height:min(62vw,650px);min-height:410px}}.structure-toolbar{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 11px}}.structure-toolbar button{{border-radius:10px;padding:8px 11px}}.structure-toolbar button:hover,.structure-toolbar button.is-active{{background:#116887;color:#fff;border-color:var(--cyan)}}.viewer-label{{color:var(--yellow);font-size:.78rem;font-weight:900;text-transform:uppercase;letter-spacing:.1em;margin:2px 0 8px}}.missing-visual{{padding:24px;color:var(--muted)}}.asset-note{{font-size:.8rem;margin:.7rem 0 0}}code{{display:block;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 12px 12px;color:var(--yellow)}}.graph-modal{{display:none;position:fixed;z-index:9999;inset:0;padding:3vh 3vw;background:rgba(0,0,0,.78);backdrop-filter:blur(7px)}}.graph-modal.open{{display:flex;align-items:center;justify-content:center}}.graph-modal-panel{{position:relative;width:min(1500px,94vw);height:min(900px,92vh);padding:20px 16px 12px;border:1px solid var(--cyan);background:#080d1b;box-shadow:0 0 70px rgba(53,208,255,.18);border-radius:20px}}.graph-modal-close{{position:absolute;right:17px;top:13px;z-index:2;border:1px solid var(--cyan);border-radius:999px;background:#101b33;color:var(--text);font-weight:800;padding:8px 12px;cursor:pointer}}.graph-modal-plot{{width:100%;height:100%}}@media(max-width:700px){{.page{{padding:18px 12px 42px}}.grid,.ligand-grid{{grid-template-columns:1fr}}.hero{{padding:24px 19px}}.dashboard-panel{{padding:2px 12px 12px}}.complex-3d{{height:68vw;min-height:330px}}.graph-modal{{padding:1vh 1vw}}.graph-modal-panel{{width:98vw;height:96vh;padding:14px 4px 4px}}}}
 </style></head><body><main class="page"><section class="hero"><div class="eyebrow">PyMACS · single-system results</div><h1>{escape(system_name)}</h1><p class="sub">{escape({"ligand": "Start with global stability, then inspect ligand pose and pocket chemistry.", "peptide": "Start with global stability, then inspect peptide conformation and peptide–protein interface persistence.", "protein_chain": "Start with global and chain stability, then inspect persistent chain interfaces.", "none": "Start with global stability, fold retention, and secondary-structure evolution."}[context.partner_kind])} Every graph is a native Plotly analysis: hover for values, use the legend to isolate traces, and double-click for a large view.</p><div class="pills"><span class="pill">{escape({"ligand": "Ligand / PROTAC", "peptide": "Peptide", "protein_chain": "Chains / interfaces", "none": "Protein / chain"}[context.partner_kind])}: {escape(context.partner_label)}</span><span class="pill">{len(cards)} interactive analyses</span><span class="pill">Kyle-local, fast delivery</span></div><!--PORTAL_ACTIONS--><details class="overview"><summary>ⓘ How to read this result—start here</summary><ol><li><b>Check the fold:</b> protein RMSD, radius of gyration, and secondary-structure evolution should be considered together.</li><li><b>Check the partner:</b> interpret {escape(context.relationship_label)} RMSD/RMSF and contact persistence together—not in isolation.</li><li><b>Check the chemistry:</b> solid-color interaction types show which residues make hydrophobic, ionic, or hydrogen-bond interactions over time.</li><li><b>Do not overclaim:</b> these trajectories test stability of a modeled system; they do not by themselves establish binding affinity or experimental activity.</li></ol></details></section>{dashboard}</main><div class="graph-modal" id="graph-modal" aria-hidden="true"><div class="graph-modal-panel"><button class="graph-modal-close" id="graph-modal-close" type="button">Close ×</button><div class="graph-modal-plot" id="graph-modal-plot"></div></div></div><script>
 (() => {{
  const modal=document.getElementById('graph-modal'),destination=document.getElementById('graph-modal-plot');
@@ -1094,11 +1153,14 @@ def main() -> None:
     interface_rin = interface_rin_context(analysis)
     has_interface_rin = bool(interface_rin["protein_detail"] or interface_rin["peptide_detail"])
     setup = {}
+    simulation = {}
     try:
-        setup = json.loads((root / "pymacs_run.json").read_text()).get("setup", {})
+        run_config = json.loads((root / "pymacs_run.json").read_text())
+        setup = run_config.get("setup", {})
+        simulation = run_config.get("simulation", {})
     except (OSError, ValueError, TypeError):
         pass
-    context = partner_context(root, analysis, setup, metadata)
+    context = partner_context(root, analysis, setup, metadata, simulation)
     ligand_name = context.partner_label if context.partner_kind == "ligand" else "No ligand label"
     chain_labels = []
     for entry in str(setup.get("chain_map") or "").split(","):
@@ -1177,6 +1239,10 @@ def main() -> None:
     for source in sorted(analysis.glob("*_Ligand_RMSD.csv")):
         partner_rmsd = "Peptide RMSD" if context.partner_kind == "peptide" else "Ligand RMSD"
         add("stability", multiseries_plot(source, partner_rmsd, "Time_ps", ["Ligand_RMSD"], "RMSD (Å)", colors=[ORANGE]), partner_rmsd, source)
+    peptide_rmsd = analysis / "Peptide_RMSD.csv"
+    if peptide_rmsd.is_file():
+        add("stability", multiseries_plot(peptide_rmsd, f"{context.partner_label} peptide RMSD", "Time_ps", ["RMSD_A"], "RMSD (Å)", colors=[ORANGE]), "Peptide RMSD", peptide_rmsd,
+            note="Peptide coordinates are aligned on the peptide selection. Interpret this with the interface persistence panel rather than as a binding affinity measure.")
 
     for source in sorted(analysis.glob("RMSF_*_per_residue.csv")):
         add("flexibility", categorical_bar_plot(source, f"{protein_name} RMSF per residue", "Residue", ["RMSF_Å"], "RMSF (Å)", colors=[GREEN]), f"{protein_name} RMSF per residue", source)
@@ -1186,6 +1252,10 @@ def main() -> None:
     for source in sorted(analysis.glob("*_Ligand_RMSF.csv")):
         partner_rmsf = "Peptide residue RMSF" if context.partner_kind == "peptide" else "Ligand RMSF"
         add("flexibility", categorical_bar_plot(source, partner_rmsf, "Atom", ["RMSF"], "RMSF (Å)", colors=[ORANGE]), partner_rmsf, source)
+    peptide_rmsf = analysis / "Peptide_RMSF.csv"
+    if peptide_rmsf.is_file():
+        add("flexibility", categorical_bar_plot(peptide_rmsf, f"{context.partner_label} peptide residue RMSF", "Residue", ["RMSF_A"], "RMSF (Å)", colors=[ORANGE]), "Peptide residue RMSF", peptide_rmsf,
+            note="Higher values locate mobile peptide residues; compare contacting positions with the interface-node map.")
 
     sse_fractions = analysis / "SSE_Fractions.csv"
     if sse_fractions.is_file(): add("secondary", multiseries_plot(sse_fractions, "SSE fractions", "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction"), "SSE fractions", sse_fractions)
@@ -1270,6 +1340,7 @@ def main() -> None:
     # Interface-only systems should never acquire a misleading empty ligand card.
     ligand_panel = ligand_html(root, ligand_name) if context.partner_kind == "ligand" else ""
     network_explorer = interactive_networx_html(analysis)
+    interface_evidence = interface_evidence_html(analysis, context, interface_rin)
     structure_panel = final_structure_html(root, context)
     stability = section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"])
     flexibility = section_html("Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"])
@@ -1287,6 +1358,7 @@ def main() -> None:
         ("chemistry", "Contact chemistry", chemistry),
         ("distances", "Distances", distances),
         ("coupled", "Coupled dynamics", coupled),
+        ("interface-evidence", "Interface maps", interface_evidence),
         ("interfaces", "Protein interfaces", "" if context.partner_kind == "protein_chain" else interface_rin["protein_detail"]),
         ("peptide-interfaces", "Peptide interfaces", "" if context.partner_kind == "peptide" else interface_rin["peptide_detail"]),
         ("structure", "Structure", structure_panel),
