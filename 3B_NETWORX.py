@@ -2815,9 +2815,11 @@ def _networx_fixed_ligand_point(point, ligand_bounds, width=1120, height=820):
     min_x, max_x, min_y, max_y = ligand_bounds
     span_x = max(max_x - min_x, 1.0)
     span_y = max(max_y - min_y, 1.0)
-    # A stable 360 × 280 px ligand field keeps bond lengths and atom labels
-    # readable without letting a compact ligand fill the entire canvas.
-    scale = min(360.0 / span_x, 280.0 / span_y)
+    # This is intentionally a large, fixed molecular field.  It is based on
+    # the approved ligand depiction, not on the number or spread of contact
+    # annotations.  In particular, a 90%-empty view must never turn a real
+    # ligand into a tiny icon in an otherwise empty canvas.
+    scale = min(760.0 / span_x, 500.0 / span_y)
     center_x = (min_x + max_x) / 2.0
     center_y = (min_y + max_y) / 2.0
     return (width * 0.44 + (point[0] - center_x) * scale,
@@ -2904,7 +2906,13 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
     ) if residues else {})
 
     width, height = 1120, 820
-    ligand_points = list(atom_positions.values())
+    # Hydrogens/virtual sites are not drawn in the explorer and can extend a
+    # coordinate bounding box unexpectedly.  Size the visible molecule from
+    # its heavy atoms, falling back only for incomplete legacy data.
+    ligand_points = [point for name, point in atom_positions.items()
+                     if not str(name).startswith("H")]
+    if not ligand_points:
+        ligand_points = list(atom_positions.values())
     ligand_bounds = (
         min(point[0] for point in ligand_points), max(point[0] for point in ligand_points),
         min(point[1] for point in ligand_points), max(point[1] for point in ligand_points),
