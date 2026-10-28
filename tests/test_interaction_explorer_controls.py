@@ -17,17 +17,25 @@ def test_ligand_explorer_offers_full_persistence_range_without_suppression():
     assert "labelSize.addEventListener('input'" in source
     assert 'min="20" max="64" value="26"' in source
     assert "node.setPointerCapture" in source
+    assert "edgeControls={}" in source
+    assert "kind:'edge'" in source
+    assert "updateVisibleEdge(edge)" in source
     assert "event.detail>=2" in source
     assert "labelSize.oninput" in source
     assert "(?:const EMPTY_MESSAGE=.*?;)?const EDGES" in source
     assert "sourceNodes=[...svg.querySelectorAll('.residue-node')]" in source
-    assert "exportedCircle.style.fill=style.fill" in source
+    assert "exportedCircle.style.setProperty('fill',style.fill,'important')" in source
+    assert "sourceLabels=[...svg.querySelectorAll('.edge-label')]" in source
+    assert "atomColours={N:'#58b9ff',O:'#ff6478',S:'#e5c400',P:'#ff927b'}" in source
+    assert "copy.querySelectorAll('.atom-N,.atom-O,.atom-S,.atom-C').forEach(atom=>atom.remove())" in source
+    assert 'data-first-element' in source
     assert "Changing the retained threshold resets your node arrangement. Continue?" not in source
     assert 'id="export-svg"' in source
-    assert "Changing the retained threshold resets your node arrangement" in source
-    assert "node.addEventListener('dblclick'" in source
+    assert "Choosing a different retained threshold resets these temporary edits" in source
+    assert "svg.addEventListener('dblclick'" in source
     assert "ring_inset_center" in source
-    assert "move-hint" in source
+    assert 'id="move-info"' in source
+    assert 'id="move-popover"' in source
 
 
 def test_dashboard_embed_allows_export_and_has_room_for_the_full_explorer():
