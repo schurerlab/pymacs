@@ -1100,6 +1100,73 @@ def arc3_label_point(x1, y1, x2, y2, rad, fraction=0.52):
             u * u * y1 + 2.0 * u * t * cy + t * t * y2)
 
 
+def resolve_interactive_badge_collisions(residue_xy, atom_xy, width, height,
+                                         node_radius=45):
+    """Move only residue badges until they have clear, stable SVG spacing.
+
+    The ligand coordinates are structural and must not move.  Residue badges,
+    however, are annotations.  Resolving them in rendered-pixel space makes
+    the rule independent of the source molecule's coordinate scale and keeps
+    the same separation guarantee at every threshold.
+    """
+    positions = {name: [float(x), float(y)] for name, (x, y) in residue_xy.items()}
+    if len(positions) < 2:
+        return {name: tuple(value) for name, value in positions.items()}
+
+    names = sorted(positions)
+    atom_centres = list(atom_xy.values())
+    min_badge_gap = 2.0 * node_radius + 18.0
+    min_atom_gap = node_radius + 27.0
+    margin = node_radius + 12.0
+    centre_x, centre_y = width / 2.0, height / 2.0
+
+    for iteration in range(360):
+        moved = False
+        # Badge-to-badge separation.  The deterministic zero-distance vector
+        # prevents a coincident pair from remaining coincident forever.
+        for left_index, left_name in enumerate(names):
+            for right_name in names[left_index + 1:]:
+                left, right = positions[left_name], positions[right_name]
+                dx, dy = right[0] - left[0], right[1] - left[1]
+                distance = math.hypot(dx, dy)
+                if distance >= min_badge_gap:
+                    continue
+                if distance < 1e-5:
+                    angle = ((left_index + iteration + 1) * 2.3999632297)
+                    dx, dy, distance = math.cos(angle), math.sin(angle), 1.0
+                push = (min_badge_gap - distance) / 2.0 + 0.35
+                ux, uy = dx / distance, dy / distance
+                left[0] -= ux * push
+                left[1] -= uy * push
+                right[0] += ux * push
+                right[1] += uy * push
+                moved = True
+
+        # Keep a badge outside the ligand drawing and its atom labels.
+        for name in names:
+            point = positions[name]
+            for atom_x, atom_y in atom_centres:
+                dx, dy = point[0] - atom_x, point[1] - atom_y
+                distance = math.hypot(dx, dy)
+                if distance >= min_atom_gap:
+                    continue
+                if distance < 1e-5:
+                    dx, dy, distance = point[0] - centre_x, point[1] - centre_y, 1.0
+                push = min_atom_gap - distance + 0.5
+                point[0] += dx / distance * push
+                point[1] += dy / distance * push
+                moved = True
+
+        for point in positions.values():
+            point[0] = min(width - margin, max(margin, point[0]))
+            point[1] = min(height - margin, max(margin, point[1]))
+        if not moved:
+            break
+
+    return {name: (round(point[0], 2), round(point[1], 2))
+            for name, point in positions.items()}
+
+
 def classify_residue(res_name: str):
     # Extract the residue code from either TYR76 or A|TYR76.
     match = re.search(r"([A-Za-z]{3})(?=\s*\d)", str(res_name))
@@ -2765,19 +2832,20 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
 
     The PNG remains the archival journal panel.  This companion uses the same
     structure-preserving ligand layout and chemically specific edge occupancies
-    so a reader can compare the 95/90/80% persistent-contact views in-browser.
+    so a reader can compare the 90/80/70% persistent-contact views in-browser.
     """
-    thresholds = (0.95, 0.90, 0.80)
+    # These are deliberately strict, high-confidence retained-contact views.
+    # Never silently lower them: an empty view is a valid scientific result.
+    thresholds = (0.90, 0.80, 0.70)
     normalized_bonds = []
     for first, second, order in bonds:
         first = normalize_bond_endpoint(first, list(atom_positions))
         second = normalize_bond_endpoint(second, list(atom_positions))
         if first and second:
             normalized_bonds.append((first, second, order))
-    edges = summarize_interaction_edges(df_full, min(thresholds)).copy()
-    if edges.empty:
-        print("  ⚠ No ≥80% interactions available for interactive NETWORX HTML.")
-        return None
+    all_edges = summarize_interaction_edges(df_full, 0.0).copy()
+    max_occupancy = float(all_edges["Fraction"].max()) if not all_edges.empty else 0.0
+    edges = all_edges[all_edges["Fraction"] >= min(thresholds)].copy()
 
     # Resolve virtual sites/hydrogens exactly as the publication renderer does.
     raw_map = {str(i): name for i, name in enumerate(edges["LigAtomName"])}
@@ -2788,9 +2856,6 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
         for atom in edges["DisplayAtom"]
     ]
     edges = edges[edges["DisplayAtom"].isin(atom_positions)].copy()
-    if edges.empty:
-        print("  ⚠ No resolvable ≥80% interactions available for interactive NETWORX HTML.")
-        return None
 
     # Match the static renderer's one unambiguous chemistry type per anchor.
     priority = {"H-bond": 3, "Ionic": 2, "Hydrophobic": 1, "Water bridge": 0}
@@ -2803,9 +2868,9 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
         residue: list(dict.fromkeys(group.sort_values("Fraction", ascending=False)["DisplayAtom"].tolist()))
         for residue, group in edges.groupby("Residue")
     }
-    residue_positions = auto_place_residues_guided(
+    residue_positions = (auto_place_residues_guided(
         residues, residue_atoms, atom_positions, center, bonds=normalized_bonds
-    )
+    ) if residues else {})
 
     all_points = list(atom_positions.values()) + list(residue_positions.values())
     min_x = min(point[0] for point in all_points) - 1.1
@@ -2818,6 +2883,9 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
                for name, point in atom_positions.items()}
     residue_xy = {name: _networx_html_point(point, bounds, width, height)
                   for name, point in residue_positions.items()}
+    residue_xy = resolve_interactive_badge_collisions(
+        residue_xy, atom_xy, width, height, node_radius=node_radius
+    )
 
     bond_svg = []
     for first, second, order in normalized_bonds:
@@ -2884,6 +2952,35 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
 
     edge_records = []
     bundle_order = {}
+    occupied_label_points = []
+
+    def label_position(x1, y1, x2, y2, control_x, control_y):
+        """Place an occupancy label clear of badges, atoms, and other labels."""
+        # Quadratic Bézier midpoint and a local normal supply stable candidates
+        # without moving either node or the scientifically meaningful edge.
+        t = 0.52
+        base_x = (1 - t) ** 2 * x1 + 2 * (1 - t) * t * control_x + t ** 2 * x2
+        base_y = (1 - t) ** 2 * y1 + 2 * (1 - t) * t * control_y + t ** 2 * y2
+        tangent_x = 2 * (1 - t) * (control_x - x1) + 2 * t * (x2 - control_x)
+        tangent_y = 2 * (1 - t) * (control_y - y1) + 2 * t * (y2 - control_y)
+        length = max((tangent_x * tangent_x + tangent_y * tangent_y) ** .5, 1.0)
+        normal_x, normal_y = -tangent_y / length, tangent_x / length
+        candidates = [(base_x + normal_x * offset, base_y + normal_y * offset)
+                      for offset in (0, 20, -20, 42, -42, 66, -66, 94, -94)]
+        node_centres = list(residue_xy.values())
+        atom_centres = list(atom_xy.values())
+        for x, y in candidates:
+            clear_nodes = all(math.hypot(x - nx, y - ny) >= node_radius + 16 for nx, ny in node_centres)
+            clear_atoms = all(math.hypot(x - ax, y - ay) >= 27 for ax, ay in atom_centres)
+            clear_labels = all(math.hypot(x - lx, y - ly) >= 34 for lx, ly in occupied_label_points)
+            if clear_nodes and clear_atoms and clear_labels:
+                occupied_label_points.append((x, y))
+                return x, y
+        # Never trade readability for completeness: a label without a clear
+        # placement is omitted, while its exact occupancy remains available
+        # through the edge click/hover detail.
+        return None, None
+
     for index, row in edges.iterrows():
         atom, residue = row["DisplayAtom"], row["Residue"]
         x1, y1 = atom_xy[atom]
@@ -2895,15 +2992,27 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
         curvature = (0.13 + 0.045 * (ordinal // 2)) * (1 if ordinal % 2 == 0 else -1)
         control_x = (x1 + x2) / 2 - dy / distance * curvature * distance
         control_y = (y1 + y2) / 2 + dx / distance * curvature * distance
+        label_x, label_y = label_position(x1, y1, x2, y2, control_x, control_y)
         type_name = str(row["Type"])
         style_key = "hbond" if "h-bond" in type_name.lower() else "ionic" if "ionic" in type_name.lower() else "hydrophobic" if "hydrophobic" in type_name.lower() else "water"
         edge_records.append({
             "id": int(index), "residue": str(residue), "atom": str(atom), "type": type_name,
             "fraction": round(float(row["Fraction"]), 6), "path": f"M {x1:.2f} {y1:.2f} Q {control_x:.2f} {control_y:.2f} {x2:.2f} {y2:.2f}",
+            "label_x": round(label_x, 2) if label_x is not None else None,
+            "label_y": round(label_y, 2) if label_y is not None else None,
             "style": style_key,
         })
 
     data_json = json.dumps(edge_records, separators=(",", ":")).replace("</", "<\\/")
+    default_threshold = thresholds[1]
+    empty_message = (
+        f"No atom-specific interaction reaches {int(default_threshold * 100)}% occupancy. "
+        f"The strongest observed residue–ligand-atom/type interaction is {max_occupancy * 100:.1f}%."
+    )
+    threshold_buttons = ''.join(
+        f'<button data-threshold="{threshold:.2f}" aria-pressed="{str(threshold == default_threshold).lower()}">{int(round(threshold * 100))}% retained</button>'
+        for threshold in thresholds
+    )
     output = out_name or os.path.join(outdir, f"{ligand}_interactive.html")
     html = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(ligand)} interaction explorer</title><style>
 :root{{--bg:#05070d;--panel:#101726;--text:#ebf4ff;--muted:#9eb2cc;--cyan:#4bd7ff;--hbond:#8e2431;--hydrophobic:#69b86b;--ionic:#9d6cd3;--water:#4a9bdd}}*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at 80% 0,rgba(75,215,255,.16),transparent 30%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,sans-serif}}main{{max-width:1440px;margin:auto;padding:28px}}header{{display:flex;align-items:end;justify-content:space-between;gap:20px;flex-wrap:wrap}}.eyebrow{{color:var(--cyan);font-weight:900;letter-spacing:.14em;font-size:.72rem}}h1{{font-size:clamp(2rem,4vw,4.4rem);letter-spacing:-.055em;margin:.25rem 0}}.intro{{color:var(--muted);max-width:700px;line-height:1.55}}.controls{{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}}button{{appearance:none;border:1px solid #36506f;background:#101b2b;color:var(--text);padding:10px 14px;border-radius:11px;font:800 .9rem inherit;cursor:pointer}}button:hover,button[aria-pressed=true]{{border-color:var(--cyan);background:#13435c;box-shadow:0 0 22px rgba(75,215,255,.16)}}.layout{{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px}}.diagram,.details{{background:linear-gradient(145deg,#111a2b,#080b13);border:1px solid #263c59;border-radius:20px}}.diagram{{overflow:hidden}}svg{{display:block;width:100%;height:auto;min-height:540px}}.bond{{stroke:#f7fbff;stroke-width:3.4;stroke-linecap:round}}.bond-secondary{{stroke-width:2.5}}.atom{{font-size:20px;font-weight:900;text-anchor:middle;fill:#fff;paint-order:stroke;stroke:#05070d;stroke-width:4px}}.atom-O{{fill:#ef5969}}.atom-N{{fill:#54b6ff}}.atom-S{{fill:#ffd36e}}.atom-P{{fill:#f385bd}}.edge{{fill:none;stroke-width:3.3;stroke-dasharray:8 6;stroke-linecap:round;opacity:.94;cursor:pointer;transition:opacity .16s,stroke-width .16s}}.edge:hover,.edge.selected{{stroke-width:6;filter:drop-shadow(0 0 5px currentColor)}}.edge.hbond{{stroke:var(--hbond)}}.edge.hydrophobic{{stroke:var(--hydrophobic)}}.edge.ionic{{stroke:var(--ionic)}}.edge.water{{stroke:var(--water)}}.edge-label{{font-size:13px;font-weight:900;text-anchor:middle;fill:#fff;paint-order:stroke;stroke:#080b13;stroke-width:4px;pointer-events:none}}.residue-node{{cursor:pointer;transition:opacity .16s}}.residue-node circle{{fill:#e8e8e8;stroke:#05070d;stroke-width:2.2}}.category-hydrophobic circle{{fill:#c9f7c5}}.category-positive circle{{fill:#c5f1ff}}.category-negative circle{{fill:#ffcbc5}}.category-polar circle{{fill:#e8e8e8}}.residue-node text{{text-anchor:middle;font-weight:900;font-size:9.5px;pointer-events:none}}.residue-node.selected circle{{stroke:var(--cyan);stroke-width:5;filter:drop-shadow(0 0 8px var(--cyan))}}.details{{padding:18px}}.details h2{{margin:.1rem 0 .8rem;font-size:1.1rem}}.metric{{font-size:2.4rem;font-weight:900;letter-spacing:-.06em;color:var(--cyan)}}.detail-row{{border-top:1px solid #29415e;padding:12px 0;color:var(--muted)}}.detail-row b{{display:block;color:var(--text);font-size:.82rem;text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px}}.legend{{display:grid;gap:8px;margin-top:20px;font-size:.83rem;color:var(--muted)}}.swatch{{display:inline-block;width:25px;border-top:4px dashed currentColor;vertical-align:middle;margin-right:7px}}.note{{font-size:.78rem;color:var(--muted);line-height:1.45;margin:17px 0 0}}@media(max-width:900px){{main{{padding:18px}}.layout{{grid-template-columns:1fr}}.details{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}}.details h2,.legend,.note{{grid-column:1/-1}}}}@media(max-width:500px){{.details{{grid-template-columns:1fr}}svg{{min-height:420px}}}}
@@ -2914,6 +3023,39 @@ def make_interactive_network_html(ligand, df_full, atom_positions, atom_elements
     html = html.replace(
         ".residue-node text{text-anchor:middle;font-weight:900;font-size:9.5px;pointer-events:none}",
         ".residue-node text{text-anchor:middle;font-weight:900;pointer-events:none}",
+    )
+    html = html.replace(
+        '<div class="controls" role="group" aria-label="Persistent interaction threshold"><button data-threshold="0.95" aria-pressed="false">95% retained</button><button data-threshold="0.90" aria-pressed="true">90% retained</button><button data-threshold="0.80" aria-pressed="false">80% retained</button></div>',
+        f'<div class="controls" role="group" aria-label="Persistent interaction threshold">{threshold_buttons}</div>',
+    )
+    html = html.replace("let active=.90,selected=null", f"let active={default_threshold:.2f},selected=null")
+    html = html.replace("The diagram defaults to 90%;", f"The diagram defaults to {int(round(default_threshold * 100))}%;")
+    html = html.replace(
+        "const EDGES=",
+        f"const EMPTY_MESSAGE={json.dumps(empty_message)};const EDGES=",
+    )
+    html = html.replace(
+        "const residues=new Set(visible.map(e=>e.residue));",
+        "if(!visible.length){selection.textContent=`No atom-specific interaction reaches ${Math.round(active*100)}% occupancy. Strongest observed edge: " + f"{max_occupancy * 100:.1f}%" + ".`;selected=null;}const residues=new Set(visible.map(e=>e.residue));",
+    )
+    html = html.replace(
+        "const m=e.path.match(/Q ([0-9.]+) ([0-9.]+)/),x=m?m[1]:0,y=m?m[2]:0;",
+        "const x=e.label_x,y=e.label_y;",
+    )
+    html = html.replace(
+        '<text class="edge-label" x="${x}" y="${y}">${Math.round(e.fraction*100)}%</text>',
+        '${x===null?\'\':`<text class="edge-label" x="${x}" y="${y}">${Math.round(e.fraction*100)}%</text>`}',
+    )
+    # Keep the structural layout intact but raise the interaction and residue
+    # palette against a dark portal background.  The category colors remain
+    # chemically distinct; only their luminance/saturation changes.
+    html = html.replace(
+        "--hbond:#8e2431;--hydrophobic:#69b86b;--ionic:#9d6cd3;--water:#4a9bdd",
+        "--hbond:#ff4d6d;--hydrophobic:#79ff87;--ionic:#c084fc;--water:#4bd7ff",
+    )
+    html = html.replace(
+        ".category-hydrophobic circle{fill:#c9f7c5}.category-positive circle{fill:#c5f1ff}.category-negative circle{fill:#ffcbc5}.category-polar circle{fill:#e8e8e8}",
+        ".category-hydrophobic circle{fill:#93ff8f}.category-positive circle{fill:#70eaff}.category-negative circle{fill:#ff8b82}.category-polar circle{fill:#e6d8ff}",
     )
     with open(output, "w", encoding="utf-8") as handle:
         handle.write(html)

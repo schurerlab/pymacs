@@ -61,7 +61,7 @@ def test_interactive_html_includes_the_persistence_switches(tmp_path):
     )
 
     html = Path(output).read_text(encoding="utf-8")
-    assert 'data-threshold="0.95"' in html
+    assert 'data-threshold="0.70"' in html
     assert 'data-threshold="0.90" aria-pressed="true"' in html
     assert 'data-threshold="0.80"' in html
     assert "TYR10" in html
