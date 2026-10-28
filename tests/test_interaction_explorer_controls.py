@@ -41,6 +41,8 @@ def test_ligand_explorer_offers_full_persistence_range_without_suppression():
     assert "Double-click anywhere on the diagram to clear" in source
     assert "svg.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();select(null)})" in source
     assert "label_clearance = 0.0 if element == \"C\"" in source
+    assert '"atom_clearance": round(label_clearance, 2)' in source
+    assert "sourceX=atomX+toTargetX/toTargetLength*clearance" in source
 
 
 def test_dashboard_embed_allows_export_and_has_room_for_the_full_explorer():
