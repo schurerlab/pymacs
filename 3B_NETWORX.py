@@ -3185,7 +3185,16 @@ labelSize.addEventListener('input',event=>updateLabelSize(event.currentTarget.va
 document.getElementById('export-svg').onclick=()=>{const copy=svg.cloneNode(true);copy.setAttribute('xmlns','http://www.w3.org/2000/svg');copy.setAttribute('style','background:transparent');copy.querySelectorAll('.bond').forEach(el=>el.setAttribute('stroke','#111827'));copy.querySelectorAll('.edge-label').forEach(el=>{el.setAttribute('fill','#111827');el.setAttribute('stroke','#ffffff');el.setAttribute('stroke-width','3px')});copy.querySelectorAll('.residue-node text').forEach(el=>el.setAttribute('fill','#111827'));copy.insertAdjacentHTML('afterbegin','<style>.bond{stroke:#111827;stroke-width:3.4;stroke-linecap:round}.bond-secondary{stroke-width:2.5}.edge{fill:none;stroke-width:3.3;stroke-dasharray:8 6}.hbond{stroke:#ff4d6d}.hydrophobic{stroke:#29a845}.ionic{stroke:#8b4fd3}.water{stroke:#168cc8}.edge-label{font-family:Arial,sans-serif;font-weight:900;text-anchor:middle}.residue-node circle{stroke:#111827;stroke-width:2.2}.residue-node text{font-family:Arial,sans-serif;font-weight:900;text-anchor:middle}.atom{font-family:Arial,sans-serif;font-weight:900;text-anchor:middle}</style>');const blob=new Blob([`<?xml version="1.0" encoding="UTF-8"?>\n${copy.outerHTML}`],{type:'image/svg+xml'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='__LIGAND___interaction_view.svg';link.click();setTimeout(()=>URL.revokeObjectURL(url),500)};
 document.addEventListener('click',event=>{const button=event.target.closest('[data-threshold]');if(!button)return;const next=+button.dataset.threshold;if(next===active)return;if(layoutChanged&&!window.confirm('Changing the retained threshold resets your node arrangement. Continue?'))return;active=next;resetLayout();document.querySelectorAll('[data-threshold]').forEach(item=>item.setAttribute('aria-pressed',String(item===button)));render()});bindNodes();render();
 </script>'''.replace("__DATA__", data_json).replace("__DEFAULT__", f"{default_threshold:.2f}").replace("__MAX__", f"{max_occupancy * 100:.1f}").replace("__LIGAND__", escape(ligand))
-    html = re.sub(r"<script>const EDGES=.*?</script>", interactive_script, html, count=1, flags=re.DOTALL)
+    # EMPTY_MESSAGE is injected before the legacy script's EDGES declaration
+    # above.  Match both forms so the interactive replacement cannot silently
+    # leave that legacy, static script in the generated explorer.
+    html = re.sub(
+        r"<script>(?:const EMPTY_MESSAGE=.*?;)?const EDGES=.*?</script>",
+        interactive_script,
+        html,
+        count=1,
+        flags=re.DOTALL,
+    )
     with open(output, "w", encoding="utf-8") as handle:
         handle.write(html)
     print(f"  ✓ Interactive NETWORX explorer saved → {output}")
