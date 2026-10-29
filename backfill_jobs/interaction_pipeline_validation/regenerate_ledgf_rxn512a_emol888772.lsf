@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#BSUB -J dash_ledgf_888772
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 02:00
+#BSUB -n 2
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/triton/home/jxs794/Pymacs/backfill_staging/targeted_20261029_ledgf_888772/dashboard_repair.%J.out
+#BSUB -eo /projectnb/triton/home/jxs794/Pymacs/backfill_staging/targeted_20261029_ledgf_888772/dashboard_repair.%J.err
+
+# The archived source is read-only.  This copies only analysis inputs and
+# coordinate/ligand files into a Triton-owned staging area; it never reruns MD.
+set -eo pipefail
+SOURCE=/projectnb/cheminfo/home/jxs794/MD-Backups/KYLE_MD_JOBS/LEDGF_9g94/rxn512a____EMOL56771003____EMOL37531308____EMOL888772
+STAGE=/projectnb/triton/home/jxs794/Pymacs/backfill_staging/targeted_20261029_ledgf_888772
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+cp -a "$SOURCE/Analysis_Results" "$STAGE/"
+find "$SOURCE" -maxdepth 1 -type f \( -name '*.cgenff.mol2' -o -name '*.mol2' -o -name '*.pdb' -o -name '*.gro' -o -name 'atomIndex*.txt' \) -exec cp -a {} "$STAGE/" \;
+
+source /etc/bashrc
+set -u
+module purge
+module load gcc-runtime/13.4.0-none-none-gh6rpjx
+module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export OMP_NUM_THREADS=2
+
+cd "$STAGE"
+python /projectnb/triton/home/jxs794/Pymacs/3B_NETWORX.py --ligand UNK --filter 0.10 --output UNK --mode ligand
+python /projectnb/triton/home/jxs794/Pymacs/5_PyMACS_Result_Dashboard.py --root .
+test -s Analysis_Results/NETWORX/UNK_interactive.html
+grep -q 'Binding scorecard' Analysis_Results/PyMACS_Result_Dashboard.html
