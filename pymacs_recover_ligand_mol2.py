@@ -75,7 +75,10 @@ def make_mol2(extracted_pdb: Path, mol2_path: Path, ligand_code: str) -> None:
     if not obabel:
         raise RuntimeError("Open Babel (obabel) is required to create the recovery MOL2.")
     completed = subprocess.run(
-        [obabel, "-ipdb", str(extracted_pdb), "-omol2", "-O", str(mol2_path), "--title", ligand_code],
+        # CGenFF expects a chemically complete small molecule.  Open Babel
+        # preserves the heavy-atom coordinates/names from the extracted PDB
+        # and adds only the missing hydrogens.
+        [obabel, "-ipdb", str(extracted_pdb), "-omol2", "-O", str(mol2_path), "-h", "--title", ligand_code],
         text=True, capture_output=True, check=False, timeout=120,
     )
     if completed.returncode or not mol2_path.is_file() or not mol2_path.stat().st_size:
@@ -91,7 +94,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ligand-code", help="Three/four-character HETATM residue name. Defaults to largest non-solvent HETATM residue.")
     parser.add_argument("--pdb", type=Path, help="Override Final_Trajectory.pdb path.")
     parser.add_argument("--parameterize", action="store_true", help="Also request a matching CGenFF .str from the Kyle Funnel.")
-    parser.add_argument("--funnel-url", default="https://kyle.rove-vernier.ts.net/cgenff", help="Kyle CGenFF Funnel base URL.")
+    parser.add_argument(
+        "--funnel-url", default="http://127.0.0.1:8787",
+        help="Kyle CGenFF Funnel base URL (the loopback service when this runs on Kyle).",
+    )
     parser.add_argument("--token-file", type=Path, default=Path("~/.config/pymacs/cgenff-funnel.token").expanduser())
     return parser.parse_args()
 
