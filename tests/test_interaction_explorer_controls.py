@@ -73,6 +73,15 @@ def test_dashboard_embed_allows_export_and_has_room_for_the_full_explorer():
     assert '"Residue contact fingerprint"' in source
 
 
+def test_ligand_dashboard_never_silently_hides_a_missing_explorer_artifact():
+    source = (ROOT / "5_PyMACS_Result_Dashboard.py").read_text(encoding="utf-8")
+    assert "def interactive_networx_html(analysis: Path, *, ligand_expected: bool = False)" in source
+    assert "Interaction explorer pending" in source
+    assert "Atom-level interaction events are available" in source
+    assert "analysis-only 3B NETWORX stage" in source
+    assert "ligand_expected=has_ligand_evidence" in source
+
+
 def test_legacy_ligand_evidence_is_not_hidden_by_missing_metadata():
     source = (ROOT / "5_PyMACS_Result_Dashboard.py").read_text(encoding="utf-8")
     assert "has_ligand_evidence" in source

@@ -680,11 +680,31 @@ def ligand_html(root: Path, ligand_name: str) -> str:
     return f'''<section class="ligand-card"><div class="eyebrow">Ligand identity</div><h2>{escape(ligand_name)}</h2><p class="muted">2D chemical identity and the parameterized 3D geometry used for this run.</p><div class="ligand-grid"><div class="ligand-2d">{two_d}</div><div><div class="viewer-label">3D ligand · drag to rotate · scroll to zoom</div>{viewer}{identifier}</div></div><p class="asset-note">Source: {source_label}</p></section>'''
 
 
-def interactive_networx_html(analysis: Path) -> str:
-    """Embed the explorer source directly; never navigate to an attachment."""
+def interactive_networx_html(analysis: Path, *, ligand_expected: bool = False) -> str:
+    """Embed the explorer source directly; never navigate to an attachment.
+
+    A ligand dossier must never silently look complete when its atom-resolved
+    explorer artifact has not yet been produced.  The status panel keeps that
+    distinction visible during recovery/backfill without fabricating a graph.
+    """
     explorers = sorted((analysis / "NETWORX").glob("*_interactive.html"))
     if not explorers:
-        return ""
+        if not ligand_expected:
+            return ""
+        events = analysis / "InteractionTypes_Framewise.csv"
+        if events.is_file() and events.stat().st_size:
+            detail = (
+                "Atom-level interaction events are available, but the interactive "
+                "NETWORX artifact has not been generated or published yet. Run the "
+                "analysis-only 3B NETWORX stage, then regenerate this dashboard."
+            )
+        else:
+            detail = (
+                "This run has no atom-level interaction-event table. Regenerate the "
+                "completed-trajectory interaction analysis (3A) before running the "
+                "analysis-only 3B NETWORX stage."
+            )
+        return f'''<section class="gallery-section explorer-pending"><div class="section-head"><div><div class="eyebrow">Persistent interaction explorer</div><h2>Interaction explorer pending</h2><p>{detail}</p></div></div></section>'''
     explorer = explorers[0]
     try:
         document = explorer.read_text(encoding="utf-8")
@@ -2058,7 +2078,7 @@ def main() -> None:
     overview = section_html(overview_title, "Start here", overview_text, groups["overview"])
     # Interface-only systems should never acquire a misleading empty ligand card.
     ligand_panel = ligand_html(root, ligand_name) if context.partner_kind == "ligand" else ""
-    network_explorer = interactive_networx_html(analysis)
+    network_explorer = interactive_networx_html(analysis, ligand_expected=has_ligand_evidence)
     interface_evidence = interface_evidence_html(analysis, context, interface_rin)
     structure_panel = final_structure_html(root, context)
     stability = section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"])
