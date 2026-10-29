@@ -36,7 +36,7 @@ def render(entry: dict[str, str], stage_root: str) -> str:
 #BSUB -eo {stage_root}/logs/{name}.%J.err
 
 # Analysis-only recovery: no MD is started and SOURCE is never modified.
-set -euo pipefail
+set -eo pipefail
 SOURCE={entry["source"]!r}
 STAGE={stage!r}
 test -d "$SOURCE"
