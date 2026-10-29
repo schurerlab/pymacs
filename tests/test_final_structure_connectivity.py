@@ -33,6 +33,7 @@ def test_rebuilds_cgenff_mol2_with_final_pdb_coordinates(tmp_path):
         "@<TRIPOS>ATOM\n"
         "1 C01 1.0 2.0 3.0 C.3 1 LIG 0.0\n"
         "2 N02 2.0 3.0 4.0 N.3 1 LIG 0.0\n"
+        "\n"
         "@<TRIPOS>BOND\n1 1 2 1\n",
         encoding="utf-8",
     )

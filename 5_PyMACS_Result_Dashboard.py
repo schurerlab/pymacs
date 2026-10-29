@@ -401,6 +401,8 @@ def mol2_with_final_pdb_coordinates(
     atom_records: list[tuple[int, list[str]]] = []
     for index in range(atom_start, bond_start):
         fields = mol2_lines[index].split()
+        if not fields:
+            continue
         if len(fields) < 6:
             return None, ""
         atom_records.append((index, fields))
