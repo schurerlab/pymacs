@@ -84,6 +84,9 @@ def test_legacy_ligand_evidence_is_not_hidden_by_missing_metadata():
     assert "Why the two interaction occupancies can differ" in source
     assert "Reuse the resolved edge records published by 3B's interaction explorer" in source
     assert 'const EDGES=(\\[.*?\\]);\\s*const ' in source
+    assert "def interaction_explorer_summary" in source
+    assert 'Strongest observed edge:\\s*([0-9.]+)%' in source
+    assert "no exact residue–atom/type pair reaches the 10% explorer threshold" in source
 
 
 def test_interface_explorer_keeps_chain_chemistry_modes_mutually_exclusive():

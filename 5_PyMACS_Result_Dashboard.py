@@ -1229,6 +1229,34 @@ def _event_contact_sets(events_file: Path) -> tuple[pd.DataFrame, dict[float, se
     return table, states
 
 
+def interaction_explorer_summary(analysis: Path) -> tuple[list[dict], float | None]:
+    """Return published typed edges and the strongest observed typed occupancy.
+
+    The interactive explorer intentionally serializes only edges that reach its
+    lowest display threshold (10%).  Its empty-state message retains the
+    strongest *observed* edge below that threshold, which is essential context
+    for a scorecard: a geometric contact can be persistent while no individual
+    residue--atom--chemistry assignment is persistent enough to display.
+    """
+    explorer = next(iter(sorted((analysis / "NETWORX").glob("*_interactive.html"))), None)
+    if not explorer or not explorer.is_file():
+        return [], None
+    try:
+        source = explorer.read_text(encoding="utf-8")
+        match = re.search(r"const EDGES=(\[.*?\]);\s*const ", source, flags=re.DOTALL)
+        edges = json.loads(match.group(1)) if match else []
+        values = [float(edge.get("fraction", 0.0)) for edge in edges]
+        maximum = max(values, default=0.0)
+        # This literal is injected by 3B for sparse systems.  It is the
+        # occupancy before 3B applies the 10% explorer display threshold.
+        sparse = re.search(r"Strongest observed edge:\s*([0-9.]+)%", source)
+        if sparse:
+            maximum = max(maximum, float(sparse.group(1)) / 100.0)
+        return edges, maximum
+    except (OSError, ValueError, AttributeError):
+        return [], None
+
+
 def ligand_scorecard_html(analysis: Path, protein_name: str) -> str:
     """A plain-language binding summary derived only from published analyses."""
     metrics: list[tuple[str, str, str]] = []
@@ -1257,21 +1285,13 @@ def ligand_scorecard_html(analysis: Path, protein_name: str) -> str:
     # They already apply its hydrogen/virtual-site remapping and exclude
     # unresolved atom labels, so this value must exactly match the largest
     # percentage a reader can see in the explorer.
-    explorer = next(iter(sorted((analysis / "NETWORX").glob("*_interactive.html"))), None)
-    if explorer and explorer.is_file():
-        try:
-            # The explorer serializes its data immediately before a new JS
-            # declaration.  Its formatter may insert a newline there, so do
-            # not make the dashboard's scientific summary depend on a
-            # particular whitespace style in the generated HTML.
-            match = re.search(r"const EDGES=(\[.*?\]);\s*const ", explorer.read_text(encoding="utf-8"), flags=re.DOTALL)
-            resolved_edges = json.loads(match.group(1)) if match else []
-        except (OSError, ValueError, AttributeError):
-            resolved_edges = []
-        if resolved_edges:
-            strongest = max(resolved_edges, key=lambda edge: float(edge.get("fraction", 0.0)))
-            occupancy = 100.0 * float(strongest.get("fraction", 0.0))
-            metrics.append(("Strongest typed interaction", str(strongest.get("residue", "—")), f"{occupancy:.1f}% {str(strongest.get('type', 'typed interaction')).lower()} · ligand atom {str(strongest.get('atom', '—'))}"))
+    resolved_edges, strongest_typed = interaction_explorer_summary(analysis)
+    if resolved_edges:
+        strongest = max(resolved_edges, key=lambda edge: float(edge.get("fraction", 0.0)))
+        occupancy = 100.0 * float(strongest.get("fraction", 0.0))
+        metrics.append(("Strongest typed interaction", str(strongest.get("residue", "—")), f"{occupancy:.1f}% {str(strongest.get('type', 'typed interaction')).lower()} · ligand atom {str(strongest.get('atom', '—'))}"))
+    elif strongest_typed is not None:
+        metrics.append(("Strongest typed interaction", f"{strongest_typed * 100:.1f}%", "no exact residue–atom/type pair reaches the 10% explorer threshold"))
     all_contacts = analysis / "AllContacts_Framewise.csv"
     table = _read_table(all_contacts)
     if table is not None and "Distance" in table:
@@ -1290,7 +1310,7 @@ def ligand_scorecard_html(analysis: Path, protein_name: str) -> str:
         f'<div class="ligand-score"><strong>{escape(label)}</strong><b>{escape(value)}</b><span>{escape(detail)}</span></div>'
         for label, value, detail in metrics[:7]
     )
-    return f'''<style>.ligand-scorecard{{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}}.ligand-score{{border:1px solid #27476a;border-radius:14px;padding:13px;background:linear-gradient(145deg,#0d1b2c,#080c14)}}.ligand-score strong{{display:block;color:#7aa6d9;font-size:.74rem;letter-spacing:.06em;text-transform:uppercase}}.ligand-score b{{display:block;color:#35d0ff;font-size:1.45rem;margin:5px 0;line-height:1.1}}.ligand-score span{{display:block;color:#c0d1e5;font-size:.8rem;line-height:1.35}}.scorecard-info{{grid-column:1/-1;border:1px solid rgba(53,208,255,.28);border-radius:11px;background:#091424;color:#b9cce3;padding:0 10px;font-size:.82rem;line-height:1.45}}.scorecard-info summary{{cursor:pointer;color:#35d0ff;font-weight:800;padding:9px 0;list-style:none}}.scorecard-info summary::-webkit-details-marker{{display:none}}.scorecard-info p{{margin:0 0 10px}}</style><section class="ligand-scorecard"><div style="grid-column:1/-1"><div class="eyebrow">Binding scorecard</div><p style="margin:.2rem 0 .8rem">A first-pass summary for {escape(protein_name)}. These are descriptive trajectory metrics, not affinity estimates.</p></div>{cards}<details class="scorecard-info"><summary>ⓘ Why the two interaction occupancies can differ</summary><p><b>Geometric-contact occupancy</b> means a residue is within the contact-distance cutoff of any ligand atom. <b>Typed interaction occupancy</b> is stricter: the same residue–ligand-atom pair must be classified as the same hydrogen-bond, ionic, hydrophobic, or water-bridge interaction in that sampled frame. A residue can therefore be continuously proximal without being the strongest typed interaction. The typed-interaction card is taken from the same resolved interaction records displayed in the explorer below.</p></details></section>'''
+    return f'''<style>.ligand-scorecard{{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}}.ligand-score{{border:1px solid #27476a;border-radius:14px;padding:13px;background:linear-gradient(145deg,#0d1b2c,#080c14)}}.ligand-score strong{{display:block;color:#7aa6d9;font-size:.74rem;letter-spacing:.06em;text-transform:uppercase}}.ligand-score b{{display:block;color:#35d0ff;font-size:1.45rem;margin:5px 0;line-height:1.1}}.ligand-score span{{display:block;color:#c0d1e5;font-size:.8rem;line-height:1.35}}.scorecard-info{{grid-column:1/-1;border:1px solid rgba(53,208,255,.28);border-radius:11px;background:#091424;color:#b9cce3;padding:0 10px;font-size:.82rem;line-height:1.45}}.scorecard-info summary{{cursor:pointer;color:#35d0ff;font-weight:800;padding:9px 0;list-style:none}}.scorecard-info summary::-webkit-details-marker{{display:none}}.scorecard-info p{{margin:0 0 10px}}</style><section class="ligand-scorecard"><div style="grid-column:1/-1"><div class="eyebrow">Binding scorecard</div><p style="margin:.2rem 0 .8rem">A first-pass summary for {escape(protein_name)}. These are descriptive trajectory metrics, not affinity estimates.</p></div>{cards}<details class="scorecard-info"><summary>ⓘ Why the two interaction occupancies can differ</summary><p><b>Geometric-contact occupancy</b> means a residue is within the contact-distance cutoff of any ligand atom. <b>Typed interaction occupancy</b> is stricter: the same residue–ligand-atom pair must be classified as the same hydrogen-bond, ionic, hydrophobic, or water-bridge interaction in that sampled frame. A residue can therefore be continuously proximal without any one typed pair reaching the explorer's 10% display threshold. The typed-interaction card is taken from the same resolved interaction records displayed in the explorer below.</p></details></section>'''
 
 
 def contact_state_timeline_plot(events_file: Path) -> str | None:
