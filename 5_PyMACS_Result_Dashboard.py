@@ -132,6 +132,21 @@ def legacy_receptor_label(root: Path) -> str:
         match = re.fullmatch(r"([A-Za-z][A-Za-z0-9-]{1,30})_[0-9][A-Za-z0-9]{3}", candidate)
         if match:
             return f"{match.group(1)} (protein)"
+    # A final coordinate PDB still retains the real receptor chain even when
+    # its project-level name was lost during an older import.  “Receptor
+    # (chain A)” is deliberately an honest label: it is more useful than a
+    # bare “Protein”, without inventing a target name that the source cannot
+    # support.
+    for pdb_name in ("Final_Trajectory.pdb", "binding_pocket_only.pdb"):
+        try:
+            with (root / pdb_name).open(encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith(("ATOM  ", "HETATM")):
+                        chain = line[21:22].strip()
+                        if chain:
+                            return f"Receptor (chain {chain})"
+        except OSError:
+            continue
     return ""
 
 

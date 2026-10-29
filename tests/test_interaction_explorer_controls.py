@@ -102,6 +102,7 @@ def test_legacy_ligand_receptor_name_uses_historical_source_before_generic_prote
     assert "def legacy_receptor_label" in source
     assert 'run.get("historical_source")' in source
     assert 're.fullmatch(r"([A-Za-z][A-Za-z0-9-]{1,30})_[0-9][A-Za-z0-9]{3}"' in source
+    assert 'return f"Receptor (chain {chain})"' in source
     assert "or legacy_receptor_label(root)" in source
 
 
