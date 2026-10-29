@@ -664,21 +664,26 @@ def final_structure_html(root: Path, context: PartnerContext) -> str:
         payload = base64.b64encode(structure.read_bytes()).decode("ascii")
     except OSError:
         return ""
-    ligand = "".join(ch for ch in context.partner_label if ch.isalnum())[:4] if context.partner_kind == "ligand" else ""
+    metadata_ligand = "".join(ch for ch in context.partner_label if ch.isalnum())[:4] if context.partner_kind == "ligand" else ""
+    ligand = metadata_ligand
     final_ligand_payload = ""
     pdb_ligand_resname = ligand
-    if context.partner_kind == "ligand":
+    # A number of older dossiers do not preserve the ligand classification in
+    # their run metadata.  A CGenFF MOL2 plus a strict final-PDB atom-name match
+    # is stronger evidence than that missing label, so it is a safe fallback.
+    cgenff_mol2, _ = ligand_inputs(root, metadata_ligand)
+    if cgenff_mol2:
         # Keep the final MD pose from the PDB while recovering the explicit
         # CGenFF bond graph.  If the metadata only says "Ligand", the strict
         # atom-name match below finds the actual 3-letter PDB residue (LIG is
         # the common fallback) without guessing a chemical identity.
-        cgenff_mol2, _ = ligand_inputs(root, ligand)
-        final_ligand, matched_resname = mol2_with_final_pdb_coordinates(structure, cgenff_mol2, ligand)
+        final_ligand, matched_resname = mol2_with_final_pdb_coordinates(structure, cgenff_mol2, metadata_ligand)
         if final_ligand:
             final_ligand_payload = base64.b64encode(final_ligand.encode("utf-8")).decode("ascii")
             pdb_ligand_resname = matched_resname
+            ligand = matched_resname
     chain_buttons = "".join(f'<button type="button" data-structure-view="chain" data-chain-id="{escape(chain_id)}">Chain {escape(chain_id)}</button>' for chain_id in context.partner_chain_ids)
-    if context.partner_kind == "ligand":
+    if context.partner_kind == "ligand" or final_ligand_payload:
         focused_button = '<button type="button" data-structure-view="pocket">Ligand + pocket</button>'
     elif context.partner_kind == "peptide":
         focused_button = '<button type="button" data-structure-view="partner">Peptide</button><button type="button" data-structure-view="interface">Peptide interface</button>'

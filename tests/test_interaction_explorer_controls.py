@@ -57,6 +57,8 @@ def test_dashboard_embed_allows_export_and_has_room_for_the_full_explorer():
     assert "viewer.zoomTo()}}if(mode==='chain'" in source
     assert "data-final-ligand-b64" in source
     assert "mol2_with_final_pdb_coordinates" in source
+    assert "metadata_ligand" in source
+    assert "or final_ligand_payload" in source
 
 
 def test_interface_explorer_keeps_chain_chemistry_modes_mutually_exclusive():
