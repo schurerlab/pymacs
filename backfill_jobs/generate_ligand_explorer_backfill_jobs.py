@@ -32,8 +32,8 @@ def render(entry: dict[str, str], stage_root: str) -> str:
 #BSUB -W 02:00
 #BSUB -n 2
 #BSUB -R "span[hosts=1]"
-#BSUB -oo {stage}/backfill.%J.out
-#BSUB -eo {stage}/backfill.%J.err
+#BSUB -oo {stage_root}/logs/{name}.%J.out
+#BSUB -eo {stage_root}/logs/{name}.%J.err
 
 # Analysis-only recovery: no MD is started and SOURCE is never modified.
 set -euo pipefail
