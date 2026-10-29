@@ -29,6 +29,7 @@ Assumptions:
 import os
 import math
 import argparse
+import sys
 import matplotlib
 import numpy as np
 import pandas as pd
@@ -595,12 +596,19 @@ def ask_if_missing(args):
             args.ligand = input("Ligand resname (e.g., A1D): ").strip()
 
     if args.minfrac is None:
-        v = input("Minimum contact fraction [default 0.10]: ").strip()
-        if v:
-            v = v.replace(",", ".")
-            args.minfrac = float(v)
-        else:
+        # Batch/backfill jobs must never block on stdin.  Preserve the
+        # interactive prompt for a terminal session while using the documented
+        # default for noninteractive execution.
+        if not sys.stdin.isatty():
             args.minfrac = 0.10
+            print("📌 Noninteractive run: using default minimum contact fraction 0.10")
+        else:
+            v = input("Minimum contact fraction [default 0.10]: ").strip()
+            if v:
+                v = v.replace(",", ".")
+                args.minfrac = float(v)
+            else:
+                args.minfrac = 0.10
 
     # Keep output unset so we do not create a per-run subdirectory.
     if not args.output:
