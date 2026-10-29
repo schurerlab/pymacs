@@ -1253,22 +1253,21 @@ def ligand_scorecard_html(analysis: Path, protein_name: str) -> str:
                 leader = table.loc[values.idxmax(), "Residue"]
                 metrics.append(("Most continuously proximal", f"{leader}", f"{values.max():.1f}% geometric-contact occupancy"))
                 metrics.append(("Persistent proximal residues", str(int((values >= 50).sum())), "at least 50% geometric-contact occupancy"))
-    interaction_file = analysis / "InteractionTypes_Framewise.csv"
-    interaction_table = _read_table(interaction_file)
-    if interaction_table is not None and {"Time_ns", "Residue", "Type", "LigAtomName"}.issubset(interaction_table.columns):
-        typed = interaction_table.loc[:, ["Time_ns", "Residue", "Type", "LigAtomName"]].dropna().copy()
-        typed["Time_ns"] = pd.to_numeric(typed["Time_ns"], errors="coerce")
-        typed = typed.dropna(subset=["Time_ns"])
-        frame_count = typed["Time_ns"].nunique()
-        if frame_count:
-            # This intentionally matches the persistence explorer: a typed,
-            # residue--ligand-atom interaction is counted at most once per
-            # sampled frame, rather than inheriting residue-level proximity.
-            edges = (typed.groupby(["Residue", "LigAtomName", "Type"], as_index=False)["Time_ns"]
-                       .nunique().rename(columns={"Time_ns": "Frames"}))
-            strongest = edges.sort_values(["Frames", "Residue", "LigAtomName"], ascending=[False, True, True]).iloc[0]
-            occupancy = 100.0 * float(strongest["Frames"]) / float(frame_count)
-            metrics.append(("Strongest typed interaction", str(strongest["Residue"]), f"{occupancy:.1f}% {str(strongest['Type']).lower()} · ligand atom {str(strongest['LigAtomName'])}"))
+    # Reuse the resolved edge records published by 3B's interaction explorer.
+    # They already apply its hydrogen/virtual-site remapping and exclude
+    # unresolved atom labels, so this value must exactly match the largest
+    # percentage a reader can see in the explorer.
+    explorer = next(iter(sorted((analysis / "NETWORX").glob("*_interactive.html"))), None)
+    if explorer and explorer.is_file():
+        try:
+            match = re.search(r"const EDGES=(\[.*?\]);const ", explorer.read_text(encoding="utf-8"), flags=re.DOTALL)
+            resolved_edges = json.loads(match.group(1)) if match else []
+        except (OSError, ValueError, AttributeError):
+            resolved_edges = []
+        if resolved_edges:
+            strongest = max(resolved_edges, key=lambda edge: float(edge.get("fraction", 0.0)))
+            occupancy = 100.0 * float(strongest.get("fraction", 0.0))
+            metrics.append(("Strongest typed interaction", str(strongest.get("residue", "—")), f"{occupancy:.1f}% {str(strongest.get('type', 'typed interaction')).lower()} · ligand atom {str(strongest.get('atom', '—'))}"))
     all_contacts = analysis / "AllContacts_Framewise.csv"
     table = _read_table(all_contacts)
     if table is not None and "Distance" in table:
