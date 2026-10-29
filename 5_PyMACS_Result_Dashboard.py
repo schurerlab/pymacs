@@ -110,6 +110,31 @@ def component_display_labels(root: Path, context: PartnerContext) -> list[str]:
     return labels
 
 
+def legacy_receptor_label(root: Path) -> str:
+    """Recover a receptor name for a legacy ligand run without atomIndex.
+
+    Some imported runs retained a trustworthy historical-source path but lost
+    their atomIndex and chain map.  The immediate parent of the system in that
+    path is normally the receptor/PDB directory (for example ``LEDGF_9g94``).
+    Use only that narrowly structured name; generic cache folders such as
+    ``historical`` and ``Rank3`` must never become a scientific label.
+    """
+    candidates: list[str] = []
+    try:
+        run = json.loads((root / "pymacs_run.json").read_text(encoding="utf-8"))
+        historical_source = str(run.get("historical_source") or "").strip()
+        if historical_source:
+            candidates.append(Path(historical_source).parent.name)
+    except (OSError, ValueError, TypeError):
+        pass
+    candidates.extend(parent.name for parent in list(root.parents)[:6])
+    for candidate in candidates:
+        match = re.fullmatch(r"([A-Za-z][A-Za-z0-9-]{1,30})_[0-9][A-Za-z0-9]{3}", candidate)
+        if match:
+            return f"{match.group(1)} (protein)"
+    return ""
+
+
 def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict,
                     simulation: dict | None = None) -> PartnerContext:
     """Infer the report partner from authoritative run/interface metadata, not filenames alone."""
@@ -1804,7 +1829,12 @@ def main() -> None:
         chain, separator, label = entry.strip().partition(":")
         if chain and separator and label:
             chain_labels.append(label.strip())
-    protein_name = " / ".join(component_display_labels(root, context)) or " / ".join(chain_labels) or "Protein"
+    protein_name = (
+        " / ".join(component_display_labels(root, context))
+        or " / ".join(chain_labels)
+        or legacy_receptor_label(root)
+        or "Protein"
+    )
     # Full-complex RMSD is meaningful for multiple macromolecular chains or
     # a PROTAC assembly.  A small-molecule ligand is not an extra protein
     # chain, so a one-chain ligand–protein job must not show this card.
