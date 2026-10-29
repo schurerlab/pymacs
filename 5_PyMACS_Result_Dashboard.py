@@ -1696,6 +1696,19 @@ def main() -> None:
     # chain, so a one-chain ligand–protein job must not show this card.
     is_multichain_system = context.partner_kind == "protein_chain" or len(chain_labels) > 1 or str(setup.get("mode") or "").casefold() == "protac"
     csv_files = sorted(path for path in analysis.rglob("*.csv") if path.is_file())
+    # Older published runs occasionally lack ligand metadata even though 3B/3C
+    # produced the complete small-molecule evidence bundle.  Treat that bundle
+    # as authoritative for presentation so a legacy record cannot hide its
+    # ligand-specific analyses behind an "apo/protein" label.
+    has_ligand_evidence = context.partner_kind == "ligand" or any((
+        (analysis / "InteractionTypes_Framewise.csv").is_file(),
+        (analysis / "FilteredContacts_Framewise.csv").is_file(),
+        (analysis / "AllContacts_Framewise.csv").is_file(),
+        (analysis / "LIG_Complex_RMSD_Overlay.csv").is_file(),
+        (analysis / "Radius_of_Gyration_Protein_Ligand_Complex.csv").is_file(),
+        any(analysis.glob("*_Ligand_RMSD.csv")),
+        any(analysis.glob("*_contact_frequency_filtered.csv")),
+    ))
     # Every card below is explicitly mapped to a scientific table.  Never
     # revive the legacy arbitrary-column fallback for raw analysis tables.
     gallery_csvs: set[Path] = set()
@@ -1732,7 +1745,7 @@ def main() -> None:
             ))
     # Ligand reports start with a compact decision aid, then retain every
     # underlying raw CSV as a download from its dedicated visual card.
-    if context.partner_kind == "ligand":
+    if has_ligand_evidence:
         scorecard = ligand_scorecard_html(analysis, protein_name)
         if scorecard:
             source = analysis / "Protein_RMSD.csv"
@@ -1774,7 +1787,7 @@ def main() -> None:
         add("stability", multiseries_plot(peptide_rmsd, f"{context.partner_label} peptide RMSD", "Time_ps", ["RMSD_A"], "RMSD (Å)", colors=[ORANGE]), "Peptide RMSD", peptide_rmsd,
             note="Peptide coordinates are aligned on the peptide selection. Interpret this with the interface persistence panel rather than as a binding affinity measure.")
 
-    if context.partner_kind == "ligand":
+    if has_ligand_evidence:
         overlay_source = next(iter(sorted(analysis.glob("*_Complex_RMSD_Overlay.csv"))), None)
         rg_source = analysis / "Radius_of_Gyration_Protein_Ligand_Complex.csv"
         if overlay_source:
@@ -1796,7 +1809,7 @@ def main() -> None:
             note="Higher values locate mobile peptide residues; compare contacting positions with the interface-node map.")
 
     frequency_for_ligand = next(iter(sorted(analysis.glob("*_contact_frequency_filtered.csv"))), None)
-    if context.partner_kind == "ligand" and frequency_for_ligand:
+    if has_ligand_evidence and frequency_for_ligand:
         rmsf_residue = next(iter(sorted(analysis.glob("RMSF_*_per_residue.csv"))), None)
         if rmsf_residue:
             add("flexibility", rmsf_persistence_scatter_plot(rmsf_residue, frequency_for_ligand, interaction_file if interaction_file.is_file() else None), "Residue flexibility versus ligand-contact persistence", frequency_for_ligand, note="Stable anchors tend toward high contact occupancy with lower residue RMSF; this is descriptive, not an affinity score.")
@@ -1815,7 +1828,7 @@ def main() -> None:
     persistence_graph = contact_persistence_plot(filtered, all_contacts, interaction_file if interaction_file.is_file() else None, protein_name) if filtered.is_file() and all_contacts.is_file() else None
     if persistence_graph: add("contacts", persistence_graph, "Ligand-contact persistence", filtered, note="Persistence is recomputed from sampled frames (0–1) using the original residue labels. A bar color now means the most frequently observed classified chemistry for that residue: H-bond blue, ionic pink, hydrophobic orange.")
     if filtered.is_file(): add("contacts", contact_events_plot(filtered, "Specific ligand contact events"), "Specific ligand contact events", filtered, note="Hover a marker for the contacting ligand atom, protein atom, distance, residue, and time.")
-    if context.partner_kind == "ligand" and filtered.is_file():
+    if has_ligand_evidence and filtered.is_file():
         add("overview", contact_state_timeline_plot(filtered), "Ligand contact-state timeline", filtered, note="The line counts unique contacting residues at each sampled time. Low, moderate, and high states are relative to this trajectory's observed range.")
         add("contacts", contact_lifetime_plot(filtered), "Ligand-contact uninterrupted lifetimes", filtered, note="Consecutive observed frames are grouped into uninterrupted contact episodes at the sampled-frame resolution.")
         add("contacts", contact_turnover_plot(filtered), "Ligand-contact turnover", filtered, note="Shows active, newly gained, and lost contacting residues per sampled frame.")
@@ -1834,7 +1847,7 @@ def main() -> None:
             figure = go.Figure(go.Bar(x=counts["Type"], y=counts["Events"], marker_color=[CYAN, MAGENTA, ORANGE][:len(counts)], hovertemplate="Interaction type=%{x}<br>Observed events=%{y}<extra></extra>"))
             figure.update_layout(title="Interaction-type distribution", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=380, xaxis={"title": "Interaction type", "gridcolor": GRID}, yaxis={"title": "Observed events", "gridcolor": GRID})
             add("chemistry", plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False}), "Interaction-type distribution", interaction_file)
-        if context.partner_kind == "ligand":
+        if has_ligand_evidence:
             add("chemistry", chemistry_composition_plot(interaction_file), "Interaction chemistry composition over time", interaction_file, note="Counts are binned event observations, so use the persistent interaction explorer for exact residue–atom occupancy.")
             add("chemistry", residue_chemistry_heatmap(interaction_file), "Residue × interaction chemistry occupancy", interaction_file, note="Each row is normalized within that residue's observed interaction events.")
 
@@ -1891,7 +1904,7 @@ def main() -> None:
     overview_title = "First look: interface and fold" if context.is_interface else "First look: fold and binding"
     overview_text = (
         "Read global structure and the first persistent chain interface before opening individual chain-pair views."
-        if context.is_interface else ("Read global structure and interaction chemistry before drawing conclusions about the ligand." if context.partner_kind == "ligand" else "Read protein stability, fold retention, and secondary structure together.")
+        if context.is_interface else ("Read global structure and interaction chemistry before drawing conclusions about the ligand." if has_ligand_evidence else "Read protein stability, fold retention, and secondary structure together.")
     )
     overview = section_html(overview_title, "Start here", overview_text, groups["overview"])
     # Interface-only systems should never acquire a misleading empty ligand card.

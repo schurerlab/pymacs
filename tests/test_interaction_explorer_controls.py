@@ -73,6 +73,13 @@ def test_dashboard_embed_allows_export_and_has_room_for_the_full_explorer():
     assert '"Residue contact fingerprint"' in source
 
 
+def test_legacy_ligand_evidence_is_not_hidden_by_missing_metadata():
+    source = (ROOT / "5_PyMACS_Result_Dashboard.py").read_text(encoding="utf-8")
+    assert "has_ligand_evidence" in source
+    assert "Older published runs occasionally lack ligand metadata" in source
+    assert 'any(analysis.glob("*_contact_frequency_filtered.csv"))' in source
+
+
 def test_interface_explorer_keeps_chain_chemistry_modes_mutually_exclusive():
     source = (ROOT / "3C_Interface_RIN.py").read_text(encoding="utf-8")
     assert "range(10 if has_peptide else 50, 100, 10)" in source
