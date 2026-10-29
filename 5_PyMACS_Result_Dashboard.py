@@ -1334,7 +1334,16 @@ def rmsf_persistence_scatter_plot(rmsf_file: Path, frequency_file: Path, interac
     rmsf, frequency = _read_table(rmsf_file), _read_table(frequency_file)
     if rmsf is None or frequency is None or not {"Residue", "RMSF_Å"}.issubset(rmsf.columns) or not {"Residue", "PercentFrames"}.issubset(frequency.columns):
         return None
-    merged = rmsf[["Residue", "RMSF_Å"]].merge(frequency[["Residue", "PercentFrames"]], on="Residue", how="inner")
+    # RMSF files from older runs encode residue number only (e.g. ``54``),
+    # whereas contact tables use chemistry-aware labels (e.g. ``GLU54``).
+    # Join on the parsed residue index while preserving the informative contact
+    # label for plotting and hover text.
+    rmsf = rmsf[["Residue", "RMSF_Å"]].copy()
+    frequency = frequency[["Residue", "PercentFrames"]].copy()
+    rmsf["Residue_Index"] = pd.to_numeric(rmsf["Residue"].astype(str).str.extract(r"(\d+)", expand=False), errors="coerce")
+    frequency["Residue_Index"] = pd.to_numeric(frequency["Residue"].astype(str).str.extract(r"(\d+)", expand=False), errors="coerce")
+    frequency = frequency.dropna(subset=["Residue_Index"]).drop_duplicates("Residue_Index")
+    merged = rmsf.merge(frequency[["Residue_Index", "Residue", "PercentFrames"]], on="Residue_Index", how="inner", suffixes=("_RMSF", ""))
     for column in ("RMSF_Å", "PercentFrames"): merged[column] = pd.to_numeric(merged[column], errors="coerce")
     merged = merged.dropna()
     if merged.empty:
