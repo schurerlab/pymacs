@@ -1251,8 +1251,24 @@ def ligand_scorecard_html(analysis: Path, protein_name: str) -> str:
             values = pd.to_numeric(table["PercentFrames"], errors="coerce")
             if values.notna().any():
                 leader = table.loc[values.idxmax(), "Residue"]
-                metrics.append(("Strongest anchor", f"{leader}", f"{values.max():.1f}% contact occupancy"))
-                metrics.append(("Persistent residues", str(int((values >= 50).sum())), "at least 50% occupancy"))
+                metrics.append(("Most continuously proximal", f"{leader}", f"{values.max():.1f}% geometric-contact occupancy"))
+                metrics.append(("Persistent proximal residues", str(int((values >= 50).sum())), "at least 50% geometric-contact occupancy"))
+    interaction_file = analysis / "InteractionTypes_Framewise.csv"
+    interaction_table = _read_table(interaction_file)
+    if interaction_table is not None and {"Time_ns", "Residue", "Type", "LigAtomName"}.issubset(interaction_table.columns):
+        typed = interaction_table.loc[:, ["Time_ns", "Residue", "Type", "LigAtomName"]].dropna().copy()
+        typed["Time_ns"] = pd.to_numeric(typed["Time_ns"], errors="coerce")
+        typed = typed.dropna(subset=["Time_ns"])
+        frame_count = typed["Time_ns"].nunique()
+        if frame_count:
+            # This intentionally matches the persistence explorer: a typed,
+            # residue--ligand-atom interaction is counted at most once per
+            # sampled frame, rather than inheriting residue-level proximity.
+            edges = (typed.groupby(["Residue", "LigAtomName", "Type"], as_index=False)["Time_ns"]
+                       .nunique().rename(columns={"Time_ns": "Frames"}))
+            strongest = edges.sort_values(["Frames", "Residue", "LigAtomName"], ascending=[False, True, True]).iloc[0]
+            occupancy = 100.0 * float(strongest["Frames"]) / float(frame_count)
+            metrics.append(("Strongest typed interaction", str(strongest["Residue"]), f"{occupancy:.1f}% {str(strongest['Type']).lower()} · ligand atom {str(strongest['LigAtomName'])}"))
     all_contacts = analysis / "AllContacts_Framewise.csv"
     table = _read_table(all_contacts)
     if table is not None and "Distance" in table:
@@ -1269,9 +1285,9 @@ def ligand_scorecard_html(analysis: Path, protein_name: str) -> str:
         return ""
     cards = "".join(
         f'<div class="ligand-score"><strong>{escape(label)}</strong><b>{escape(value)}</b><span>{escape(detail)}</span></div>'
-        for label, value, detail in metrics[:6]
+        for label, value, detail in metrics[:7]
     )
-    return f'''<style>.ligand-scorecard{{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}}.ligand-score{{border:1px solid #27476a;border-radius:14px;padding:13px;background:linear-gradient(145deg,#0d1b2c,#080c14)}}.ligand-score strong{{display:block;color:#7aa6d9;font-size:.74rem;letter-spacing:.06em;text-transform:uppercase}}.ligand-score b{{display:block;color:#35d0ff;font-size:1.45rem;margin:5px 0;line-height:1.1}}.ligand-score span{{display:block;color:#c0d1e5;font-size:.8rem;line-height:1.35}}</style><section class="ligand-scorecard"><div style="grid-column:1/-1"><div class="eyebrow">Binding scorecard</div><p style="margin:.2rem 0 .8rem">A first-pass summary for {escape(protein_name)}. These are descriptive trajectory metrics, not affinity estimates.</p></div>{cards}</section>'''
+    return f'''<style>.ligand-scorecard{{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}}.ligand-score{{border:1px solid #27476a;border-radius:14px;padding:13px;background:linear-gradient(145deg,#0d1b2c,#080c14)}}.ligand-score strong{{display:block;color:#7aa6d9;font-size:.74rem;letter-spacing:.06em;text-transform:uppercase}}.ligand-score b{{display:block;color:#35d0ff;font-size:1.45rem;margin:5px 0;line-height:1.1}}.ligand-score span{{display:block;color:#c0d1e5;font-size:.8rem;line-height:1.35}}.scorecard-info{{grid-column:1/-1;border:1px solid rgba(53,208,255,.28);border-radius:11px;background:#091424;color:#b9cce3;padding:0 10px;font-size:.82rem;line-height:1.45}}.scorecard-info summary{{cursor:pointer;color:#35d0ff;font-weight:800;padding:9px 0;list-style:none}}.scorecard-info summary::-webkit-details-marker{{display:none}}.scorecard-info p{{margin:0 0 10px}}</style><section class="ligand-scorecard"><div style="grid-column:1/-1"><div class="eyebrow">Binding scorecard</div><p style="margin:.2rem 0 .8rem">A first-pass summary for {escape(protein_name)}. These are descriptive trajectory metrics, not affinity estimates.</p></div>{cards}<details class="scorecard-info"><summary>ⓘ How to read proximity versus typed interactions</summary><p><b>Geometric-contact occupancy</b> means a residue is within the contact-distance cutoff of any ligand atom. <b>Typed interaction occupancy</b> is stricter: the same residue–ligand-atom pair must be classified as the same hydrogen-bond, ionic, hydrophobic, or water-bridge interaction in that sampled frame. A residue can therefore be continuously proximal without being the strongest typed interaction.</p></details></section>'''
 
 
 def contact_state_timeline_plot(events_file: Path) -> str | None:

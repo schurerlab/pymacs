@@ -79,6 +79,9 @@ def test_legacy_ligand_evidence_is_not_hidden_by_missing_metadata():
     assert "Older published runs occasionally lack ligand metadata" in source
     assert 'any(analysis.glob("*_contact_frequency_filtered.csv"))' in source
     assert 'str.extract(r"(\\d+)", expand=False)' in source
+    assert '"Most continuously proximal"' in source
+    assert '"Strongest typed interaction"' in source
+    assert "How to read proximity versus typed interactions" in source
 
 
 def test_interface_explorer_keeps_chain_chemistry_modes_mutually_exclusive():
