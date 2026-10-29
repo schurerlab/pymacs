@@ -371,6 +371,83 @@ def ligand_inputs(root: Path, ligand_name: str) -> tuple[Path | None, Path | Non
     return structure, smiles
 
 
+def mol2_with_final_pdb_coordinates(
+    final_pdb: Path, cgenff_mol2: Path | None, preferred_resname: str = "",
+) -> tuple[str | None, str]:
+    """Build a display MOL2 with final MD coordinates and CGenFF connectivity.
+
+    GROMACS final PDB snapshots generally omit ``CONECT`` records.  Browsers
+    therefore guess small-molecule bonds from distances, which loses aromatic
+    bond orders and can make a ligand look chemically wrong.  CGenFF MOL2
+    files contain the authoritative atom names and bonds, but their coordinates
+    are pre-MD.  This joins those two sources without altering either input.
+
+    Returns ``(mol2_text, residue_name)``.  The CHARMM LP1 virtual site is
+    intentionally ignored: it is not a chemical atom and is not part of the
+    MOL2 topology.
+    """
+    if cgenff_mol2 is None or not cgenff_mol2.is_file() or not final_pdb.is_file():
+        return None, ""
+    try:
+        mol2_lines = cgenff_mol2.read_text(encoding="utf-8", errors="ignore").splitlines()
+        pdb_lines = final_pdb.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return None, ""
+
+    atom_start = next((index + 1 for index, line in enumerate(mol2_lines) if line.strip() == "@<TRIPOS>ATOM"), None)
+    bond_start = next((index for index, line in enumerate(mol2_lines) if line.strip() == "@<TRIPOS>BOND"), None)
+    if atom_start is None or bond_start is None or atom_start >= bond_start:
+        return None, ""
+    atom_records: list[tuple[int, list[str]]] = []
+    for index in range(atom_start, bond_start):
+        fields = mol2_lines[index].split()
+        if len(fields) < 6:
+            return None, ""
+        atom_records.append((index, fields))
+    if not atom_records:
+        return None, ""
+    mol2_names = {fields[1].upper() for _, fields in atom_records}
+
+    # Collect every HETATM residue, then select the requested residue if it is
+    # complete.  If metadata has no useful ligand code, select the residue that
+    # covers the greatest number of CGenFF atom names (normally its 3-letter
+    # PDB resname, such as LIG).  This is deliberately a strict all-atom match.
+    pdb_by_resname: dict[str, dict[str, tuple[float, float, float]]] = {}
+    for line in pdb_lines:
+        if not line.startswith(("ATOM  ", "HETATM")) or len(line) < 54:
+            continue
+        resname = line[17:20].strip().upper()
+        atom_name = line[12:16].strip().upper()
+        if not resname or not atom_name:
+            continue
+        try:
+            coords = (float(line[30:38]), float(line[38:46]), float(line[46:54]))
+        except ValueError:
+            continue
+        pdb_by_resname.setdefault(resname, {})[atom_name] = coords
+    preferred = "".join(ch for ch in preferred_resname if ch.isalnum()).upper()[:4]
+    candidates = sorted(
+        pdb_by_resname.items(),
+        key=lambda item: (
+            item[0] == preferred,
+            len(mol2_names & set(item[1])),
+            -len(item[1]),
+        ),
+        reverse=True,
+    )
+    for resname, coordinates in candidates:
+        if not mol2_names.issubset(coordinates):
+            continue
+        rebuilt = list(mol2_lines)
+        for line_index, fields in atom_records:
+            x, y, z = coordinates[fields[1].upper()]
+            rebuilt[line_index] = "{:<7} {:<8} {:>10.4f} {:>10.4f} {:>10.4f} {}".format(
+                fields[0], fields[1], x, y, z, " ".join(fields[5:]),
+            )
+        return "\n".join(rebuilt) + "\n", resname
+    return None, ""
+
+
 def ligand_svg(structure: Path | None, smiles: Path | None) -> str | None:
     """Create a themed 2D SVG through the already-installed cgenff RDKit env."""
     if structure is None and smiles is None:
@@ -586,6 +663,18 @@ def final_structure_html(root: Path, context: PartnerContext) -> str:
     except OSError:
         return ""
     ligand = "".join(ch for ch in context.partner_label if ch.isalnum())[:4] if context.partner_kind == "ligand" else ""
+    final_ligand_payload = ""
+    pdb_ligand_resname = ligand
+    if context.partner_kind == "ligand":
+        # Keep the final MD pose from the PDB while recovering the explicit
+        # CGenFF bond graph.  If the metadata only says "Ligand", the strict
+        # atom-name match below finds the actual 3-letter PDB residue (LIG is
+        # the common fallback) without guessing a chemical identity.
+        cgenff_mol2, _ = ligand_inputs(root, ligand)
+        final_ligand, matched_resname = mol2_with_final_pdb_coordinates(structure, cgenff_mol2, ligand)
+        if final_ligand:
+            final_ligand_payload = base64.b64encode(final_ligand.encode("utf-8")).decode("ascii")
+            pdb_ligand_resname = matched_resname
     chain_buttons = "".join(f'<button type="button" data-structure-view="chain" data-chain-id="{escape(chain_id)}">Chain {escape(chain_id)}</button>' for chain_id in context.partner_chain_ids)
     if context.partner_kind == "ligand":
         focused_button = '<button type="button" data-structure-view="pocket">Ligand + pocket</button>'
@@ -596,7 +685,8 @@ def final_structure_html(root: Path, context: PartnerContext) -> str:
     else:
         focused_button = ''
     protein_label = "Protein/receptor" if context.partner_kind == "peptide" else "Protein"
-    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Final structure</div><h2>3D complex / apo viewer</h2><p>Drag to rotate, scroll to zoom, and choose a focused view. The model is the final published PDB, not a representative image.</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure display"><button type="button" data-structure-view="complex">Full complex</button><button type="button" data-structure-view="protein">{protein_label}</button>{chain_buttons}{focused_button}</div><div class="complex-3d js-complex-3d" data-ligand="{escape(ligand)}" data-partner-kind="{escape(context.partner_kind)}" data-partner-chains="{escape(','.join(context.partner_chain_ids))}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · final published coordinate snapshot.</p></section>'''
+    bond_note = " Ligand bonds use the matching CGenFF topology." if final_ligand_payload else ""
+    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Final structure</div><h2>3D complex / apo viewer</h2><p>Drag to rotate, scroll to zoom, and choose a focused view. The model is the final published PDB, not a representative image.{bond_note}</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure display"><button type="button" data-structure-view="complex">Full complex</button><button type="button" data-structure-view="protein">{protein_label}</button>{chain_buttons}{focused_button}</div><div class="complex-3d js-complex-3d" data-ligand="{escape(ligand)}" data-pdb-ligand="{escape(pdb_ligand_resname)}" data-final-ligand-b64="{final_ligand_payload}" data-partner-kind="{escape(context.partner_kind)}" data-partner-chains="{escape(','.join(context.partner_chain_ids))}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · final published coordinate snapshot.</p></section>'''
 
 
 def read_metadata(root: Path) -> dict:
@@ -1215,7 +1305,7 @@ def build_document(system_name: str, context: PartnerContext, cards: list[str], 
  document.getElementById('graph-modal-close').addEventListener('click',close);modal.addEventListener('click',event=>{{if(event.target===modal)close()}});document.addEventListener('keydown',event=>{{if(event.key==='Escape')close()}});
  document.querySelectorAll('[data-dashboard-tab]').forEach(button=>button.addEventListener('click',()=>{{const target=button.dataset.dashboardTab;document.querySelectorAll('[data-dashboard-tab]').forEach(item=>item.setAttribute('aria-selected',String(item===button)));document.querySelectorAll('.dashboard-panel').forEach(panel=>{{const active=panel.id===`panel-${{target}}`;panel.hidden=!active;panel.classList.toggle('is-active',active);if(active)panel.querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot))}})}}));
  document.querySelectorAll('.js-ligand-3d').forEach(el=>{{try{{const raw=atob(el.dataset.structureB64),viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}});viewer.addModel(raw,el.dataset.format);viewer.setStyle({{}},{{stick:{{radius:.105,color:'#ffe66d'}},sphere:{{scale:.16,color:'#ffe66d'}}}});viewer.setStyle({{elem:'N'}},{{stick:{{radius:.105,color:'#35d0ff'}},sphere:{{scale:.16,color:'#35d0ff'}}}});viewer.setStyle({{elem:'O'}},{{stick:{{radius:.105,color:'#ff3b5c'}},sphere:{{scale:.16,color:'#ff3b5c'}}}});viewer.setStyle({{elem:'Cl'}},{{stick:{{radius:.105,color:'#18ff8b'}},sphere:{{scale:.20,color:'#18ff8b'}}}});viewer.zoomTo();viewer.render();addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D ligand preview unavailable.'}}}});
- document.querySelectorAll('.js-complex-3d').forEach(el=>{{try{{const viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}}),raw=atob(el.dataset.structureB64),ligand=el.dataset.ligand,chains=el.dataset.partnerChains.split(',').filter(Boolean);viewer.addModel(raw,'pdb');const render=(mode,chain='')=>{{viewer.setStyle({{}},{{}});viewer.setStyle({{hetflag:false}},{{cartoon:{{color:'spectrum'}}}});if(mode==='complex'){{viewer.setStyle({{hetflag:true}},{{stick:{{radius:.16,colorscheme:'Jmol'}}}});viewer.zoomTo()}}if(mode==='chain'&&chain){{viewer.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.18}}}});viewer.setStyle({{chain}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}});viewer.zoomTo({{chain}})}}if(mode==='partner'&&chains.length){{viewer.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.18}}}});viewer.setStyle({{chain:chains[0]}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.10}}}});viewer.zoomTo({{chain:chains[0]}})}}if(mode==='interface'&&chains.length>1){{const sel={{chain:chains[0]}};viewer.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.22}}}});viewer.setStyle({{chain:chains[0]}},{{cartoon:{{color:'#35d0ff'}}}});viewer.setStyle({{within:{{distance:5,sel}}}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.10}}}});viewer.zoomTo({{within:{{distance:7,sel}}}})}}if(mode==='pocket'&&ligand){{viewer.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.28}}}});viewer.setStyle({{resn:ligand}},{{stick:{{radius:.20,colorscheme:'Jmol'}},sphere:{{scale:.25,colorscheme:'Jmol'}}}});viewer.setStyle({{within:{{distance:5,sel:{{resn:ligand}}}}}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}});viewer.zoomTo({{resn:ligand}})}}if(mode==='protein')viewer.zoomTo();viewer.render();el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.classList.toggle('is-active',button.dataset.structureView===mode&&(mode!=='chain'||button.dataset.chainId===chain)))}};el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.addEventListener('click',()=>render(button.dataset.structureView,button.dataset.chainId||'')));render('complex');addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D final-structure preview unavailable.'}}}});
+ document.querySelectorAll('.js-complex-3d').forEach(el=>{{try{{const viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}}),raw=atob(el.dataset.structureB64),ligand=el.dataset.ligand,pdbLigand=el.dataset.pdbLigand||ligand,finalLigand=el.dataset.finalLigandB64?atob(el.dataset.finalLigandB64):'',chains=el.dataset.partnerChains.split(',').filter(Boolean),pdbModel=viewer.addModel(raw,'pdb'),ligandModel=finalLigand?viewer.addModel(finalLigand,'mol2'):null;const ligandStyle={{stick:{{radius:.20,colorscheme:'Jmol'}},sphere:{{scale:.25,colorscheme:'Jmol'}}}},clear=()=>{{pdbModel.setStyle({{}},{{}});if(ligandModel)ligandModel.setStyle({{}},{{}})}},paintLigand=()=>{{if(ligandModel)ligandModel.setStyle({{}},ligandStyle)}};const render=(mode,chain='')=>{{clear();pdbModel.setStyle({{hetflag:false}},{{cartoon:{{color:'spectrum'}}}});if(mode==='complex'){{pdbModel.setStyle({{hetflag:true}},{{stick:{{radius:.16,colorscheme:'Jmol'}}}});if(ligandModel)pdbModel.setStyle({{resn:pdbLigand}},{{}});paintLigand();viewer.zoomTo()}}if(mode==='chain'&&chain){{pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.18}}}});pdbModel.setStyle({{chain}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}});viewer.zoomTo({{chain}})}}if(mode==='partner'&&chains.length){{pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.18}}}});pdbModel.setStyle({{chain:chains[0]}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.10}}}});viewer.zoomTo({{chain:chains[0]}})}}if(mode==='interface'&&chains.length>1){{const sel={{chain:chains[0]}};pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.22}}}});pdbModel.setStyle({{chain:chains[0]}},{{cartoon:{{color:'#35d0ff'}}}});pdbModel.setStyle({{within:{{distance:5,sel}}}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.10}}}});viewer.zoomTo({{within:{{distance:7,sel}}}})}}if(mode==='pocket'&&pdbLigand){{pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.28}}}});pdbModel.setStyle({{within:{{distance:5,sel:{{resn:pdbLigand}}}}}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}});pdbModel.setStyle({{resn:pdbLigand}},{{}});paintLigand();viewer.zoomTo({{resn:pdbLigand}})}}if(mode==='protein')viewer.zoomTo();viewer.render();el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.classList.toggle('is-active',button.dataset.structureView===mode&&(mode!=='chain'||button.dataset.chainId===chain)))}};el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.addEventListener('click',()=>render(button.dataset.structureView,button.dataset.chainId||'')));render('complex');addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D final-structure preview unavailable.'}}}});
 }})();
 </script></body></html>'''
 
