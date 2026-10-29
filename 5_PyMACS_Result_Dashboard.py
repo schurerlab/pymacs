@@ -712,6 +712,37 @@ def interface_evidence_html(analysis: Path, context: PartnerContext, rin: dict) 
     )
 
 
+def representative_snapshots_html(root: Path, analysis: Path) -> str:
+    """Publish early/middle/late coordinate snapshots when the final XTC exists.
+
+    This is deliberately optional: it never alters a trajectory or blocks the
+    dossier if a historical run retained only its final PDB.
+    """
+    trajectory, topology = root / "Final_Trajectory.xtc", root / "Final_Trajectory.pdb"
+    target = analysis / "Representative_Snapshots"
+    names = (("Early", "early"), ("Middle", "middle"), ("Late", "late"))
+    if trajectory.is_file() and topology.is_file() and not all((target / f"{slug}.pdb").is_file() for _, slug in names):
+        try:
+            import MDAnalysis as mda
+            universe = mda.Universe(str(topology), str(trajectory))
+            count = len(universe.trajectory)
+            if count:
+                target.mkdir(parents=True, exist_ok=True)
+                for (label, slug), frame_index in zip(names, (0, count // 2, count - 1)):
+                    universe.trajectory[frame_index]
+                    universe.atoms.write(str(target / f"{slug}.pdb"))
+        except Exception:
+            pass
+    available = [(label, target / f"{slug}.pdb") for label, slug in names if (target / f"{slug}.pdb").is_file()]
+    if not available:
+        return ""
+    cards = "".join(
+        f'<a class="snapshot-link" href="{escape(path.relative_to(analysis).as_posix())}" download><b>{escape(label)} trajectory frame</b><span>Download PDB snapshot</span></a>'
+        for label, path in available
+    )
+    return f'''<style>.snapshot-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px;margin-top:14px}}.snapshot-link{{display:block;text-decoration:none;border:1px solid #27476a;border-radius:12px;padding:12px;background:#0b1524;color:#cfe8ff}}.snapshot-link:hover{{border-color:#35d0ff;background:#102945}}.snapshot-link b,.snapshot-link span{{display:block}}.snapshot-link span{{color:#7aa6d9;font-size:.82rem;margin-top:4px}}</style><section class="snapshot-grid" aria-label="Representative trajectory snapshots">{cards}</section>'''
+
+
 def final_structure_html(root: Path, context: PartnerContext) -> str:
     """Embed the final complex or apo PDB in the report's 3Dmol viewer."""
     candidates = (root / "Final_Trajectory.pdb", root / "binding_pocket_only.pdb")
@@ -754,7 +785,8 @@ def final_structure_html(root: Path, context: PartnerContext) -> str:
         focused_button = ''
     protein_label = "Protein/receptor" if context.partner_kind == "peptide" else "Protein"
     bond_note = " Ligand bonds use the matching CGenFF topology." if final_ligand_payload else ""
-    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Final structure</div><h2>3D complex / apo viewer</h2><p>Drag to rotate, scroll to zoom, and choose a focused view. The model is the final published PDB, not a representative image.{bond_note}</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure display"><button type="button" data-structure-view="complex">Full complex</button><button type="button" data-structure-view="protein">{protein_label}</button>{chain_buttons}{focused_button}</div><div class="complex-3d js-complex-3d" data-ligand="{escape(ligand)}" data-pdb-ligand="{escape(pdb_ligand_resname)}" data-final-ligand-b64="{final_ligand_payload}" data-partner-kind="{escape(context.partner_kind)}" data-partner-chains="{escape(','.join(context.partner_chain_ids))}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · final published coordinate snapshot.</p></section>'''
+    snapshots = representative_snapshots_html(root, root / "Analysis_Results")
+    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Final structure</div><h2>3D complex / apo viewer</h2><p>Drag to rotate, scroll to zoom, and choose a focused view. The model is the final published PDB, not a representative image.{bond_note}</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure display"><button type="button" data-structure-view="complex">Full complex</button><button type="button" data-structure-view="protein">{protein_label}</button>{chain_buttons}{focused_button}</div><div class="complex-3d js-complex-3d" data-ligand="{escape(ligand)}" data-pdb-ligand="{escape(pdb_ligand_resname)}" data-final-ligand-b64="{final_ligand_payload}" data-partner-kind="{escape(context.partner_kind)}" data-partner-chains="{escape(','.join(context.partner_chain_ids))}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · final published coordinate snapshot.</p>{snapshots}</section>'''
 
 
 def read_metadata(root: Path) -> dict:
@@ -1180,6 +1212,258 @@ def persistence_distance_plot(contacts_file: Path, frequency_file: Path) -> str 
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
+def _event_contact_sets(events_file: Path) -> tuple[pd.DataFrame, dict[float, set[str]]]:
+    """Read a bounded contact-event table and index its residue states by time."""
+    table = _read_table(events_file)
+    if table is None or not {"Time_ns", "Residue"}.issubset(table.columns):
+        return pd.DataFrame(), {}
+    table = table.copy()
+    table["Time_ns"] = pd.to_numeric(table["Time_ns"], errors="coerce")
+    table = table.dropna(subset=["Time_ns", "Residue"])
+    if table.empty:
+        return pd.DataFrame(), {}
+    states = {
+        float(time): set(rows["Residue"].astype(str))
+        for time, rows in table.groupby("Time_ns", sort=True)
+    }
+    return table, states
+
+
+def ligand_scorecard_html(analysis: Path, protein_name: str) -> str:
+    """A plain-language binding summary derived only from published analyses."""
+    metrics: list[tuple[str, str, str]] = []
+    protein_rmsd = _read_table(analysis / "Protein_RMSD.csv")
+    if protein_rmsd is not None and "Protein_RMSD" in protein_rmsd:
+        values = pd.to_numeric(protein_rmsd["Protein_RMSD"], errors="coerce").dropna()
+        if not values.empty:
+            metrics.append(("Protein drift", f"{values.median():.2f} Å", "median backbone RMSD"))
+    overlay = next(iter(sorted(analysis.glob("*_Complex_RMSD_Overlay.csv"))), None)
+    if overlay and overlay.is_file():
+        table = _read_table(overlay)
+        if table is not None and "Ligand_RMSD" in table:
+            values = pd.to_numeric(table["Ligand_RMSD"], errors="coerce").dropna()
+            if not values.empty:
+                metrics.append(("Ligand motion", f"{values.median():.2f} Å", "median ligand RMSD"))
+    frequency = next(iter(sorted(analysis.glob("*_contact_frequency_filtered.csv"))), None)
+    if frequency and frequency.is_file():
+        table = _read_table(frequency)
+        if table is not None and {"Residue", "PercentFrames"}.issubset(table.columns):
+            values = pd.to_numeric(table["PercentFrames"], errors="coerce")
+            if values.notna().any():
+                leader = table.loc[values.idxmax(), "Residue"]
+                metrics.append(("Strongest anchor", f"{leader}", f"{values.max():.1f}% contact occupancy"))
+                metrics.append(("Persistent residues", str(int((values >= 50).sum())), "at least 50% occupancy"))
+    all_contacts = analysis / "AllContacts_Framewise.csv"
+    table = _read_table(all_contacts)
+    if table is not None and "Distance" in table:
+        distances = pd.to_numeric(table["Distance"], errors="coerce").dropna()
+        if not distances.empty:
+            metrics.append(("Closest contact", f"{distances.min():.2f} Å", "minimum observed atom-pair distance"))
+    q_file = analysis / "native_contact_q.csv"
+    q_table = _read_table(q_file)
+    if q_table is not None and "Q_native_contact_fraction" in q_table:
+        values = pd.to_numeric(q_table["Q_native_contact_fraction"], errors="coerce").dropna()
+        if not values.empty:
+            metrics.append(("Ligand native Q", f"{values.median():.2f}", "median native-contact fraction"))
+    if not metrics:
+        return ""
+    cards = "".join(
+        f'<div class="ligand-score"><strong>{escape(label)}</strong><b>{escape(value)}</b><span>{escape(detail)}</span></div>'
+        for label, value, detail in metrics[:6]
+    )
+    return f'''<style>.ligand-scorecard{{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px}}.ligand-score{{border:1px solid #27476a;border-radius:14px;padding:13px;background:linear-gradient(145deg,#0d1b2c,#080c14)}}.ligand-score strong{{display:block;color:#7aa6d9;font-size:.74rem;letter-spacing:.06em;text-transform:uppercase}}.ligand-score b{{display:block;color:#35d0ff;font-size:1.45rem;margin:5px 0;line-height:1.1}}.ligand-score span{{display:block;color:#c0d1e5;font-size:.8rem;line-height:1.35}}</style><section class="ligand-scorecard"><div style="grid-column:1/-1"><div class="eyebrow">Binding scorecard</div><p style="margin:.2rem 0 .8rem">A first-pass summary for {escape(protein_name)}. These are descriptive trajectory metrics, not affinity estimates.</p></div>{cards}</section>'''
+
+
+def contact_state_timeline_plot(events_file: Path) -> str | None:
+    table, states = _event_contact_sets(events_file)
+    if table.empty or len(states) < 2:
+        return None
+    times = np.asarray(sorted(states), dtype=float)
+    counts = np.asarray([len(states[time]) for time in times], dtype=float)
+    if len(times) > MAX_RENDER_POINTS:
+        keep = np.linspace(0, len(times) - 1, MAX_RENDER_POINTS, dtype=int)
+        times, counts = times[keep], counts[keep]
+    low, high = np.quantile(counts, [1 / 3, 2 / 3])
+    state = np.where(counts <= low, 0, np.where(counts >= high, 2, 1))
+    names = np.asarray(["low-contact", "moderate-contact", "high-contact"])[state]
+    figure = go.Figure(go.Scatter(
+        x=times, y=counts, mode="lines", line={"color": CYAN, "width": 2},
+        fill="tozeroy", fillcolor="rgba(53,208,255,.14)", customdata=names,
+        hovertemplate="Time=%{x:.3f} ns<br>Unique contacting residues=%{y}<br>State=%{customdata}<extra></extra>",
+    ))
+    figure.update_layout(title="Ligand contact-state timeline", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=360, xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Unique contacting residues", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def rmsd_distribution_plot(overlay_file: Path) -> str | None:
+    table = _read_table(overlay_file)
+    if table is None:
+        return None
+    series = [(column, color) for column, color in (("Protein_RMSD", GREEN), ("Ligand_RMSD", ORANGE)) if column in table]
+    if not series:
+        return None
+    figure = go.Figure()
+    for column, color in series:
+        values = pd.to_numeric(table[column], errors="coerce").dropna()
+        if values.empty:
+            continue
+        figure.add_trace(go.Histogram(x=values, name=column.replace("_", " "), opacity=.62, marker_color=color, nbinsx=45))
+    if not figure.data:
+        return None
+    figure.update_layout(title="RMSD distribution across the trajectory", barmode="overlay", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=380, xaxis={"title": "RMSD (Å)", "gridcolor": GRID}, yaxis={"title": "Sampled frames", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.13})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def rmsd_rg_scatter_plot(overlay_file: Path, rg_file: Path) -> str | None:
+    rmsd, rg = _read_table(overlay_file), _read_table(rg_file)
+    if rmsd is None or rg is None or not {"Time_ns", "Protein_RMSD"}.issubset(rmsd.columns) or not {"Time_ns", "Rg_Protein_Å"}.issubset(rg.columns):
+        return None
+    left = rmsd.loc[:, ["Time_ns", "Protein_RMSD"]].copy()
+    right = rg.loc[:, ["Time_ns", "Rg_Protein_Å"]].copy()
+    for frame in (left, right): frame["Time_ns"] = pd.to_numeric(frame["Time_ns"], errors="coerce")
+    merged = pd.merge_asof(left.dropna().sort_values("Time_ns"), right.dropna().sort_values("Time_ns"), on="Time_ns", direction="nearest")
+    merged = _sample_table(merged.dropna())
+    if len(merged) < 3:
+        return None
+    figure = go.Figure(go.Scatter(x=merged["Protein_RMSD"], y=merged["Rg_Protein_Å"], mode="markers", marker={"size": 6, "color": merged["Time_ns"], "colorscale": "Viridis", "showscale": True, "colorbar": {"title": "Time (ns)"}}, text=merged["Time_ns"], hovertemplate="Protein RMSD=%{x:.3f} Å<br>Protein Rg=%{y:.3f} Å<br>Time=%{text:.3f} ns<extra></extra>"))
+    figure.update_layout(title="Protein RMSD versus compactness", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 65, "r": 25, "t": 55, "b": 52}, height=400, xaxis={"title": "Protein RMSD (Å)", "gridcolor": GRID}, yaxis={"title": "Protein radius of gyration (Å)", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def rmsf_persistence_scatter_plot(rmsf_file: Path, frequency_file: Path, interaction_file: Path | None) -> str | None:
+    rmsf, frequency = _read_table(rmsf_file), _read_table(frequency_file)
+    if rmsf is None or frequency is None or not {"Residue", "RMSF_Å"}.issubset(rmsf.columns) or not {"Residue", "PercentFrames"}.issubset(frequency.columns):
+        return None
+    merged = rmsf[["Residue", "RMSF_Å"]].merge(frequency[["Residue", "PercentFrames"]], on="Residue", how="inner")
+    for column in ("RMSF_Å", "PercentFrames"): merged[column] = pd.to_numeric(merged[column], errors="coerce")
+    merged = merged.dropna()
+    if merged.empty:
+        return None
+    chemistry = pd.Series("Contact", index=merged.index)
+    if interaction_file and interaction_file.is_file():
+        interactions = _read_table(interaction_file)
+        if interactions is not None and {"Residue", "Type"}.issubset(interactions.columns):
+            dominant = interactions.groupby("Residue")["Type"].agg(lambda values: values.astype(str).value_counts().index[0])
+            chemistry = merged["Residue"].map(dominant).fillna("Contact")
+    palette = {"H-bond": CYAN, "Ionic": MAGENTA, "Hydrophobic": ORANGE, "Contact": GREEN}
+    figure = go.Figure()
+    for kind in chemistry.unique():
+        selected = chemistry == kind
+        figure.add_trace(go.Scatter(x=merged.loc[selected, "RMSF_Å"], y=merged.loc[selected, "PercentFrames"], mode="markers+text", text=merged.loc[selected, "Residue"], textposition="top center", name=str(kind), marker={"size": 10, "color": palette.get(str(kind), GREEN)}, hovertemplate="Residue=%{text}<br>RMSF=%{x:.3f} Å<br>Contact occupancy=%{y:.1f}%<extra></extra>"))
+    figure.update_layout(title="Residue flexibility versus ligand-contact persistence", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 65, "r": 25, "t": 55, "b": 52}, height=420, xaxis={"title": "Residue RMSF (Å)", "gridcolor": GRID}, yaxis={"title": "Contact occupancy (%)", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.13})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def contact_lifetime_plot(events_file: Path) -> str | None:
+    _table, states = _event_contact_sets(events_file)
+    if len(states) < 3:
+        return None
+    times = np.asarray(sorted(states), dtype=float)
+    step = float(np.median(np.diff(times))) if len(times) > 1 else 0.0
+    if step <= 0:
+        return None
+    runs: dict[str, list[float]] = {}
+    active: dict[str, tuple[float, float]] = {}
+    for time in times:
+        current = states[float(time)]
+        for residue in list(active):
+            if residue not in current:
+                start, previous = active.pop(residue)
+                runs.setdefault(residue, []).append(max(step, previous - start + step))
+        for residue in current:
+            active.setdefault(residue, (float(time), float(time)))
+            start, _ = active[residue]
+            active[residue] = (start, float(time))
+    for residue, (start, previous) in active.items():
+        runs.setdefault(residue, []).append(max(step, previous - start + step))
+    rows = sorted(((residue, float(np.median(values)), float(max(values))) for residue, values in runs.items()), key=lambda row: row[1], reverse=True)[:25]
+    if not rows:
+        return None
+    residues, medians, maxima = map(list, zip(*rows))
+    figure = go.Figure([go.Bar(y=residues, x=medians, orientation="h", name="Median uninterrupted lifetime", marker_color=CYAN), go.Bar(y=residues, x=maxima, orientation="h", name="Longest uninterrupted lifetime", marker_color=GREEN, opacity=.58)])
+    figure.update_layout(title="Ligand-contact uninterrupted lifetimes", barmode="overlay", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 105, "r": 20, "t": 55, "b": 52}, height=max(380, 24 * len(rows)), xaxis={"title": "Lifetime (ns; sampled-frame resolution)", "gridcolor": GRID}, yaxis={"title": "Residue", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.13})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def contact_turnover_plot(events_file: Path) -> str | None:
+    _table, states = _event_contact_sets(events_file)
+    if len(states) < 2:
+        return None
+    times = sorted(states)
+    previous: set[str] = set()
+    rows = []
+    for time in times:
+        current = states[time]
+        rows.append((time, len(current), len(current - previous), len(previous - current)))
+        previous = current
+    frame = pd.DataFrame(rows, columns=["Time_ns", "Active", "Gained", "Lost"])
+    frame = _sample_table(frame)
+    figure = go.Figure()
+    for column, color in (("Active", CYAN), ("Gained", GREEN), ("Lost", MAGENTA)):
+        figure.add_trace(go.Scatter(x=frame["Time_ns"], y=frame[column], mode="lines", name=column, line={"color": color, "width": 2}, stackgroup="turnover" if column != "Active" else None))
+    figure.update_layout(title="Ligand-contact turnover over time", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=380, xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Residue contacts", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.13})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def contact_fingerprint_html(events_file: Path, frequency_file: Path, interaction_file: Path | None) -> str:
+    events, frequency = _read_table(events_file), _read_table(frequency_file)
+    if events is None or frequency is None or not {"Residue", "Distance"}.issubset(events.columns) or not {"Residue", "PercentFrames"}.issubset(frequency.columns):
+        return ""
+    events = events.copy(); events["Distance"] = pd.to_numeric(events["Distance"], errors="coerce")
+    distance = events.groupby("Residue")["Distance"].agg(["mean", "min"])
+    if "LigAtomName" in events:
+        atoms = events.groupby("Residue")["LigAtomName"].agg(
+            lambda values: ", ".join(sorted(set(values.dropna().astype(str)))[:3]) or "—"
+        )
+    else:
+        atoms = pd.Series(dtype=str)
+    table = frequency[["Residue", "PercentFrames"]].copy().merge(distance, left_on="Residue", right_index=True, how="left").merge(atoms.rename("Ligand atoms"), left_on="Residue", right_index=True, how="left")
+    table["Dominant chemistry"] = "Contact"
+    if interaction_file and interaction_file.is_file():
+        interactions = _read_table(interaction_file)
+        if interactions is not None and {"Residue", "Type"}.issubset(interactions.columns):
+            dominant = interactions.groupby("Residue")["Type"].agg(lambda values: values.astype(str).value_counts().index[0])
+            table["Dominant chemistry"] = table["Residue"].map(dominant).fillna("Contact")
+    table = table.sort_values("PercentFrames", ascending=False).head(30)
+    if table.empty:
+        return ""
+    rows = "".join(f"<tr><td>{escape(str(row['Residue']))}</td><td>{float(row['PercentFrames']):.1f}%</td><td>{escape(str(row['Dominant chemistry']))}</td><td>{float(row['mean']):.2f} Å</td><td>{float(row['min']):.2f} Å</td><td>{escape(str(row['Ligand atoms']))}</td></tr>" for _, row in table.iterrows())
+    return f'''<style>.fingerprint{{overflow:auto}}.fingerprint table{{width:100%;border-collapse:collapse;font-size:.86rem}}.fingerprint th{{color:#7aa6d9;text-align:left;text-transform:uppercase;font-size:.72rem;letter-spacing:.06em}}.fingerprint td,.fingerprint th{{padding:9px;border-bottom:1px solid #203653;white-space:nowrap}}.fingerprint td:first-child{{color:#35d0ff;font-weight:800}}</style><div class="fingerprint"><table><thead><tr><th>Residue</th><th>Occupancy</th><th>Dominant chemistry</th><th>Mean distance</th><th>Minimum distance</th><th>Ligand atoms</th></tr></thead><tbody>{rows}</tbody></table></div>'''
+
+
+def chemistry_composition_plot(interaction_file: Path) -> str | None:
+    table = _read_table(interaction_file)
+    if table is None or not {"Time_ns", "Type"}.issubset(table.columns):
+        return None
+    table = table.copy(); table["Time_ns"] = pd.to_numeric(table["Time_ns"], errors="coerce"); table = table.dropna(subset=["Time_ns", "Type"])
+    if table.empty:
+        return None
+    bins = np.linspace(float(table["Time_ns"].min()), float(table["Time_ns"].max()), min(120, max(20, int(np.sqrt(len(table))))) + 1)
+    table["bin"] = pd.cut(table["Time_ns"], bins=bins, include_lowest=True)
+    grouped = table.groupby(["bin", "Type"], observed=True).size().unstack(fill_value=0)
+    x = np.asarray([interval.mid for interval in grouped.index], dtype=float)
+    figure = go.Figure()
+    colors = {"H-bond": CYAN, "Ionic": MAGENTA, "Hydrophobic": ORANGE, "Water bridge": GREEN}
+    for kind in grouped.columns:
+        figure.add_trace(go.Scatter(x=x, y=grouped[kind], mode="lines", stackgroup="chemistry", name=str(kind), line={"width": .8, "color": colors.get(str(kind), GREEN)}, hovertemplate="Time=%{x:.3f} ns<br>Events=%{y}<extra>" + escape(str(kind)) + "</extra>"))
+    figure.update_layout(title="Interaction chemistry composition over time", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=390, xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Observed interaction events per time bin", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.13})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def residue_chemistry_heatmap(interaction_file: Path) -> str | None:
+    table = _read_table(interaction_file)
+    if table is None or not {"Residue", "Type"}.issubset(table.columns):
+        return None
+    total = table.groupby("Residue").size().rename("Total")
+    matrix = table.groupby(["Residue", "Type"]).size().unstack(fill_value=0).div(total, axis=0)
+    matrix = matrix.loc[matrix.max(axis=1).sort_values(ascending=False).head(40).index]
+    if matrix.empty:
+        return None
+    figure = go.Figure(go.Heatmap(z=matrix.to_numpy(), x=matrix.columns.astype(str), y=matrix.index.astype(str), colorscale="Turbo", zmin=0, zmax=1, colorbar={"title": "Fraction of events"}, hovertemplate="Residue=%{y}<br>Interaction=%{x}<br>Fraction=%{z:.1%}<extra></extra>"))
+    figure.update_layout(title="Residue × interaction-chemistry occupancy", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 100, "r": 25, "t": 55, "b": 52}, height=max(400, 19 * len(matrix)), xaxis={"title": "Interaction chemistry", "gridcolor": GRID}, yaxis={"title": "Protein residue", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
 def sampled_indices(length: int, maximum: int = MAX_HEATMAP_TIMEPOINTS) -> np.ndarray:
     """Evenly select a matrix axis while retaining its beginning and end."""
     if length <= maximum:
@@ -1446,6 +1730,13 @@ def main() -> None:
                 "Download full interaction-event CSV",
                 "Every residue/type pair has its own row, so simultaneous interaction types are visible rather than collapsed into a single priority class.",
             ))
+    # Ligand reports start with a compact decision aid, then retain every
+    # underlying raw CSV as a download from its dedicated visual card.
+    if context.partner_kind == "ligand":
+        scorecard = ligand_scorecard_html(analysis, protein_name)
+        if scorecard:
+            source = analysis / "Protein_RMSD.csv"
+            groups["overview"].append(dashboard_card(scorecard, "Binding scorecard", source.relative_to(output.parent).as_posix() if source.is_file() else "", note="Read this as a trajectory summary, then use the stability, contacts, chemistry, and distance tabs for the supporting evidence."))
     for contact_file in sorted(analysis.glob("*_contact_map_residue_time.csv")):
         graph = heatmap_plot(contact_file, "contacts")
         if graph:
@@ -1483,6 +1774,14 @@ def main() -> None:
         add("stability", multiseries_plot(peptide_rmsd, f"{context.partner_label} peptide RMSD", "Time_ps", ["RMSD_A"], "RMSD (Å)", colors=[ORANGE]), "Peptide RMSD", peptide_rmsd,
             note="Peptide coordinates are aligned on the peptide selection. Interpret this with the interface persistence panel rather than as a binding affinity measure.")
 
+    if context.partner_kind == "ligand":
+        overlay_source = next(iter(sorted(analysis.glob("*_Complex_RMSD_Overlay.csv"))), None)
+        rg_source = analysis / "Radius_of_Gyration_Protein_Ligand_Complex.csv"
+        if overlay_source:
+            add("stability", rmsd_distribution_plot(overlay_source), "RMSD distribution", overlay_source, note="The distribution shows how broadly the ligand and protein sampled structural deviation across the entire trajectory.")
+            if rg_source.is_file():
+                add("stability", rmsd_rg_scatter_plot(overlay_source, rg_source), "Protein RMSD versus compactness", rg_source, note="Points are sampled frames colored by time; coherent clusters indicate recurring structural regimes.")
+
     for source in sorted(analysis.glob("RMSF_*_per_residue.csv")):
         add("flexibility", categorical_bar_plot(source, f"{protein_name} RMSF per residue", "Residue", ["RMSF_Å"], "RMSF (Å)", colors=[GREEN]), f"{protein_name} RMSF per residue", source)
     for source in sorted(analysis.glob("RMSF_*.csv")):
@@ -1496,6 +1795,12 @@ def main() -> None:
         add("flexibility", categorical_bar_plot(peptide_rmsf, f"{context.partner_label} peptide residue RMSF", "Residue", ["RMSF_A"], "RMSF (Å)", colors=[ORANGE]), "Peptide residue RMSF", peptide_rmsf,
             note="Higher values locate mobile peptide residues; compare contacting positions with the interface-node map.")
 
+    frequency_for_ligand = next(iter(sorted(analysis.glob("*_contact_frequency_filtered.csv"))), None)
+    if context.partner_kind == "ligand" and frequency_for_ligand:
+        rmsf_residue = next(iter(sorted(analysis.glob("RMSF_*_per_residue.csv"))), None)
+        if rmsf_residue:
+            add("flexibility", rmsf_persistence_scatter_plot(rmsf_residue, frequency_for_ligand, interaction_file if interaction_file.is_file() else None), "Residue flexibility versus ligand-contact persistence", frequency_for_ligand, note="Stable anchors tend toward high contact occupancy with lower residue RMSF; this is descriptive, not an affinity score.")
+
     sse_fractions = analysis / "SSE_Fractions.csv"
     if sse_fractions.is_file(): add("secondary", multiseries_plot(sse_fractions, "SSE fractions", "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction"), "SSE fractions", sse_fractions)
     persistence = analysis / "Residue_SSE_Persistence.csv"
@@ -1503,13 +1808,21 @@ def main() -> None:
     for source in sorted(analysis.glob("SSE_chain_*_fractions.csv")):
         add("secondary", multiseries_plot(source, source.stem.replace("_", " "), "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction"), source.stem.replace("_", " "), source)
 
-    frequency = analysis / "LIG_contact_frequency_filtered.csv"
+    frequency = frequency_for_ligand or (analysis / "LIG_contact_frequency_filtered.csv")
     if frequency.is_file(): add("contacts", categorical_bar_plot(frequency, "Ligand-contact frequency", "Residue", ["PercentFrames"], "Frames with contact (%)"), "Ligand-contact frequency", frequency)
     filtered = analysis / "FilteredContacts_Framewise.csv"
     all_contacts = analysis / "AllContacts_Framewise.csv"
     persistence_graph = contact_persistence_plot(filtered, all_contacts, interaction_file if interaction_file.is_file() else None, protein_name) if filtered.is_file() and all_contacts.is_file() else None
     if persistence_graph: add("contacts", persistence_graph, "Ligand-contact persistence", filtered, note="Persistence is recomputed from sampled frames (0–1) using the original residue labels. A bar color now means the most frequently observed classified chemistry for that residue: H-bond blue, ionic pink, hydrophobic orange.")
     if filtered.is_file(): add("contacts", contact_events_plot(filtered, "Specific ligand contact events"), "Specific ligand contact events", filtered, note="Hover a marker for the contacting ligand atom, protein atom, distance, residue, and time.")
+    if context.partner_kind == "ligand" and filtered.is_file():
+        add("overview", contact_state_timeline_plot(filtered), "Ligand contact-state timeline", filtered, note="The line counts unique contacting residues at each sampled time. Low, moderate, and high states are relative to this trajectory's observed range.")
+        add("contacts", contact_lifetime_plot(filtered), "Ligand-contact uninterrupted lifetimes", filtered, note="Consecutive observed frames are grouped into uninterrupted contact episodes at the sampled-frame resolution.")
+        add("contacts", contact_turnover_plot(filtered), "Ligand-contact turnover", filtered, note="Shows active, newly gained, and lost contacting residues per sampled frame.")
+        if frequency_for_ligand:
+            fingerprint = contact_fingerprint_html(filtered, frequency_for_ligand, interaction_file if interaction_file.is_file() else None)
+            if fingerprint:
+                groups["contacts"].append(dashboard_card(fingerprint, "Residue contact fingerprint", filtered.relative_to(output.parent).as_posix(), note="Ranked residue summary: occupancy, dominant chemistry, distances, and the ligand atoms observed in the contact events."))
 
     summary = analysis / "InteractionTypes_Summary.csv"
     if summary.is_file(): add("chemistry", categorical_bar_plot(summary, "Interaction-type abundance by residue", "Residue", ["H-bond", "Hydrophobic", "Ionic"], "Observed interaction events", stacked=True), "Interaction-type abundance by residue", summary)
@@ -1521,6 +1834,9 @@ def main() -> None:
             figure = go.Figure(go.Bar(x=counts["Type"], y=counts["Events"], marker_color=[CYAN, MAGENTA, ORANGE][:len(counts)], hovertemplate="Interaction type=%{x}<br>Observed events=%{y}<extra></extra>"))
             figure.update_layout(title="Interaction-type distribution", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=380, xaxis={"title": "Interaction type", "gridcolor": GRID}, yaxis={"title": "Observed events", "gridcolor": GRID})
             add("chemistry", plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False}), "Interaction-type distribution", interaction_file)
+        if context.partner_kind == "ligand":
+            add("chemistry", chemistry_composition_plot(interaction_file), "Interaction chemistry composition over time", interaction_file, note="Counts are binned event observations, so use the persistent interaction explorer for exact residue–atom occupancy.")
+            add("chemistry", residue_chemistry_heatmap(interaction_file), "Residue × interaction chemistry occupancy", interaction_file, note="Each row is normalized within that residue's observed interaction events.")
 
     if all_contacts.is_file():
         add("distances", distance_histogram_plot(all_contacts), "Composite ligand–residue distance distribution", all_contacts)

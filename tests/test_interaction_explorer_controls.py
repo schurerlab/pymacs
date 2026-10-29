@@ -61,6 +61,16 @@ def test_dashboard_embed_allows_export_and_has_room_for_the_full_explorer():
     assert "or final_ligand_payload" in source
     assert "singleBonds:false" in source
     assert "aromaticStyle:'solid'" in source
+    assert "def ligand_scorecard_html" in source
+    assert "def contact_lifetime_plot" in source
+    assert "def contact_turnover_plot" in source
+    assert "def contact_fingerprint_html" in source
+    assert "def chemistry_composition_plot" in source
+    assert "def residue_chemistry_heatmap" in source
+    assert "def representative_snapshots_html" in source
+    assert '"Binding scorecard"' in source
+    assert '"Ligand contact-state timeline"' in source
+    assert '"Residue contact fingerprint"' in source
 
 
 def test_interface_explorer_keeps_chain_chemistry_modes_mutually_exclusive():
