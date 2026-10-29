@@ -181,6 +181,69 @@ def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict,
     return PartnerContext("none", label, tuple(chain_ids), tuple(), "apo_protein")
 
 
+def ligand_evidence_present(analysis: Path) -> bool:
+    """Return whether 3B/3C produced a small-molecule evidence bundle.
+
+    This is deliberately based on analysed outputs, rather than the historical
+    submission label.  Older published runs occasionally lack ligand metadata;
+    legacy runs were sometimes saved with ``mode=protein``
+    or without the original ligand metadata even though their ligand analyses
+    completed successfully.
+    """
+    return any((
+        (analysis / "InteractionTypes_Framewise.csv").is_file(),
+        (analysis / "FilteredContacts_Framewise.csv").is_file(),
+        (analysis / "AllContacts_Framewise.csv").is_file(),
+        (analysis / "LIG_Complex_RMSD_Overlay.csv").is_file(),
+        (analysis / "Radius_of_Gyration_Protein_Ligand_Complex.csv").is_file(),
+        any(analysis.glob("*_Ligand_RMSD.csv")),
+        any(analysis.glob("*_contact_frequency_filtered.csv")),
+    ))
+
+
+def ligand_label_from_evidence(root: Path, setup: dict, metadata: dict) -> str:
+    """Choose the best honest display name when legacy metadata is incomplete."""
+    placeholders = {"", "none", "no ligand label", "proteinonly"}
+    for value in (
+        metadata.get("ligand_name"), metadata.get("ligand_residue"),
+        setup.get("ligand"), setup.get("compound_name"),
+    ):
+        label = str(value or "").strip()
+        if label.casefold() not in placeholders:
+            return label
+    # A parameterized CGenFF file is the next-best authoritative identity.
+    structure, _ = ligand_inputs(root, "")
+    if structure:
+        stem = structure.name.split(".", 1)[0].strip()
+        if stem:
+            return stem
+    # Do not falsely call a small molecule a protein merely because its old
+    # record lost a name.  "LIG" is the transparent generic display fallback.
+    return "LIG"
+
+
+def promote_ligand_context_when_evidenced(
+    root: Path, analysis: Path, setup: dict, metadata: dict, context: PartnerContext,
+) -> tuple[PartnerContext, bool]:
+    """Prevent stale protein-only metadata from suppressing ligand reports.
+
+    Peptide classifications stay authoritative: a peptide system is not
+    converted merely because it contains a contact table.  For every other
+    context, the complete small-molecule analysis bundle wins over an old
+    protein/apo label.
+    """
+    evidence = ligand_evidence_present(analysis)
+    if evidence and context.partner_kind not in {"ligand", "peptide"}:
+        return (
+            PartnerContext(
+                "ligand", ligand_label_from_evidence(root, setup, metadata),
+                context.partner_chain_ids, context.interface_pairs, "ligand_complex",
+            ),
+            True,
+        )
+    return context, evidence
+
+
 def existing_result_matches(analysis: Path, pattern: str) -> list[Path]:
     """Return deterministic matches for a canonical result pattern."""
     return sorted(path for path in analysis.glob(pattern) if path.is_file())
@@ -1732,6 +1795,9 @@ def main() -> None:
     except (OSError, ValueError, TypeError):
         pass
     context = partner_context(root, analysis, setup, metadata, simulation)
+    context, has_ligand_evidence = promote_ligand_context_when_evidenced(
+        root, analysis, setup, metadata, context,
+    )
     ligand_name = context.partner_label if context.partner_kind == "ligand" else "No ligand label"
     chain_labels = []
     for entry in str(setup.get("chain_map") or "").split(","):
@@ -1744,19 +1810,9 @@ def main() -> None:
     # chain, so a one-chain ligand–protein job must not show this card.
     is_multichain_system = context.partner_kind == "protein_chain" or len(chain_labels) > 1 or str(setup.get("mode") or "").casefold() == "protac"
     csv_files = sorted(path for path in analysis.rglob("*.csv") if path.is_file())
-    # Older published runs occasionally lack ligand metadata even though 3B/3C
-    # produced the complete small-molecule evidence bundle.  Treat that bundle
-    # as authoritative for presentation so a legacy record cannot hide its
-    # ligand-specific analyses behind an "apo/protein" label.
-    has_ligand_evidence = context.partner_kind == "ligand" or any((
-        (analysis / "InteractionTypes_Framewise.csv").is_file(),
-        (analysis / "FilteredContacts_Framewise.csv").is_file(),
-        (analysis / "AllContacts_Framewise.csv").is_file(),
-        (analysis / "LIG_Complex_RMSD_Overlay.csv").is_file(),
-        (analysis / "Radius_of_Gyration_Protein_Ligand_Complex.csv").is_file(),
-        any(analysis.glob("*_Ligand_RMSD.csv")),
-        any(analysis.glob("*_contact_frequency_filtered.csv")),
-    ))
+    # The context resolver above promotes legacy records when their completed
+    # small-molecule evidence bundle proves that they are ligand systems.
+    has_ligand_evidence = has_ligand_evidence or context.partner_kind == "ligand"
     # Every card below is explicitly mapped to a scientific table.  Never
     # revive the legacy arbitrary-column fallback for raw analysis tables.
     gallery_csvs: set[Path] = set()

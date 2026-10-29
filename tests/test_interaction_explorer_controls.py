@@ -89,6 +89,14 @@ def test_legacy_ligand_evidence_is_not_hidden_by_missing_metadata():
     assert "no exact residue–atom/type pair reaches the 10% explorer threshold" in source
 
 
+def test_ligand_evidence_promotes_a_stale_protein_context():
+    source = (ROOT / "5_PyMACS_Result_Dashboard.py").read_text(encoding="utf-8")
+    assert "def promote_ligand_context_when_evidenced" in source
+    assert 'context.partner_kind not in {"ligand", "peptide"}' in source
+    assert '"ligand", ligand_label_from_evidence' in source
+    assert "context, has_ligand_evidence = promote_ligand_context_when_evidenced(" in source
+
+
 def test_interface_explorer_keeps_chain_chemistry_modes_mutually_exclusive():
     source = (ROOT / "3C_Interface_RIN.py").read_text(encoding="utf-8")
     assert "range(10 if has_peptide else 50, 100, 10)" in source
