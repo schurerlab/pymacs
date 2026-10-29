@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#BSUB -J scorecard_external_angela_Angela_OCT26_162_rank1_confid
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 02:00
+#BSUB -n 2
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/triton/home/jxs794/Pymacs/backfill_staging/final_ligand_scorecard_20261029/external_angela_Angela_OCT26_162_rank1_confidence0_27/backfill.%J.out
+#BSUB -eo /projectnb/triton/home/jxs794/Pymacs/backfill_staging/final_ligand_scorecard_20261029/external_angela_Angela_OCT26_162_rank1_confidence0_27/backfill.%J.err
+
+# Analysis-only staging: no MD is started and the source directory is never written.
+set -eo pipefail
+SOURCE='/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/162_rank1_confidence0.27'
+STAGE='/projectnb/triton/home/jxs794/Pymacs/backfill_staging/final_ligand_scorecard_20261029/external_angela_Angela_OCT26_162_rank1_confidence0_27'
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+test -d "$SOURCE"
+test -d "$SOURCE/Analysis_Results"
+cp -a "$SOURCE/Analysis_Results" "$STAGE/"
+find "$SOURCE" -maxdepth 1 -type f   \( -name '*.cgenff.mol2' -o -name '*.mol2' -o -name '*.pdb' -o -name '*.gro' -o -name 'atomIndex*.txt' -o -name '.chainmap.json' \)   -exec cp -a {} "$STAGE/" \;
+
+source /etc/bashrc
+set -u
+module purge
+module load gcc-runtime/13.4.0-none-none-gh6rpjx
+module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export OMP_NUM_THREADS=2
+cd "$STAGE"
+
+ligand="$(find . -maxdepth 1 -type f -name '*.cgenff.mol2' -printf '%f\n' | head -1 | sed 's/\.cgenff\.mol2$//')"
+test -n "$ligand"
+if test -s Analysis_Results/InteractionTypes_Framewise.csv; then
+  python /projectnb/triton/home/jxs794/Pymacs/3B_NETWORX.py --ligand "$ligand" --filter 0.10 --output "$ligand" --mode ligand
+else
+  echo "No InteractionTypes_Framewise.csv: preserving available analyses; explorer cannot be regenerated." >&2
+fi
+python /projectnb/triton/home/jxs794/Pymacs/5_PyMACS_Result_Dashboard.py --root .
+grep -q 'Binding scorecard' Analysis_Results/PyMACS_Result_Dashboard.html

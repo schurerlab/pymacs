@@ -1,0 +1,21 @@
+[
+  {"cache": "external/angela/Angela-OCT26/130_rank1_confidence0.30", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/130_rank1_confidence0.30"},
+  {"cache": "external/angela/Angela-OCT26/131_rank1_confidence0.23", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/131_rank1_confidence0.23"},
+  {"cache": "external/angela/Angela-OCT26/132_rank1_confidence0.23", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/132_rank1_confidence0.23"},
+  {"cache": "external/angela/Angela-OCT26/133_rank1_confidence0.40", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/133_rank1_confidence0.40"},
+  {"cache": "external/angela/Angela-OCT26/162_rank1_confidence0.27", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/162_rank1_confidence0.27"},
+  {"cache": "external/angela/Angela-OCT26/236_rank1_confidence0.28", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/236_rank1_confidence0.28"},
+  {"cache": "external/angela/Angela-OCT26/630_rank1_confidence0.59", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/630_rank1_confidence0.59"},
+  {"cache": "historical/Angela/Ranked_Docks/Rank3/MD/2Z0P_ligand_222", "source": "/projectnb/cheminfo/home/jxs794/MD-Backups/KYLE_MD_JOBS/Angela/Ranked_Docks/Rank3/MD/2Z0P_ligand_222"},
+  {"cache": "historical/LEDGF_9g94/Grubbs____45907639____96488367", "source": "/projectnb/cheminfo/home/jxs794/MD-Backups/KYLE_MD_JOBS/LEDGF_9g94/Grubbs____45907639____96488367"},
+  {"cache": "historical/LEDGF_9g94/m_207bcb____26285856____10860938", "source": "/projectnb/cheminfo/home/jxs794/MD-Backups/KYLE_MD_JOBS/LEDGF_9g94/m_207bcb____26285856____10860938"},
+  {"cache": "historical/LEDGF_9g94/rxn512a____EMOL56771003____EMOL37531308____EMOL48572214/rxn512a____EMOL56771003____EMOL37531308____EMOL2874389", "source": "/projectnb/cheminfo/home/jxs794/MD-Backups/KYLE_MD_JOBS/LEDGF_9g94/rxn512a____EMOL56771003____EMOL37531308____EMOL48572214/rxn512a____EMOL56771003____EMOL37531308____EMOL2874389"},
+  {"cache": "historical/LEDGF_9g94/rxn512a____EMOL56771003____EMOL37531308____EMOL888772", "source": "/projectnb/cheminfo/home/jxs794/MD-Backups/KYLE_MD_JOBS/LEDGF_9g94/rxn512a____EMOL56771003____EMOL37531308____EMOL888772"},
+  {"cache": "historical/LEDGF_9g94/rxn512a____EMOL56771003____EMOL37531308____EMOL888772_2", "source": "/projectnb/cheminfo/home/jxs794/MD-Backups/KYLE_MD_JOBS/LEDGF_9g94/rxn512a____EMOL56771003____EMOL37531308____EMOL888772_2"},
+  {"cache": "joey/18_rank1_confidence0.23/18_rank1_confidence0.23", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/18_rank1_confidence0.23"},
+  {"cache": "joey/38_rank1_confidence0.20/38_rank1_confidence0.20", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/38_rank1_confidence0.20"},
+  {"cache": "joey/43_rank1_confidence0.29/43_rank1_confidence0.29", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/43_rank1_confidence0.29"},
+  {"cache": "joey/507_rank1_confidence0.26/507_rank1_confidence0.26", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/507_rank1_confidence0.26"},
+  {"cache": "joey/514_rank1_confidence0.58/514_rank1_confidence0.58", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/514_rank1_confidence0.58"},
+  {"cache": "joey/72_rank1_confidence0.19/72_rank1_confidence0.19", "source": "/projectnb/triton/home/jxs794/Molecular_Dynamics/Angela-OCT26/72_rank1_confidence0.19"}
+]
