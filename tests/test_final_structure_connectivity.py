@@ -51,7 +51,36 @@ def test_rebuilds_cgenff_mol2_with_final_pdb_coordinates(tmp_path):
     assert rebuilt is not None
     assert "11.0000    12.0000    13.0000" in rebuilt
     assert "21.0000    22.0000    23.0000" in rebuilt
-    assert "@<TRIPOS>BOND\n1 1 2 1" in rebuilt
+    assert "@<TRIPOS>BOND\n     1     1     2 1" in rebuilt
+
+
+def test_rebuild_omits_explicit_hydrogens_but_keeps_aromatic_bonds(tmp_path):
+    rebuild = load_connectivity_helper()
+    mol2 = tmp_path / "LIG.cgenff.mol2"
+    mol2.write_text(
+        "@<TRIPOS>MOLECULE\nLIG\n 3 2 0 0 0\nSMALL\nGASTEIGER\n\n"
+        "@<TRIPOS>ATOM\n"
+        "1 C01 1.0 2.0 3.0 C.ar 1 LIG 0.0\n"
+        "2 N02 2.0 3.0 4.0 N.ar 1 LIG 0.0\n"
+        "3 H03 3.0 4.0 5.0 H 1 LIG 0.0\n"
+        "@<TRIPOS>BOND\n1 1 2 ar\n2 1 3 1\n",
+        encoding="utf-8",
+    )
+    pdb = tmp_path / "Final_Trajectory.pdb"
+    pdb.write_text(
+        pdb_line("C01", "LIG", 11.0, 12.0, 13.0)
+        + pdb_line("N02", "LIG", 21.0, 22.0, 23.0)
+        + pdb_line("H03", "LIG", 31.0, 32.0, 33.0),
+        encoding="utf-8",
+    )
+
+    rebuilt, resname = rebuild(pdb, mol2, "LIG")
+
+    assert resname == "LIG"
+    assert rebuilt is not None
+    assert " 2     1 0 0 0" in rebuilt
+    assert "H03" not in rebuilt
+    assert "@<TRIPOS>BOND\n     1     1     2 ar" in rebuilt
 
 
 def test_rebuild_requires_a_complete_atom_name_match(tmp_path):
