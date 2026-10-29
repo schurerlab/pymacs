@@ -81,9 +81,9 @@ def test_legacy_ligand_evidence_is_not_hidden_by_missing_metadata():
     assert 'str.extract(r"(\\d+)", expand=False)' in source
     assert '"Most continuously proximal"' in source
     assert '"Strongest typed interaction"' in source
-    assert "How to read proximity versus typed interactions" in source
+    assert "Why the two interaction occupancies can differ" in source
     assert "Reuse the resolved edge records published by 3B's interaction explorer" in source
-    assert 'const EDGES=(\\[.*?\\]);const ' in source
+    assert 'const EDGES=(\\[.*?\\]);\\s*const ' in source
 
 
 def test_interface_explorer_keeps_chain_chemistry_modes_mutually_exclusive():
