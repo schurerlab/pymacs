@@ -112,13 +112,13 @@ def svg_scene(model: dict, threshold: float = .25) -> str:
     # Give the sequence and its satellites generous breathing room.  The
     # explorer is embedded in the dossier, but remains horizontally scrollable
     # on narrower screens rather than compressing labels into each other.
-    width, height = max(1560, 360 + (columns - 1) * 170), 520 + (rows - 1) * 310
-    step_x = (width - 260) / max(1, columns - 1)
+    width, height = max(1560, 400 + (columns - 1) * 170), 570 + (rows - 1) * 330
+    step_x = (width - 320) / max(1, columns - 1)
     peptide_xy = []
     for index in range(count):
         row, column = divmod(index, columns)
-        x = 130 + (column if row % 2 == 0 else columns - 1 - column) * step_x
-        peptide_xy.append((x, 245 + row * 310))
+        x = 160 + (column if row % 2 == 0 else columns - 1 - column) * step_x
+        peptide_xy.append((x, 285 + row * 330))
     index_by_id = {str(item.get("label")): index for index, item in enumerate(residues)}
     visible = [edge for edge in model["edges"] if edge["occupancy"] >= threshold]
     partners: dict[str, list[dict]] = {}
@@ -127,8 +127,8 @@ def svg_scene(model: dict, threshold: float = .25) -> str:
     # Place satellites in outer lanes nearest their sequence neighborhood.  The
     # alternating lanes reserve the peptide's central reading path and reduce
     # crossings in dense 20--25 residue diagrams.
-    slots = [(x, y) for y in ([105] + [390 + 310 * row for row in range(rows)])
-             for x in range(105, width - 40, 174)]
+    slots = [(x, y) for y in ([145] + [445 + 330 * row for row in range(rows)])
+             for x in range(120, width - 40, 174)]
     protein_xy: dict[str, tuple[int, int]] = {}
     for partner, partner_edges in sorted(partners.items(), key=lambda item: (
             sum(index_by_id[edge["peptide"]] for edge in item[1]) / len(item[1]), item[0])):
@@ -142,7 +142,7 @@ def svg_scene(model: dict, threshold: float = .25) -> str:
              '<rect width="100%" height="100%" fill="#07111e"/>',
              '<style>text{font-family:Inter,Arial,sans-serif}.node:hover{filter:brightness(1.22)}</style>',
              f'<text x="42" y="42" fill="#69dfff" font-size="22" font-weight="800">PEPTIDE NETWORX · {count} AA</text>',
-             '<text x="42" y="70" fill="#96aeca" font-size="15">N → C sequence topology · schematic, not 3D conformation</text>']
+             '<text x="42" y="74" fill="#96aeca" font-size="15">N → C sequence topology · schematic, not 3D conformation</text>']
     if model["is_mock"]:
         parts.append(f'<text x="{width - 28}" y="44" text-anchor="end" fill="#ffd26b" font-size="18" font-weight="900">SYNTHETIC DEMO</text>')
     for index in range(1, len(peptide_xy)):
@@ -163,11 +163,11 @@ def svg_scene(model: dict, threshold: float = .25) -> str:
     for index, (residue, (x, y)) in enumerate(zip(residues, peptide_xy), 1):
         active_node = str(residue.get("label")) in active
         fill, stroke, text = ("#ffdb80", "#ffe8ad", "#1d2430") if active_node else ("#25394f", "#7695b5", "#edf5ff")
-        residue_name = str(residue.get("label", ""))[:3].upper()
+        residue_name = str(residue.get("label", "")).split(":")[-1][:3].upper()
         parts.append(f'<g class="node peptide" data-aa="{escape(residue_name)}"><circle cx="{x}" cy="{y}" r="40" fill="{fill}" stroke="{stroke}" stroke-width="3.5"/><text x="{x}" y="{y + 2}" text-anchor="middle" fill="{text}" font-size="27" font-weight="900">{escape(residue.get("one", "X"))}</text><text x="{x}" y="{y + 26}" text-anchor="middle" fill="{text}" font-size="12" font-weight="800">{index}</text><title>{escape(residue.get("label", ""))} · sequence position {index}</title></g>')
     first, last = peptide_xy[0], peptide_xy[-1]
-    parts.extend((f'<text x="{first[0] - 52}" y="{first[1] + 7}" fill="#5ce5fa" font-size="19" font-weight="900">N</text>',
-                  f'<text x="{last[0] + 45}" y="{last[1] + 7}" fill="#5ce5fa" font-size="19" font-weight="900">C</text>', "</svg>"))
+    parts.extend((f'<text x="{first[0] - 78}" y="{first[1] + 8}" fill="#5ce5fa" font-size="22" font-weight="900">N</text>',
+                  f'<text x="{last[0] + 62}" y="{last[1] + 8}" fill="#5ce5fa" font-size="22" font-weight="900">C</text>', "</svg>"))
     return "\n".join(parts)
 
 
