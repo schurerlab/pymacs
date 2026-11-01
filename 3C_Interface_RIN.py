@@ -1193,7 +1193,11 @@ function render(){const {p,edges}=current();if(!p){svg.innerHTML='';return}const
 function renderColourControls(){const p=DATA.pairs.find(x=>x.id===pair);if(!p)return;colourControls.innerHTML=`<button data-colour="chain" class="${colourMode==='chain'?'active':''}">Chain colors</button><button data-colour="left-type" class="${colourMode==='left-type'?'active':''}">Color ${esc(p.left)} by chemistry</button><button data-colour="right-type" class="${colourMode==='right-type'?'active':''}">Color ${esc(p.right)} by chemistry</button>`;colourControls.querySelectorAll('[data-colour]').forEach(b=>b.onclick=()=>{colourMode=b.dataset.colour;renderColourControls();render()})}
 document.querySelector('#pairs').innerHTML=DATA.pairs.map((p,i)=>`<button data-p="${esc(p.id)}" class="${i?'':'active'}">${esc(p.left)} ↔ ${esc(p.right)}</button>`).join('');document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{pair=b.dataset.p;selected=null;colourMode='chain';document.querySelectorAll('[data-p]').forEach(x=>x.classList.toggle('active',x===b));renderColourControls();render()});document.querySelectorAll('[data-t]').forEach(b=>b.onclick=()=>{threshold=+b.dataset.t;selected=null;document.querySelectorAll('[data-t]').forEach(x=>x.classList.toggle('active',x===b));render()});renderColourControls();render();
 </script>'''.replace("__PAYLOAD__", payload).replace("__DEFAULT__", f"{default_threshold:.2f}")
-    html = re.sub(r"<script>const DATA=.*?</script>", interactive_script, html, count=1, flags=re.DOTALL)
+    # Use a callable replacement so JavaScript regular expressions (for
+    # example ``\\s`` in compact node parsing) are kept verbatim rather than
+    # being interpreted as Python ``re.sub`` replacement escapes.
+    html = re.sub(r"<script>const DATA=.*?</script>", lambda _match: interactive_script,
+                  html, count=1, flags=re.DOTALL)
     (outdir / "Interface_RIN_Explorer.html").write_text(html, encoding="utf-8")
 
 
