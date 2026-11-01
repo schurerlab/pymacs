@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import time
 import shutil
@@ -1189,6 +1190,36 @@ document.querySelector('#pairs').innerHTML=DATA.pairs.map((p,i)=>`<button data-p
     (outdir / "Interface_RIN_Explorer.html").write_text(html, encoding="utf-8")
 
 
+def render_peptide_networx(outdir: Path, polymer_entries: Sequence[dict[str, Any]]) -> Path | None:
+    """Create the peptide-specific visual after 3C's data products are complete.
+
+    3C remains the source of truth for every contact value.  The downstream
+    renderer consumes its self-contained explorer payload, so changing visual
+    layout never invalidates or recomputes the trajectory-derived interface
+    analysis.  This is intentionally called on both fresh and cache-reuse
+    paths: cached contact tables must not suppress a newer missing renderer.
+    """
+    peptide_ids = [str(entry.get("current_chain") or "").strip() for entry in polymer_entries
+                   if normalize_chain_type(entry.get("chain_type")) == "peptide"]
+    peptide_ids = [chain_id for chain_id in peptide_ids if chain_id]
+    if not peptide_ids:
+        return None
+    script = Path(__file__).resolve().with_name("4D_Peptide_NETWORX.py")
+    if not script.is_file():
+        raise FileNotFoundError(f"Peptide NETWORX renderer is missing: {script}")
+    destination = Path(outdir).parent / "Peptide_NETWORX"
+    command = [sys.executable, str(script), "--interface-dir", str(outdir), "--outdir", str(destination)]
+    # The embedded 3C payload preserves display labels; a short current chain
+    # ID is only a fallback and can be ambiguous in renamed legacy systems.
+    print(f"🧬 Rendering peptide NETWORX from 3C interface outputs: {destination}")
+    subprocess.run(command, check=True)
+    required = (destination / "Peptide_NETWORX_Explorer.html", destination / "Peptide_NETWORX.svg",
+                destination / "peptide_networx_manifest.json")
+    if not all(path.is_file() and path.stat().st_size > 0 for path in required):
+        raise RuntimeError("Peptide NETWORX completed without its required presentation outputs")
+    return destination
+
+
 def write_interface_manifest(
     manifest_path: Path,
     args,
@@ -1403,6 +1434,7 @@ def main():
             progress.complete("write_tables")
             progress.complete("render_figures")
             progress.complete("write_manifest")
+            render_peptide_networx(outdir, polymer_entries)
             progress.finish()
             return 0
 
@@ -1464,6 +1496,7 @@ def main():
         progress.complete("contact_scan")
         progress.complete("write_tables")
         progress.complete("write_manifest")
+        render_peptide_networx(outdir, polymer_entries)
         progress.finish()
         return 0
     else:
@@ -1559,6 +1592,7 @@ def main():
         plot_parameters,
     )
     progress.complete("write_manifest")
+    render_peptide_networx(outdir, polymer_entries)
     progress.finish()
 
     outputs = [

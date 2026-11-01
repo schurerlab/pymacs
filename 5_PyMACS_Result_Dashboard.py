@@ -312,6 +312,9 @@ def build_results_manifest(root: Path, analysis: Path, output: Path,
     interface_explorer = analysis / "Interface_RIN" / "Interface_RIN_Explorer.html"
     if interface_explorer.is_file():
         canonical.append(interface_explorer.relative_to(root).as_posix())
+    peptide_explorer = analysis / "Peptide_NETWORX" / "Peptide_NETWORX_Explorer.html"
+    if peptide_explorer.is_file():
+        canonical.append(peptide_explorer.relative_to(root).as_posix())
     canonical.append(report_relative)
 
     all_outputs = sorted(
@@ -330,6 +333,7 @@ def build_results_manifest(root: Path, analysis: Path, output: Path,
         "ligand_contacts": next((path for path in canonical if path.endswith("InteractionTypes_Framewise.csv")), None),
         "native_contact_q": next((path for path in canonical if path.endswith("native_contact_q.csv")), None),
         "interface_rin": next((path for path in canonical if path.endswith("Interface_RIN_Explorer.html")), None),
+        "peptide_networx": next((path for path in canonical if path.endswith("Peptide_NETWORX_Explorer.html")), None),
     }
     return {
         "schema_version": 1,
@@ -715,6 +719,20 @@ def interactive_networx_html(analysis: Path, *, ligand_expected: bool = False) -
     return f'''<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Persistent interaction explorer</div><h2>Compare retained interactions</h2><p>Choose the displayed occupancy threshold to inspect the chemically classified residue–ligand-atom interactions. The larger embedded canvas supports node rearrangement and SVG export without opening a separate page.</p></div></div><iframe title="Interactive ligand interaction explorer" srcdoc="{escape(document, quote=True)}" sandbox="allow-scripts allow-downloads" style="display:block;width:100%;height:1320px;border:1px solid #285a79;border-radius:16px;background:#05070d" loading="lazy"></iframe></section>'''
 
 
+def peptide_networx_html(analysis: Path, *, peptide_expected: bool = False) -> str:
+    """Embed the dedicated sequence-preserving peptide topology when published."""
+    explorer = analysis / "Peptide_NETWORX" / "Peptide_NETWORX_Explorer.html"
+    if not explorer.is_file():
+        if not peptide_expected:
+            return ""
+        return '''<section class="gallery-section explorer-pending"><div class="section-head"><div><div class="eyebrow">Peptide topology</div><h2>Peptide NETWORX pending</h2><p>The peptide interface data are available, but the sequence-preserving explorer has not been published. Re-run the 3C interface stage; it now writes this presentation-only view from the completed interface outputs.</p></div></div></section>'''
+    try:
+        document = explorer.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return f'''<section class="gallery-section peptide-networx"><div class="section-head"><div><div class="eyebrow">Peptide interaction topology</div><h2>Full sequence, persistent receptor contacts</h2><p>The peptide backbone is fixed in N → C order; only contact edges and highlighting respond to the occupancy threshold. This schematic preserves sequence context and does not represent a 3D conformation.</p></div></div><iframe title="Peptide NETWORX interaction explorer" srcdoc="{escape(document, quote=True)}" sandbox="allow-scripts allow-downloads" style="display:block;width:100%;height:850px;border:1px solid #285a79;border-radius:16px;background:#05070d" loading="lazy"></iframe></section>'''
+
+
 def interface_rin_context(analysis: Path) -> dict:
     """Read the generated RIN explorer and retain one independently viewable panel per chain pair."""
     interface_dir = analysis / "Interface_RIN"
@@ -799,6 +817,15 @@ def interface_evidence_html(analysis: Path, context: PartnerContext, rin: dict) 
         return ""
     interface_dir = analysis / "Interface_RIN"
     explorer = interface_dir / "Interface_RIN_Explorer.html"
+    presence_available = False
+    try:
+        with np.load(interface_dir / "interface_residue_pair_presence.npz", allow_pickle=False) as presence:
+            matrix = presence.get("contact_matrix")
+            pair_ids = presence.get("pair_ids")
+            presence_available = bool(matrix is not None and pair_ids is not None and matrix.ndim == 2
+                                      and matrix.shape[0] and matrix.shape[1] and len(pair_ids))
+    except (OSError, ValueError):
+        pass
     has_maps = any((interface_dir / filename).is_file() for filename in (
         "Interface_RIN_Network.png", "Interface_ChainLevel_Network.png", "Interface_ResiduePair_ContactHeatmap.png",
     ))
@@ -809,6 +836,8 @@ def interface_evidence_html(analysis: Path, context: PartnerContext, rin: dict) 
             ("Interface_ChainLevel_Network.png", "Chain-level interface map"),
             ("Interface_ResiduePair_ContactHeatmap.png", "Residue-pair occupancy heatmap"),
         ):
+            if filename == "Interface_ResiduePair_ContactHeatmap.png" and not presence_available:
+                continue
             path = interface_dir / filename
             try:
                 encoded = base64.b64encode(path.read_bytes()).decode("ascii")
@@ -818,12 +847,14 @@ def interface_evidence_html(analysis: Path, context: PartnerContext, rin: dict) 
                 f'<figure class="interface-preview"><img alt="{escape(label)}" src="data:image/png;base64,{encoded}"><figcaption>{escape(label)}</figcaption></figure>'
             )
         static_maps = f'<div class="interface-preview-grid">{"".join(previews)}</div>' if previews else ""
+        time_series_note = ("" if presence_available else
+                            '<p class="asset-note">Residue-pair occupancy time series were not published for this run, so no placeholder heatmap is shown.</p>')
         return (
             '<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Interface evidence</div>'
             f'<h2>{escape(context.relationship_label.title())} residue maps</h2>'
             f'<p>{"Start with the interactive residue-node network, then" if explorer.is_file() else "Use the published node maps, then"} use the occupancy heatmap to confirm which residue pairs persist. '
             'Each selected chain pair remains separate so unrelated interfaces are never merged.</p></div></div>'
-            f'{static_maps}</section>'
+            f'{static_maps}{time_series_note}</section>'
         )
     expected = "Interface_RIN/Interface_RIN_Explorer.html and the interface residue-pair tables"
     return (
@@ -1975,7 +2006,7 @@ def main() -> None:
     peptide_rmsf = analysis / "Peptide_RMSF.csv"
     if peptide_rmsf.is_file():
         add("flexibility", categorical_bar_plot(peptide_rmsf, f"{context.partner_label} peptide residue RMSF", "Residue", ["RMSF_A"], "RMSF (Å)", colors=[ORANGE]), "Peptide residue RMSF", peptide_rmsf,
-            note="Higher values locate mobile peptide residues; compare contacting positions with the interface-node map.")
+            note="Higher values locate mobile peptide residues; compare contacting positions with the sequence-preserving peptide map. Terminal residues often fluctuate more because they have fewer structural constraints, so interpret an isolated terminal spike in sequence context.")
 
     frequency_for_ligand = next(iter(sorted(analysis.glob("*_contact_frequency_filtered.csv"))), None)
     if has_ligand_evidence and frequency_for_ligand:
@@ -2079,6 +2110,7 @@ def main() -> None:
     # Interface-only systems should never acquire a misleading empty ligand card.
     ligand_panel = ligand_html(root, ligand_name) if context.partner_kind == "ligand" else ""
     network_explorer = interactive_networx_html(analysis, ligand_expected=has_ligand_evidence)
+    peptide_topology = peptide_networx_html(analysis, peptide_expected=context.partner_kind == "peptide")
     interface_evidence = interface_evidence_html(analysis, context, interface_rin)
     structure_panel = final_structure_html(root, context)
     stability = section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"])
@@ -2089,11 +2121,11 @@ def main() -> None:
     distances = section_html("Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"]) + distance_carousel_html(analysis)
     coupled = section_html("Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"])
     dashboard = tabbed_sections([
-        ("overview", "Overview", overview + interface_rin["overview"] + network_explorer),
+        ("overview", "Overview", overview + peptide_topology + interface_rin["overview"] + network_explorer),
         ("stability", "Stability", stability),
         ("flexibility", "Flexibility", flexibility),
         ("secondary", "Secondary structure", secondary),
-        ("contacts", context.contact_tab_label, ligand_panel + contacts + network_explorer + (interface_rin["peptide_detail"] if context.partner_kind == "peptide" else interface_rin["protein_detail"] if context.partner_kind == "protein_chain" else "")),
+        ("contacts", context.contact_tab_label, ligand_panel + contacts + network_explorer + peptide_topology + (interface_rin["peptide_detail"] if context.partner_kind == "peptide" else interface_rin["protein_detail"] if context.partner_kind == "protein_chain" else "")),
         ("chemistry", "Contact chemistry", chemistry),
         ("distances", "Distances", distances),
         ("coupled", "Coupled dynamics", coupled),
