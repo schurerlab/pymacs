@@ -730,7 +730,7 @@ def peptide_networx_html(analysis: Path, *, peptide_expected: bool = False) -> s
         document = explorer.read_text(encoding="utf-8")
     except OSError:
         return ""
-    return f'''<section class="gallery-section peptide-networx"><div class="section-head"><div><div class="eyebrow">Peptide interaction topology</div><h2>Full sequence, persistent receptor contacts</h2><p>The peptide backbone is fixed in N → C order; only contact edges and highlighting respond to the occupancy threshold. This schematic preserves sequence context and does not represent a 3D conformation.</p></div></div><iframe title="Peptide NETWORX interaction explorer" srcdoc="{escape(document, quote=True)}" sandbox="allow-scripts allow-downloads" style="display:block;width:100%;height:850px;border:1px solid #285a79;border-radius:16px;background:#05070d" loading="lazy"></iframe></section>'''
+    return f'''<section class="gallery-section peptide-networx"><div class="section-head"><div><div class="eyebrow">Peptide interaction topology</div><h2>Full sequence, persistent receptor contacts</h2><p>The peptide backbone is fixed in N → C order; only contact edges and highlighting respond to the occupancy threshold. This schematic preserves sequence context and does not represent a 3D conformation.</p></div></div><iframe title="Peptide NETWORX interaction explorer" srcdoc="{escape(document, quote=True)}" sandbox="allow-scripts allow-downloads" style="display:block;width:100%;height:1180px;border:1px solid #285a79;border-radius:16px;background:#05070d" loading="lazy"></iframe></section>'''
 
 
 def interface_rin_context(analysis: Path) -> dict:
@@ -778,7 +778,7 @@ def interface_rin_context(analysis: Path) -> dict:
             focused = focused.replace(".controls{display:flex", "#pairs{display:none}.controls{display:flex", 1)
         return (
             f'<iframe title="{escape(title)}" srcdoc="{escape(focused, quote=True)}" '
-            'sandbox="allow-scripts" style="display:block;width:100%;height:880px;border:1px solid #285a79;'
+            'sandbox="allow-scripts" style="display:block;width:100%;height:1200px;border:1px solid #285a79;'
             'border-radius:16px;background:#05070d" loading="lazy"></iframe>'
         )
 
