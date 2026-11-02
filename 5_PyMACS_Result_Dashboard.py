@@ -829,30 +829,29 @@ def interface_svg_snapshots(explorer: Path) -> list[tuple[str, str]]:
         left, right = pair["left"], pair["right"]
         edges = [edge for edge in data.get("edges", []) if edge.get("fraction", 0) >= .5 and
                  {edge.get("a", "").split(":", 1)[0], edge.get("b", "").split(":", 1)[0]} == {left, right}]
-        chains = data.get("chains", {})
         left_nodes = list(dict.fromkeys(edge["a"] for edge in edges))
         right_nodes = list(dict.fromkeys(edge["b"] for edge in edges))
         def short(label: str) -> str:
             return label.split(":")[-1]
         def y(index: int, count: int) -> int:
             return 48 + round(index * 185 / max(count - 1, 1))
-        left_pos = {node: (76, y(i, len(left_nodes))) for i, node in enumerate(left_nodes)}
-        right_pos = {node: (424, y(i, len(right_nodes))) for i, node in enumerate(right_nodes)}
-        lines = ''.join(f'<path d="M{x1} {y1} L{x2} {y2}" stroke="#35d0ff" stroke-opacity="{.3 + .7 * edge["fraction"]:.2f}" stroke-width="{1 + 5 * edge["fraction"]:.1f}"/>'
-                        for edge in edges for (x1, y1), (x2, y2) in [(left_pos[edge["a"]], right_pos[edge["b"]])])
-        nodes = ''.join(f'<g><circle cx="{x}" cy="{yy}" r="13" fill="{color}"/><text x="{x}" y="{yy + 3}" text-anchor="middle" font-size="7" font-weight="800">{escape(short(node))}</text></g>'
-                        for mapping, color in ((left_pos, '#ffe66d'), (right_pos, '#35d0ff')) for node, (x, yy) in mapping.items())
-        network = f'<svg viewBox="0 0 500 250" role="img" aria-label="Persistent residue contacts at 50 percent"><rect width="500" height="250" fill="#07111e"/><text x="18" y="20" fill="#b9d8ef" font-size="11" font-weight="800">{escape(left)} ↔ {escape(right)} · ≥50% persistence</text>{lines}{nodes}</svg>'
-        lres, rres = chains.get(left, {}).get("residues", []), chains.get(right, {}).get("residues", [])
-        lookup = {(edge["a"], edge["b"]): edge for edge in edges}
-        cells = []
-        for row, residue_l in enumerate(lres):
-            for col, residue_r in enumerate(rres):
-                edge = lookup.get((residue_l.get("label"), residue_r.get("label"))) or lookup.get((residue_r.get("label"), residue_l.get("label")))
-                fill = f'rgba(53,208,255,{.14 + .86 * edge["fraction"]:.2f})' if edge else '#102039'
-                cells.append(f'<rect x="{75 + col * 18}" y="{42 + row * 18}" width="15" height="15" rx="2" fill="{fill}"/>')
-        heatmap = f'<svg viewBox="0 0 {max(360, 90 + len(rres)*18)} {max(250, 58 + len(lres)*18)}" role="img" aria-label="Residue-pair persistence heatmap"><rect width="100%" height="100%" fill="#07111e"/><text x="12" y="21" fill="#b9d8ef" font-size="11" font-weight="800">Residue-pair persistence · ≥50%</text>{"".join(cells)}</svg>'
-        return [(network, "Bipartite residue contacts · default ≥50% persistence"), (heatmap, "Residue-pair persistence map · default ≥50% persistence")]
+        all_nodes = left_nodes + right_nodes
+        def ring(nodes: list[str], cx: int, cy: int, rx: int, ry: int) -> dict[str, tuple[int, int]]:
+            return {node: (round(cx + rx * np.cos(-np.pi / 2 + 2 * np.pi * index / max(len(nodes), 1))), round(cy + ry * np.sin(-np.pi / 2 + 2 * np.pi * index / max(len(nodes), 1)))) for index, node in enumerate(nodes)}
+        layouts = {
+            "Force-directed": ring(all_nodes, 250, 135, 180, 88),
+            "Bipartite": {**{node: (76, y(index, len(left_nodes))) for index, node in enumerate(left_nodes)}, **{node: (424, y(index, len(right_nodes))) for index, node in enumerate(right_nodes)}},
+            "Concentric": {**ring(left_nodes, 250, 135, 175, 88), **ring(right_nodes, 250, 135, 95, 48)},
+            "Circular": ring(all_nodes, 250, 135, 180, 88),
+            "Chain-separated": {**{node: (90 + index * 320 / max(len(left_nodes) - 1, 1), 74) for index, node in enumerate(left_nodes)}, **{node: (90 + index * 320 / max(len(right_nodes) - 1, 1), 196) for index, node in enumerate(right_nodes)}},
+        }
+        snapshots = []
+        for layout, positions in layouts.items():
+            lines = ''.join(f'<path d="M{x1} {y1} L{x2} {y2}" stroke="#35d0ff" stroke-opacity="{.3 + .7 * edge["fraction"]:.2f}" stroke-width="{1 + 5 * edge["fraction"]:.1f}"/>' for edge in edges for (x1, y1), (x2, y2) in [(positions[edge["a"]], positions[edge["b"]])])
+            nodes = ''.join(f'<g><circle cx="{x}" cy="{yy}" r="13" fill="{"#ffe66d" if node in left_nodes else "#35d0ff"}"/><text x="{x}" y="{yy + 3}" text-anchor="middle" font-size="7" font-weight="800">{escape(short(node))}</text></g>' for node, (x, yy) in positions.items())
+            svg = f'<svg viewBox="0 0 500 250" role="img" aria-label="{escape(layout)} interface view"><rect width="500" height="250" fill="#07111e"/><text x="18" y="20" fill="#b9d8ef" font-size="11" font-weight="800">{escape(layout)} · {escape(left)} ↔ {escape(right)} · ≥50%</text>{lines}{nodes}</svg>'
+            snapshots.append((svg, f"{layout} · default ≥50% persistence"))
+        return snapshots
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return []
 
@@ -863,45 +862,16 @@ def interface_evidence_html(analysis: Path, context: PartnerContext, rin: dict) 
         return ""
     interface_dir = analysis / "Interface_RIN"
     explorer = interface_dir / "Interface_RIN_Explorer.html"
-    presence_available = False
-    try:
-        with np.load(interface_dir / "interface_residue_pair_presence.npz", allow_pickle=False) as presence:
-            matrix = presence.get("contact_matrix")
-            pair_ids = presence.get("pair_ids")
-            presence_available = bool(matrix is not None and pair_ids is not None and matrix.ndim == 2
-                                      and matrix.shape[0] and matrix.shape[1] and len(pair_ids))
-    except (OSError, ValueError):
-        pass
-    has_maps = any((interface_dir / filename).is_file() for filename in (
-        "Interface_RIN_Network.png", "Interface_ChainLevel_Network.png", "Interface_ResiduePair_ContactHeatmap.png",
-    ))
-    if explorer.is_file() or has_maps:
+    if explorer.is_file():
         previews = [f'<figure class="interface-preview">{svg}<figcaption>{escape(label)}</figcaption></figure>'
                     for svg, label in interface_svg_snapshots(explorer)]
-        for filename, label in (
-            ("Interface_RIN_Network.png", "Residue interaction-node map"),
-            ("Interface_ChainLevel_Network.png", "Chain-level interface map"),
-            ("Interface_ResiduePair_ContactHeatmap.png", "Residue-pair occupancy heatmap"),
-        ):
-            if filename == "Interface_ResiduePair_ContactHeatmap.png" and not presence_available:
-                continue
-            path = interface_dir / filename
-            try:
-                encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-            except OSError:
-                continue
-            previews.append(
-                f'<figure class="interface-preview"><img alt="{escape(label)}" src="data:image/png;base64,{encoded}"><figcaption>{escape(label)}</figcaption></figure>'
-            )
-        static_maps = f'<div class="interface-preview-grid">{"".join(previews)}</div>' if previews else ""
-        time_series_note = ("" if presence_available else
-                            '<p class="asset-note">Residue-pair occupancy time series were not published for this run, so no placeholder heatmap is shown.</p>')
+        slides = ''.join(f'<article class="interface-slide"{" hidden" if index else ""}>{preview}</article>' for index, preview in enumerate(previews))
+        static_maps = f'<div class="interface-carousel"><div class="interface-carousel-track">{slides}</div><div class="interface-carousel-controls"><button type="button" data-interface-carousel="previous">← Previous</button><span data-interface-carousel-label>1 / {len(previews)}</span><button type="button" data-interface-carousel="next">Next →</button></div></div>' if previews else ""
         return (
             '<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Interface evidence</div>'
             f'<h2>{escape(context.relationship_label.title())} residue maps</h2>'
-            f'<p>{"Start with the interactive residue-node network, then" if explorer.is_file() else "Use the published node maps, then"} use the occupancy heatmap to confirm which residue pairs persist. '
-            'Each selected chain pair remains separate so unrelated interfaces are never merged.</p></div></div>'
-            f'{static_maps}{time_series_note}</section>'
+            '<p>Five static SVG snapshots of the interface network are shown at the default 50% contact-persistence threshold. Use the carousel to compare layouts without mixing them with legacy PNG outputs.</p></div></div>'
+            f'{static_maps}</section>'
         )
     expected = "Interface_RIN/Interface_RIN_Explorer.html and the interface residue-pair tables"
     return (
@@ -1941,6 +1911,18 @@ document.querySelectorAll('.js-complex-3d').forEach(el=>{{
     panel.querySelectorAll('[data-structure-control]').forEach(control=>control.addEventListener('change',()=>{{const key=control.dataset.structureControl;if(key==='protein-color')state.protein=control.value;if(key==='peptide-color')state.peptide=control.value;if(key==='peptide-sidechains')state.pepSide=control.value;if(key==='protein-sidechains')state.proSide=control.value;render()}}));
     render(); addEventListener('resize',()=>viewer.resize());
   }} catch (_) {{ el.textContent='3D structure preview unavailable.'; }}
+}});
+document.querySelectorAll('.structure-card').forEach(card=>{{
+  const controls=card.querySelector('.structure-control-grid'); if(!controls)return;
+  Object.assign(controls.style,{{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(175px,1fr))',gap:'10px',margin:'0 0 13px',padding:'12px',border:'1px solid rgba(53,208,255,.24)',borderRadius:'14px',background:'linear-gradient(135deg,#09192b,#10122b)'}});
+  controls.querySelectorAll('label').forEach(label=>{{Object.assign(label.style,{{display:'grid',gap:'6px',color:'#9bbce0',fontSize:'.76rem',fontWeight:'800'}});const select=label.querySelector('select');Object.assign(select.style,{{appearance:'none',padding:'9px 32px 9px 11px',borderRadius:'9px',border:'1px solid #285a79',background:'#07111e',color:'#dff5ff',fontWeight:'800',cursor:'pointer'}})}});
+}});
+document.querySelectorAll('.interface-carousel').forEach(carousel=>{{
+  const slides=[...carousel.querySelectorAll('.interface-slide')], label=carousel.querySelector('[data-interface-carousel-label]'); let index=0;
+  Object.assign(carousel.style,{{border:'1px solid rgba(53,208,255,.3)',borderRadius:'16px',overflow:'hidden',background:'#07111e'}});
+  carousel.querySelectorAll('.interface-slide').forEach(slide=>slide.style.padding='14px');
+  carousel.querySelector('.interface-carousel-controls').style.cssText='display:flex;justify-content:center;align-items:center;gap:14px;padding:12px;border-top:1px solid #23375d;color:#b7d5ed;font-weight:800';
+  carousel.querySelectorAll('[data-interface-carousel]').forEach(button=>{{button.style.cssText='border:1px solid #285a79;border-radius:9px;background:#0a253a;color:#dff5ff;padding:8px 12px;font:800 .82rem inherit;cursor:pointer';button.addEventListener('click',()=>{{index=(index+(button.dataset.interfaceCarousel==='next'?1:-1)+slides.length)%slides.length;slides.forEach((slide,i)=>slide.hidden=i!==index);label.textContent=`${{index+1}} / ${{slides.length}}`}})}});
 }});
 </script><script>
 /* Forward chain-aware explorer selections between independently sandboxed panels. */
