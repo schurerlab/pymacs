@@ -89,6 +89,24 @@ AA1 = {
     "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
 }
 
+# Atom-index ranges occasionally include the first solvent record that follows
+# a polymer chain.  Treating that record as peptide creates an artificial
+# ``X`` residue and, worse, a fan of water--protein proximity edges.  Peptide
+# analyses are sequence views, so retain only bona fide amino-acid residues;
+# for other polymer partners, exclude common solvent/ion residue names.
+NONPOLYMER_RESNAMES = {
+    "SOL", "HOH", "WAT", "TIP3", "TIP3P", "SPC", "SPCE", "OPC",
+    "NA", "CL", "K", "CA", "MG", "ZN", "MN", "FE", "CU", "BR", "IOD",
+}
+
+
+def is_interface_polymer_residue(entry, residue):
+    """Return whether a residue belongs in a chain-level interface analysis."""
+    resname = str(getattr(residue, "resname", "")).strip().upper()
+    if normalize_chain_type(entry.get("chain_type")) == "peptide":
+        return resname in AA1
+    return bool(resname) and resname not in NONPOLYMER_RESNAMES
+
 
 def build_parser():
     parser = argparse.ArgumentParser(
@@ -257,7 +275,12 @@ def classify_residue_pair(residue_a, residue_b, frame=0, time_ns=0.0):
 
 def build_chain_data(universe, entry):
     atomgroup = atomgroup_for_entry(universe, entry)
-    heavy_group = heavy_atomgroup(atomgroup)
+    polymer_indices = [
+        atom.index for atom in atomgroup
+        if is_interface_polymer_residue(entry, atom.residue)
+    ]
+    polymer_group = universe.atoms[polymer_indices] if polymer_indices else universe.atoms[[]]
+    heavy_group = heavy_atomgroup(polymer_group)
     residues = []
     atom_to_residue = np.full(heavy_group.n_atoms, -1, dtype=int)
 
@@ -1090,7 +1113,10 @@ def interface_chain_sequences(universe, chain_pairs):
             label = entry["display_label"]
             if label in sequences:
                 continue
-            residues = atomgroup_for_entry(universe, entry).residues
+            residues = [
+                residue for residue in atomgroup_for_entry(universe, entry).residues
+                if is_interface_polymer_residue(entry, residue)
+            ]
             seen = set()
             sequence = []
             for residue in residues:
@@ -1135,6 +1161,8 @@ def interface_structure_pdb(universe, chain_pairs) -> str:
             chain = str(entry.get("current_chain") or entry.get("source_chain") or "X")[:1] or "X"
             for atom in atomgroup_for_entry(universe, entry).atoms:
                 residue = atom.residue
+                if not is_interface_polymer_residue(entry, residue):
+                    continue
                 name = str(atom.name)[:4]
                 resname = str(residue.resname)[:3].upper()
                 resid = int(getattr(residue, "resid", 0))
