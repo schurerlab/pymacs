@@ -89,6 +89,20 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("label:''", page)
         self.assertIn("if(window.ResizeObserver)", page)
 
+    def test_sandbox_network_fallback_and_selection_colours(self):
+        page = build_cytoscape_interface_explorer(json.dumps({
+            "pairs": [{"id": "p", "left": "Rec", "right": "Pep"}],
+            "chains": {"Rec": {"type": "protein", "residues": []},
+                       "Pep": {"type": "peptide", "residues": []}},
+            "edges": [], "presence": {"available": True, "times_ns": [], "rows": {}},
+        }))
+        self.assertIn("#cy{display:none!important}#rin{display:block", page)
+        self.assertIn("state.selected===id){state.selected=null", page)
+        self.assertIn("#24e6ff", page)
+        self.assertIn("#ff5a78", page)
+        self.assertIn("$('#space').onwheel", page)
+        self.assertIn("document.querySelector('#cy').offsetWidth===0", page)
+
     def test_reusable_3c_cache_rebuilds_the_explorer(self):
         source = Path(__file__).resolve().parents[1].joinpath("3C_Interface_RIN.py").read_text()
         match = re.search(
