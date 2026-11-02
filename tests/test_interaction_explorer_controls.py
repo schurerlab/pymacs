@@ -73,6 +73,17 @@ def test_dashboard_embed_allows_export_and_has_room_for_the_full_explorer():
     assert '"Residue contact fingerprint"' in source
 
 
+def test_distance_carousel_uses_observed_events_and_has_four_complementary_views():
+    source = (ROOT / "5_PyMACS_Result_Dashboard.py").read_text(encoding="utf-8")
+    assert "def distance_carousel_html" in source
+    assert "Closest peptide–protein separation over time" in source
+    assert "Separation distributions for the 12 most-observed residues" in source
+    assert "Persistent-contact distance ranking" in source
+    assert "Longest uninterrupted observed contact episodes" in source
+    assert "Missing frames are never converted to" in source
+    assert "events = events[(events[\"Distance\"] > 0)" in source
+
+
 def test_ligand_dashboard_never_silently_hides_a_missing_explorer_artifact():
     source = (ROOT / "5_PyMACS_Result_Dashboard.py").read_text(encoding="utf-8")
     assert "def interactive_networx_html(analysis: Path, *, ligand_expected: bool = False)" in source

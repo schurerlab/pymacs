@@ -1263,57 +1263,147 @@ def contact_persistence_plot(events_file: Path, denominator_file: Path,
 
 
 def distance_carousel_html(analysis: Path) -> str:
-    """Render the precomputed residue set as native, hoverable Plotly bars."""
-    directory = analysis / "RESIDUE_Contact_Distance"
-    residues = [image.stem.removeprefix("dist_") for image in sorted(directory.glob("dist_*.png"))] if directory.is_dir() else []
-    source = analysis / "AllContacts_Framewise.csv"
-    if not residues or not source.is_file():
+    """A compact, evidence-first gallery for interpreting interface distances.
+
+    Every panel is derived from recorded contact events or the explicitly
+    published interface time series.  Missing frames are never converted to
+    zero-distance observations, which prevents solvent/placeholder artifacts
+    from becoming visually persuasive spokes or traces.
+    """
+    events_path = analysis / "AllContacts_Framewise.csv"
+    if not events_path.is_file():
         return ""
-    wanted = set(residues)
-    samples: dict[str, list[float]] = {residue: [] for residue in residues}
-    # Exact source data stays downloadable; retain a generous, deterministic
-    # browser sample from every residue so publication remains lightweight.
     try:
-        for chunk in pd.read_csv(source, usecols=["Residue", "Distance"], chunksize=100_000):
-            chunk["Distance"] = pd.to_numeric(chunk["Distance"], errors="coerce")
-            for residue, values in chunk.dropna().groupby("Residue")["Distance"]:
-                residue = str(residue)
-                if residue not in wanted or len(samples[residue]) >= 12_000:
-                    continue
-                samples[residue].extend(values.iloc[:12_000 - len(samples[residue])].astype(float).tolist())
-    except Exception:
+        events = pd.read_csv(events_path, usecols=lambda column: column in {"Time_ns", "Residue", "Distance"})
+    except (OSError, ValueError, pd.errors.ParserError):
         return ""
-    slides: list[str] = []
-    for index, residue in enumerate(residues):
-        values = np.asarray(samples[residue], dtype=float)
-        if values.size < 2:
-            continue
-        counts, edges = np.histogram(values, bins=32)
-        centres = (edges[:-1] + edges[1:]) / 2
-        shares = counts / counts.sum() * 100
-        figure = go.Figure(go.Bar(
-            x=centres, y=counts, width=np.diff(edges) * 0.92, marker_color=CYAN,
-            customdata=np.column_stack([edges[:-1], edges[1:], shares]),
-            hovertemplate=(f"Residue={escape(residue)}<br>Distance interval=%{{customdata[0]:.2f}}–%{{customdata[1]:.2f}} Å"
-                           "<br>Observed contact events=%{y}<br>Share of displayed events=%{customdata[2]:.2f}%<extra></extra>"),
-        ))
+    required = {"Time_ns", "Residue", "Distance"}
+    if not required.issubset(events.columns):
+        return ""
+    events["Time_ns"] = pd.to_numeric(events["Time_ns"], errors="coerce")
+    events["Distance"] = pd.to_numeric(events["Distance"], errors="coerce")
+    events = events.dropna(subset=["Time_ns", "Residue", "Distance"])
+    events = events[(events["Distance"] > 0) & np.isfinite(events["Distance"])]
+    if events.empty:
+        return ""
+
+    def graph_div(figure: go.Figure) -> str:
         figure.update_layout(
-            title=f"{residue} ligand–residue distance distribution", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
-            font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, height=480,
-            margin={"l": 65, "r": 25, "t": 60, "b": 55},
-            xaxis={"title": "Ligand–residue distance (Å)", "gridcolor": GRID},
-            yaxis={"title": "Observed contact events", "gridcolor": GRID},
-            annotations=[{"text": f"n={len(values):,} displayed events · mean={values.mean():.2f} Å · median={np.median(values):.2f} Å", "showarrow": False, "x": 0.5, "xref": "paper", "y": 1.12, "yref": "paper", "font": {"color": MUTED}}],
+            paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+            font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
+            margin={"l": 68, "r": 26, "t": 72, "b": 58}, height=455,
         )
-        graph = plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
-        slides.append(f'<div class="distance-slide{" is-active" if not slides else ""}" data-distance-slide>{graph}</div>')
+        return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+    slides: list[tuple[str, str]] = []
+    timeseries = analysis / "Interface_RIN" / "interface_contact_timeseries.csv"
+    try:
+        trace = pd.read_csv(timeseries)
+    except (OSError, ValueError, pd.errors.ParserError):
+        trace = pd.DataFrame()
+    if {"Time_ns", "MinDistance_A"}.issubset(trace.columns):
+        trace = trace.copy()
+        trace["Time_ns"] = pd.to_numeric(trace["Time_ns"], errors="coerce")
+        trace["MinDistance_A"] = pd.to_numeric(trace["MinDistance_A"], errors="coerce")
+        trace = trace.dropna(subset=["Time_ns", "MinDistance_A"])
+        trace = trace[(trace["MinDistance_A"] > 0) & np.isfinite(trace["MinDistance_A"])]
+    if trace.empty:
+        trace = events.groupby("Time_ns", as_index=False)["Distance"].min().rename(columns={"Distance": "MinDistance_A"})
+        trace_label = "minimum observed contact-event separation"
+    else:
+        trace = trace.sort_values("Time_ns")
+        trace_label = "closest interface separation"
+    if len(trace) > MAX_RENDER_POINTS:
+        trace = trace.iloc[np.linspace(0, len(trace) - 1, MAX_RENDER_POINTS, dtype=int)]
+    median = float(trace["MinDistance_A"].median())
+    q05, q95 = trace["MinDistance_A"].quantile([.05, .95]).astype(float)
+    figure = go.Figure()
+    figure.add_trace(go.Scattergl(x=trace["Time_ns"], y=trace["MinDistance_A"], mode="lines", name=trace_label,
+                                  line={"color": ORANGE, "width": 1.8},
+                                  hovertemplate="Time=%{x:.3f} ns<br>Closest separation=%{y:.3f} Å<extra></extra>"))
+    figure.add_hline(y=median, line_dash="dash", line_color=CYAN, annotation_text=f"median {median:.2f} Å")
+    figure.update_layout(title="1 · Closest peptide–protein separation over time",
+                         xaxis={"title": "Time (ns)", "gridcolor": GRID},
+                         yaxis={"title": "Closest separation (Å)", "gridcolor": GRID},
+                         annotations=[{"text": f"Observed range (5th–95th percentile): {q05:.2f}–{q95:.2f} Å · no missing frame is plotted as zero", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
+    slides.append(("Closest separation", graph_div(figure)))
+
+    per_residue = events.groupby("Residue")["Distance"].agg(["count", "median", "mean"]).sort_values("count", ascending=False).head(12)
+    selected = events[events["Residue"].isin(per_residue.index)].copy()
+    figure = go.Figure()
+    for index, residue in enumerate(per_residue.index):
+        values = selected.loc[selected["Residue"] == residue, "Distance"].to_numpy(dtype=float)
+        if len(values) > MAX_EVENT_POINTS // max(1, len(per_residue)):
+            values = values[np.linspace(0, len(values) - 1, MAX_EVENT_POINTS // len(per_residue), dtype=int)]
+        figure.add_trace(go.Violin(x=values, y=[str(residue)] * len(values), orientation="h", name=str(residue), showlegend=False,
+                                   box_visible=True, meanline_visible=True, points=False,
+                                   line_color=[CYAN, GREEN, MAGENTA, ORANGE, "#a78bfa"][index % 5],
+                                   hovertemplate=f"Residue={escape(str(residue))}<br>Observed separation=%{{x:.3f}} Å<extra></extra>"))
+    figure.update_layout(title="2 · Separation distributions for the 12 most-observed residues",
+                         xaxis={"title": "Observed peptide–residue separation (Å)", "gridcolor": GRID},
+                         yaxis={"title": "Protein residue", "gridcolor": GRID},
+                         annotations=[{"text": "Violin width reflects recorded contact-event samples only; boxes show median and quartiles.", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
+    slides.append(("Residue distributions", graph_div(figure)))
+
+    frequency = next(iter(sorted(analysis.glob("*_contact_frequency_filtered.csv"))), None)
+    rank = per_residue.reset_index().rename(columns={"index": "Residue"})
+    rank["MedianDistance_A"] = rank["median"]
+    rank["ObservedEvents"] = rank["count"]
+    rank = rank[["Residue", "MedianDistance_A", "ObservedEvents"]]
+    if frequency is not None:
+        try:
+            occupancy = pd.read_csv(frequency, usecols=["Residue", "PercentFrames"])
+            occupancy["PercentFrames"] = pd.to_numeric(occupancy["PercentFrames"], errors="coerce")
+            rank = rank.merge(occupancy, on="Residue", how="left")
+        except (OSError, ValueError, pd.errors.ParserError):
+            pass
+    if "PercentFrames" not in rank:
+        rank["PercentFrames"] = np.nan
+    rank = rank.sort_values(["PercentFrames", "ObservedEvents"], ascending=False, na_position="last").head(15).sort_values("MedianDistance_A")
+    hover = np.column_stack([rank["ObservedEvents"], rank["PercentFrames"].fillna(-1)])
+    figure = go.Figure(go.Bar(y=rank["Residue"].astype(str), x=rank["MedianDistance_A"], orientation="h", marker_color=GREEN,
+                              customdata=hover,
+                              hovertemplate="Residue=%{y}<br>Median separation=%{x:.3f} Å<br>Observed contact events=%{customdata[0]:.0f}<br>Geometric occupancy=%{customdata[1]:.1f}%<extra></extra>"))
+    figure.update_layout(title="3 · Persistent-contact distance ranking",
+                         xaxis={"title": "Median observed separation (Å)", "gridcolor": GRID},
+                         yaxis={"title": "Protein residue", "gridcolor": GRID},
+                         annotations=[{"text": "Ranked by published geometric-contact occupancy when available; otherwise by observed event count.", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
+    slides.append(("Persistent-contact ranking", graph_div(figure)))
+
+    frame_times = np.sort(events["Time_ns"].unique())
+    default_step = float(np.median(np.diff(frame_times))) if len(frame_times) > 1 else 0.0
+    episodes: list[tuple[str, float]] = []
+    for residue, table in events.groupby("Residue"):
+        times = np.sort(table["Time_ns"].unique())
+        if not len(times):
+            continue
+        start = previous = float(times[0])
+        tolerance = default_step * 1.5 + 1e-9
+        for current in times[1:]:
+            current = float(current)
+            if default_step and current - previous <= tolerance:
+                previous = current
+                continue
+            episodes.append((str(residue), previous - start + default_step))
+            start = previous = current
+        episodes.append((str(residue), previous - start + default_step))
+    lifetime = pd.DataFrame(episodes, columns=["Residue", "Duration_ns"])
+    if not lifetime.empty:
+        lifetime = lifetime[lifetime["Duration_ns"] >= 0].sort_values("Duration_ns", ascending=False).head(30)
+        figure = go.Figure(go.Bar(y=lifetime["Residue"], x=lifetime["Duration_ns"], orientation="h", marker_color=MAGENTA,
+                                  hovertemplate="Residue=%{y}<br>Continuous observed contact episode=%{x:.3f} ns<extra></extra>"))
+        figure.update_layout(title="4 · Longest uninterrupted observed contact episodes",
+                             xaxis={"title": "Episode duration at sampled-frame resolution (ns)", "gridcolor": GRID},
+                             yaxis={"title": "Protein residue", "gridcolor": GRID},
+                             annotations=[{"text": "Episodes break when a residue is absent from the recorded contact-event frame; this is not an inferred binding lifetime.", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
+        slides.append(("Contact episodes", graph_div(figure)))
     if not slides:
         return ""
-    source_link = source.name
-    return f'''<style>.distance-carousel{{border-radius:21px;padding:20px;margin-top:18px;background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.distance-carousel-controls{{display:flex;align-items:center;gap:10px;justify-content:center;margin:0 0 12px}}.distance-carousel-controls button{{border:1px solid #285a79;border-radius:10px;background:#0a253a;color:#cfe8ff;padding:9px 12px;font:800 .82rem inherit;cursor:pointer}}.distance-carousel-controls button:hover{{background:#116887;color:#fff;border-color:#35d0ff}}.distance-carousel-controls span{{min-width:150px;text-align:center;color:#7aa6d9;font-size:.88rem}}.distance-carousel-stage{{border:1px solid rgba(53,208,255,.28);border-radius:16px;background:#070b14;overflow:hidden}}.distance-slide{{display:none;margin:0;padding:7px}}.distance-slide.is-active{{display:block}}</style><section class="distance-carousel" aria-label="Per-residue ligand contact-distance distributions">
-<div class="section-head"><div><div class="eyebrow">Interactive residue maps</div><h2>Residue interaction distance carousel</h2><p>Hover each cyan bar for its distance interval, observed-event count, and share of the displayed events. The mean and median summarize the selected residue above the plot.</p></div></div>
-<div class="distance-carousel-controls"><button type="button" data-distance-prev aria-label="Previous residue map">← Previous</button><span data-distance-status></span><button type="button" data-distance-next aria-label="Next residue map">Next →</button></div>
-<div class="distance-carousel-stage">{"".join(slides)}</div><a href="{escape(source_link)}" download style="display:inline-block;color:#35d0ff;font-size:.8rem;font-weight:800;margin:10px 3px 5px">Download exact source CSV for all residue distance distributions</a>{guide_html("contact_frequency")}</section><script>(()=>{{const root=document.currentScript.previousElementSibling,slides=[...root.querySelectorAll('[data-distance-slide]')],status=root.querySelector('[data-distance-status]');let index=0;const render=()=>{{slides.forEach((slide,i)=>slide.classList.toggle('is-active',i===index));status.textContent=`${{index+1}} / ${{slides.length}} · ${{slides[index].querySelector('.plotly-graph-div').layout.title.text}}`;requestAnimationFrame(()=>slides[index].querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot)))}};root.querySelector('[data-distance-prev]').addEventListener('click',()=>{{index=(index-1+slides.length)%slides.length;render()}});root.querySelector('[data-distance-next]').addEventListener('click',()=>{{index=(index+1)%slides.length;render()}});render()}})();</script>'''
+    rendered = "".join(f'<div class="distance-slide{" is-active" if index == 0 else ""}" data-distance-slide data-title="{escape(title)}">{content}</div>' for index, (title, content) in enumerate(slides))
+    return f'''<style>.distance-carousel{{border-radius:21px;padding:20px;margin-top:18px;background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.distance-carousel-controls{{display:flex;align-items:center;gap:10px;justify-content:center;margin:0 0 12px;flex-wrap:wrap}}.distance-carousel-controls button{{border:1px solid #285a79;border-radius:10px;background:#0a253a;color:#cfe8ff;padding:9px 12px;font:800 .82rem inherit;cursor:pointer}}.distance-carousel-controls button:hover{{background:#116887;color:#fff;border-color:#35d0ff}}.distance-carousel-controls span{{min-width:205px;text-align:center;color:#7aa6d9;font-size:.88rem;font-weight:700}}.distance-carousel-stage{{border:1px solid rgba(53,208,255,.28);border-radius:16px;background:#070b14;overflow:hidden}}.distance-slide{{display:none;margin:0;padding:7px}}.distance-slide.is-active{{display:block}}.distance-evidence{{margin:12px 3px 3px;color:#a9c1dc;font-size:.84rem;line-height:1.45}}</style><section class="distance-carousel" aria-label="Peptide–protein distance analysis">
+<div class="section-head"><div><div class="eyebrow">Distance evidence · observed events only</div><h2>Peptide–protein distance analysis</h2><p>Four complementary views make separation, persistence, residue specificity, and contact continuity readable without treating a missing contact as a zero-distance measurement.</p></div></div>
+<div class="distance-carousel-controls"><button type="button" data-distance-prev aria-label="Previous distance view">← Previous</button><span data-distance-status></span><button type="button" data-distance-next aria-label="Next distance view">Next →</button></div>
+<div class="distance-carousel-stage">{rendered}</div><p class="distance-evidence">All summaries are derived from <code>{escape(events_path.name)}</code>{" and " + escape(timeseries.name) if timeseries.is_file() else ""}. Use the exact source files in the report downloads for full-resolution values.</p>{guide_html("contact_frequency")}</section><script>(()=>{{const root=document.currentScript.previousElementSibling,slides=[...root.querySelectorAll('[data-distance-slide]')],status=root.querySelector('[data-distance-status]');let index=0;const render=()=>{{slides.forEach((slide,i)=>slide.classList.toggle('is-active',i===index));status.textContent=`${{index+1}} / ${{slides.length}} · ${{slides[index].dataset.title}}`;requestAnimationFrame(()=>slides[index].querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot)))}};root.querySelector('[data-distance-prev]').addEventListener('click',()=>{{index=(index-1+slides.length)%slides.length;render()}});root.querySelector('[data-distance-next]').addEventListener('click',()=>{{index=(index+1)%slides.length;render()}});render()}})();</script>'''
 
 
 def contact_events_plot(csv_file: Path, title: str, distance_mode: bool = False) -> str | None:
@@ -2120,12 +2210,9 @@ def main() -> None:
             add("chemistry", chemistry_composition_plot(interaction_file), "Interaction chemistry composition over time", interaction_file, note="Counts are binned event observations, so use the persistent interaction explorer for exact residue–atom occupancy.")
             add("chemistry", residue_chemistry_heatmap(interaction_file), "Residue × interaction chemistry occupancy", interaction_file, note="Each row is normalized within that residue's observed interaction events.")
 
-    if all_contacts.is_file():
-        add("distances", distance_histogram_plot(all_contacts), "Composite ligand–residue distance distribution", all_contacts)
-        add("distances", contact_events_plot(all_contacts, "All ligand–residue distance events", distance_mode=True), "All ligand–residue distance events", all_contacts, note="Hover provides the exact atom pair, residue, time, and observed separation.")
-        add("distances", interaction_degree_plot(all_contacts), "Interaction degree over time", all_contacts)
-    if filtered.is_file(): add("distances", contact_events_plot(filtered, "Persistent-contact distance explorer", distance_mode=True), "Persistent-contact distance explorer", filtered)
-    if filtered.is_file() and frequency.is_file(): add("distances", persistence_distance_plot(filtered, frequency), "Contact persistence versus mean distance", filtered, note="Contact frequency is joined to each residue's mean observed filtered-contact distance.")
+    # Distance evidence is intentionally consolidated in the four-view
+    # carousel below.  Keeping one evidence-first reading path prevents the
+    # same contact table from becoming a noisy wall of near-duplicate plots.
 
     coupling = analysis / "LIG_SSE_Contact_Coupling_Timeseries.csv"
     if coupling.is_file():
@@ -2135,6 +2222,8 @@ def main() -> None:
     changepoints = analysis / "LIG_ChangePoint_Summary.csv"
     if changepoints.is_file(): add("coupled", categorical_bar_plot(changepoints, "Change-point segments", "Segment", ["MeanContacts", "MeanHelix", "MeanSheet", "MeanCoil"], "Mean value"), "Change-point segments", changepoints, note="Hover the bars to compare the average contact and secondary-structure values for each detected trajectory segment.")
     for group, title, source, graph in interface_rin_plots(analysis):
+        if group == "distances":
+            continue
         add(group, graph, title, source, note="This panel is isolated to the labelled chain or chain pair; it is not pooled across unrelated interfaces.")
     for index, csv_file in enumerate(csv_files):
         # Keep raw frame-wise tables and alternate selections in the download
