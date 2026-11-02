@@ -43,15 +43,15 @@ def build_interface_explorer(payload: str) -> str:
     )
     page = page.replace(
         "if(viewer)return;",
-        "if(viewer){viewer.setStyle({},{cartoon:{color:'#3f5b76'}});let p=pair(),pep=[DATA.chains[p.left],DATA.chains[p.right]].find(c=>c.type==='peptide'),pepChain=p.left===pep?.label?p.left_chain:p.right_chain;viewer.setStyle({chain:pepChain},{cartoon:{color:'#ffcf5b'},stick:{radius:.18,color:'#ffdf85'}});let m=String(state.selected||'').split(':').at(-1).match(/([A-Z]{3})(-?\\d+)/);if(m)viewer.setStyle({resn:m[1],resi:m[2]},{stick:{radius:.24,color:'#ffffff'}});viewer.render();return;}",
+        "if(viewer){viewer.setStyle({},{cartoon:{color:'#3f5b76'}});let p=pair(),pep=[DATA.chains[p.left],DATA.chains[p.right]].find(c=>c.type==='peptide'),pepChain=p.left===pep?.label?p.left_chain:p.right_chain;viewer.setStyle({chain:pepChain},{cartoon:{color:'#ffcf5b'},stick:{radius:.18,color:'#ffdf85'}});(state.spatialSelectedMany||[]).map(residue).filter(Boolean).forEach(selected=>{let colour=isPeptide(selected.label)?'#a78bfa':'#ff5a78';viewer.setStyle({resn:selected.name,resi:selected.number},{cartoon:{color:colour},stick:{radius:.32,color:colour},sphere:{scale:.38,color:colour}})});requestAnimationFrame(()=>{viewer.resize();viewer.render()});return;}",
         1,
     )
     page = page.replace(
         "viewer.addModel(atob(DATA.structure_pdb_b64),'pdb');viewer.setStyle",
-        "viewer.addModel(atob(DATA.structure_pdb_b64),'pdb');viewer.setClickable({},{},atom=>{let p=pair(),candidate=[...DATA.chains[p.left].residues,...DATA.chains[p.right].residues].find(r=>r.number==atom.resi&&String(r.name||'').toUpperCase()===String(atom.resn||'').toUpperCase());if(candidate)window.dispatchEvent(new CustomEvent('pymacs-select',{detail:{residue:candidate.label}}));});viewer.setStyle",
+        "viewer.addModel(atob(DATA.structure_pdb_b64),'pdb');viewer.setClickable({},{},(...args)=>{let atom=args[0],event=args.find(value=>value&&typeof value.shiftKey==='boolean'),p=pair(),candidate=[...DATA.chains[p.left].residues,...DATA.chains[p.right].residues].find(r=>r.number==atom.resi&&String(r.name||'').toUpperCase()===String(atom.resn||'').toUpperCase());if(candidate)window.dispatchEvent(new CustomEvent('pymacs-select',{detail:{residue:candidate.label,extend:!!event?.shiftKey}}));});viewer.setStyle",
         1,
     )
-    bridge = """window.PyMACSSelection={residue:null,edge:null};window.addEventListener('pymacs-select',ev=>{const d=ev.detail||{};if(d.residue)select(d.residue,d.edge);});window.addEventListener('message',ev=>{const d=ev.data||{};if(d.type==='pymacs-rin-selection'&&d.residue)select(d.residue);});"""
+    bridge = """window.PyMACSSelection={residue:null,edge:null};window.addEventListener('pymacs-select',ev=>{const d=ev.detail||{};if(d.residue)selectSpatial(d.residue,!!d.extend);});window.addEventListener('message',ev=>{const d=ev.data||{};if(d.type==='pymacs-rin-selection'&&d.residue)select(d.residue);});"""
     page = page.replace("function select(id,e){", bridge + "function select(id,e){", 1)
     page = page.replace(
         "state.selected=id;let ps=edges()",
@@ -211,7 +211,7 @@ def build_interface_explorer(payload: str) -> str:
     # structure.
     page = page.replace(
         "function structure(){let host=$('#structure');",
-        "function structureInspector(){let p=pair(),left=DATA.chains[p.left],right=DATA.chains[p.right],pep=left.type==='peptide'?left:right,protein=left.type==='peptide'?right:left,partners=new Set(edges().flatMap(e=>[e.a,e.b])),proteinResidues=protein.residues.filter(r=>partners.has(r.label)),chips=(rs,pepChip)=>rs.map(r=>`<button class=\"res ${pepChip?'pep':''} ${state.selected===r.label?'sel':''}\" data-r=\"${esc(r.label)}\">${esc(r.one+r.number)}</button>`).join('');$('#structure-detail').innerHTML='<h3>Residue selector</h3><p>Peptide residues remain in N→C order. Protein entries are active contact partners only.</p><h4>Peptide · N→C</h4><div class=\"seq\">'+chips(pep.residues,true)+'</div><h4>Protein contact partners</h4><div class=\"seq\">'+(proteinResidues.length?chips(proteinResidues,false):'<span>No partners under the active filters.</span>')+'</div>';$('#structure-detail').querySelectorAll('[data-r]').forEach(n=>n.onclick=()=>select(n.dataset.r))}function structure(){let host=$('#mol');",
+        "function structureInspector(){let p=pair(),left=DATA.chains[p.left],right=DATA.chains[p.right],pep=left.type==='peptide'?left:right,protein=left.type==='peptide'?right:left,partners=new Set(edges().flatMap(e=>[e.a,e.b])),proteinResidues=protein.residues.filter(r=>partners.has(r.label)),chips=(rs,pepChip)=>rs.map(r=>`<button class=\"res ${pepChip?'pep':''} ${isSpatialSelected(r.label)?'sel':''}\" data-r=\"${esc(r.label)}\">${esc(r.one+r.number)}</button>`).join('');$('#structure-detail').innerHTML='<h3>Residue selector</h3><p>Peptide residues remain in N→C order. Protein entries are active contact partners only. Click selects one; Shift-click adds or removes residues in the shared 3D selection.</p><h4>Peptide · N→C</h4><div class=\"seq\">'+chips(pep.residues,true)+'</div><h4>Protein contact partners</h4><div class=\"seq\">'+(proteinResidues.length?chips(proteinResidues,false):'<span>No partners under the active filters.</span>')+'</div>';$('#structure-detail').querySelectorAll('[data-r]').forEach(n=>n.onclick=e=>selectSpatial(n.dataset.r,e.shiftKey))}function structure(){let host=$('#mol');",
         1,
     )
     page = page.replace(
@@ -221,7 +221,7 @@ def build_interface_explorer(payload: str) -> str:
     )
     page = page.replace(
         "if(viewer){viewer.setStyle({},{cartoon:{color:'#3f5b76'}});let p=pair(),pep=[DATA.chains[p.left],DATA.chains[p.right]].find(c=>c.type==='peptide'),pepChain=p.left===pep?.label?p.left_chain:p.right_chain;viewer.setStyle({chain:pepChain},{cartoon:{color:'#ffcf5b'},stick:{radius:.18,color:'#ffdf85'}});let m=String(state.selected||'').split(':').at(-1).match(/([A-Z]{3})(-?\\d+)/);if(m)viewer.setStyle({resn:m[1],resi:m[2]},{stick:{radius:.24,color:'#ffffff'}});viewer.render();return;}",
-        "if(viewer){viewer.setStyle({},{cartoon:{color:'#3f5b76'}});let p=pair(),pep=[DATA.chains[p.left],DATA.chains[p.right]].find(c=>c.type==='peptide'),pepChain=p.left===pep?.label?p.left_chain:p.right_chain;viewer.setStyle({chain:pepChain},{cartoon:{color:'#ffcf5b'},stick:{radius:.18,color:'#ffdf85'}});let m=String(state.selected||'').split(':').at(-1).match(/([A-Z]{3})(-?\\d+)/);if(m)viewer.setStyle({resn:m[1],resi:m[2]},{stick:{radius:.24,color:'#ffffff'}});requestAnimationFrame(()=>{viewer.resize();viewer.render()});return;}",
+        "if(viewer){viewer.setStyle({},{cartoon:{color:'#3f5b76'}});let p=pair(),pep=[DATA.chains[p.left],DATA.chains[p.right]].find(c=>c.type==='peptide'),pepChain=p.left===pep?.label?p.left_chain:p.right_chain;viewer.setStyle({chain:pepChain},{cartoon:{color:'#ffcf5b'},stick:{radius:.18,color:'#ffdf85'}});(state.spatialSelectedMany||[]).map(residue).filter(Boolean).forEach(selected=>{let colour=isPeptide(selected.label)?'#a78bfa':'#ff5a78';viewer.setStyle({resn:selected.name,resi:selected.number},{cartoon:{color:colour},stick:{radius:.32,color:colour},sphere:{scale:.38,color:colour}})});requestAnimationFrame(()=>{viewer.resize();viewer.render()});return;}",
         1,
     )
     page = page.replace(
@@ -278,7 +278,7 @@ def build_interface_explorer(payload: str) -> str:
     )
     page = page.replace(
         "function typeTone(t){return/bond/i.test(t)?'#ff5578':/ionic/i.test(t)?'#c084fc':/hydrophobic/i.test(t)?'#7dff91':'#82c7ff'}function draw()",
-        "function typeTone(t){return/bond/i.test(t)?'#ff5578':/ionic/i.test(t)?'#c084fc':/hydrophobic/i.test(t)?'#7dff91':'#82c7ff'}function isSelected(id){return state.selected===id}function isSpatialSelected(id){return(state.spatialSelectedMany||[]).includes(id)}function selectSpatial(id,extend){let prior=state.spatialSelectedMany||[];state.spatialSelectedMany=extend?(prior.includes(id)?prior.filter(x=>x!==id):[...prior,id]):[id];spatial();spatialInspector()}function draw()",
+        "function typeTone(t){return/bond/i.test(t)?'#ff5578':/ionic/i.test(t)?'#c084fc':/hydrophobic/i.test(t)?'#7dff91':'#82c7ff'}function isSelected(id){return state.selected===id}function isSpatialSelected(id){return(state.spatialSelectedMany||[]).includes(id)}function selectSpatial(id,extend){let prior=state.spatialSelectedMany||[];state.spatialSelectedMany=extend?(prior.includes(id)?prior.filter(x=>x!==id):[...prior,id]):[id];spatial();spatialInspector();if(state.view==='structure'){structureInspector();structure()}}function draw()",
         1,
     )
     page = page.replace("state.selected===r.label", "isSelected(r.label)")
