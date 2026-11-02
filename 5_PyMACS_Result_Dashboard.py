@@ -451,9 +451,10 @@ def graph_guide_key(name: str) -> str:
 def guide_html(key: str) -> str:
     title, meaning, expected = GRAPH_GUIDES.get(key, GRAPH_GUIDES["generic"])
     return (
-        '<details class="guide"><summary>ⓘ What this means</summary>'
-        f'<p><b>{escape(title)}.</b> {escape(meaning)}</p>'
-        f'<p><b>What to look for:</b> {escape(expected)}</p></details>'
+        '<details class="guide"><summary>ⓘ ELI5: what am I looking at?</summary>'
+        f'<p><b>What this is:</b> {escape(title)}. {escape(meaning)}</p>'
+        f'<p><b>How to read it:</b> {escape(expected)}</p>'
+        '<p><b>Keep in mind:</b> One graph is a clue, not a verdict. Check the matching stability, contact, and structure panels before making a biological claim.</p></details>'
     )
 
 
@@ -1260,6 +1261,124 @@ def contact_persistence_plot(events_file: Path, denominator_file: Path,
         yaxis={"title": "Contact persistence (fraction of sampled frames)", "range": [0, 1], "gridcolor": GRID},
     )
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def interface_scorecard_html(analysis: Path) -> str:
+    """Plain-language, five-row answer to: what holds this interface together?"""
+    source = analysis / "Interface_RIN" / "interface_residue_pair_contacts.csv"
+    table = _read_table(source)
+    needed = {"ChainA_Label", "ChainB_Label", "ResidueA", "ResidueB", "ContactFraction", "MeanMinDistance_A"}
+    if table is None or not needed.issubset(table.columns):
+        return ""
+    table = table.copy()
+    peptide_a = table["ChainA_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)
+    peptide_b = table["ChainB_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)
+    table = table[peptide_a | peptide_b].copy()
+    if table.empty:
+        return ""
+    table["Peptide position"] = np.where(peptide_a, table["ResidueA"], table["ResidueB"]).astype(str).str.rsplit(":", n=1).str[-1]
+    table["Protein partner"] = np.where(peptide_a, table["ResidueB"], table["ResidueA"]).astype(str).str.rsplit(":", n=1).str[-1]
+    table["ContactFraction"] = pd.to_numeric(table["ContactFraction"], errors="coerce")
+    table["MeanMinDistance_A"] = pd.to_numeric(table["MeanMinDistance_A"], errors="coerce")
+    table = table.dropna(subset=["ContactFraction", "MeanMinDistance_A"]).sort_values("ContactFraction", ascending=False).head(5)
+    if table.empty:
+        return ""
+    rows = "".join(
+        f'<tr><td>{escape(row["Peptide position"])}</td><td>{escape(row["Protein partner"])}</td>'
+        f'<td>{row["ContactFraction"] * 100:.1f}%</td><td>{row["MeanMinDistance_A"]:.2f} Å</td></tr>'
+        for _, row in table.iterrows()
+    )
+    return f'''<style>.interface-scorecard,.representative-frames{{margin:0 0 18px;padding:18px;border:1px solid rgba(24,255,139,.32);border-radius:17px;background:linear-gradient(145deg,#0d2130,#08101c)}}.interface-scorecard h2,.representative-frames h2{{margin:.2rem 0 .35rem}}.interface-scorecard p,.representative-frames p{{color:#9cb6d0;margin:.25rem 0 .8rem;max-width:900px}}.interface-table{{overflow:auto}}.interface-table table{{width:100%;border-collapse:collapse;font-size:.9rem}}.interface-table th{{color:#7aa6d9;text-align:left;text-transform:uppercase;font-size:.7rem;letter-spacing:.06em}}.interface-table td,.interface-table th{{padding:9px;border-bottom:1px solid #203653;white-space:nowrap}}.interface-table td:first-child{{color:#ffe66d;font-weight:900}}</style><section class="interface-scorecard"><div><div class="eyebrow">Start here · interface anchors</div><h2>What appears to hold the peptide in place?</h2><p>These are the five residue pairs that were near each other most often in the simulation. Think of them as the clearest recurring handshakes between peptide and protein.</p></div><div class="interface-table"><table><thead><tr><th>Peptide</th><th>Protein partner</th><th>Together</th><th>Typical gap</th></tr></thead><tbody>{rows}</tbody></table></div>{guide_html("contact_frequency")}</section>'''
+
+
+def peptide_importance_plot(analysis: Path) -> str | None:
+    """Rank peptide residues by the number and strength of retained partners."""
+    source = analysis / "Interface_RIN" / "interface_node_summary.csv"
+    table = _read_table(source)
+    needed = {"Chain_Label", "Residue_Label", "Degree", "WeightedDegree", "MaxContactFraction"}
+    if table is None or not needed.issubset(table.columns):
+        return None
+    table = table[table["Chain_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)].copy()
+    if table.empty:
+        return None
+    table["Degree"] = pd.to_numeric(table["Degree"], errors="coerce").fillna(0)
+    table["WeightedDegree"] = pd.to_numeric(table["WeightedDegree"], errors="coerce").fillna(0)
+    table["MaxContactFraction"] = pd.to_numeric(table["MaxContactFraction"], errors="coerce").fillna(0)
+    table["Position"] = table["Residue_Label"].astype(str).str.rsplit(":", n=1).str[-1]
+    table = table.sort_values("WeightedDegree", ascending=True)
+    figure = go.Figure(go.Bar(
+        y=table["Position"], x=table["WeightedDegree"], orientation="h", marker_color=MAGENTA,
+        customdata=np.column_stack([table["Degree"], table["MaxContactFraction"] * 100]),
+        hovertemplate="Peptide residue=%{y}<br>Combined contact strength=%{x:.2f}<br>Different protein partners=%{customdata[0]:.0f}<br>Strongest single partner=%{customdata[1]:.1f}% of frames<extra></extra>",
+    ))
+    figure.update_layout(title="Which peptide positions matter most to this interface?", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, height=max(390, 27 * len(table)),
+                         margin={"l": 95, "r": 25, "t": 65, "b": 55},
+                         xaxis={"title": "Combined contact strength (higher = more or stronger recurring partners)", "gridcolor": GRID},
+                         yaxis={"title": "Peptide residue", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def peptide_contact_regime_plot(analysis: Path) -> str | None:
+    """Show which peptide positions have any recorded receptor contact over time."""
+    source = analysis / "Interface_RIN" / "interface_residue_pair_presence.npz"
+    if not source.is_file():
+        return None
+    try:
+        payload = np.load(source, allow_pickle=False)
+        matrix = np.asarray(payload["contact_matrix"], dtype=np.uint8)
+        left = [str(value) for value in np.asarray(payload["residue_a_labels"]).tolist()]
+        right = [str(value) for value in np.asarray(payload["residue_b_labels"]).tolist()]
+        times = np.asarray(payload["times_ns"], dtype=float)
+    except (OSError, KeyError, ValueError):
+        return None
+    if matrix.ndim != 2 or not matrix.size or matrix.shape[1] != len(times):
+        return None
+    peptide_pattern = re.compile(r"\(peptide, chain [^)]+\):([A-Z]{3})(-?\d+)$", re.I)
+    rows: dict[str, list[int]] = {}
+    for index, (a, b) in enumerate(zip(left, right)):
+        peptide = a if peptide_pattern.search(a) else b if peptide_pattern.search(b) else ""
+        match = peptide_pattern.search(peptide)
+        if not match:
+            continue
+        label = f"{match.group(1).upper()}{match.group(2)}"
+        if match.group(1).upper() not in {"ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL"}:
+            continue
+        rows.setdefault(label, []).append(index)
+    if not rows:
+        return None
+    ordered = sorted(rows, key=lambda label: int(re.search(r"-?\d+$", label).group()))
+    values = np.vstack([(matrix[indices].max(axis=0) > 0).astype(float) for indices in (rows[label] for label in ordered)])
+    sample = sampled_indices(values.shape[1])
+    figure = go.Figure(go.Heatmap(z=values[:, sample], x=times[sample], y=ordered, zmin=0, zmax=1,
+                                  colorscale=[[0, "#101827"], [.49, "#101827"], [.5, CYAN], [1, GREEN]],
+                                  colorbar={"title": "Any contact", "tickmode": "array", "tickvals": [0, 1], "ticktext": ["No", "Yes"]},
+                                  hovertemplate="Time=%{x:.3f} ns<br>Peptide residue=%{y}<br>Any recorded protein contact=%{z}<extra></extra>"))
+    figure.update_layout(title="When does each peptide position touch the protein?", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, height=max(390, 26 * len(ordered)),
+                         margin={"l": 90, "r": 25, "t": 65, "b": 55},
+                         xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Peptide residue", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def representative_interface_frames_html(analysis: Path) -> str:
+    """Name easy-to-check trajectory moments from published interface data."""
+    source = analysis / "Interface_RIN" / "interface_contact_timeseries.csv"
+    table = _read_table(source)
+    needed = {"Time_ns", "Frame", "ContactCount", "MinDistance_A"}
+    if table is None or not needed.issubset(table.columns):
+        return ""
+    table = table.copy()
+    for column in ("Time_ns", "Frame", "ContactCount", "MinDistance_A"):
+        table[column] = pd.to_numeric(table[column], errors="coerce")
+    table = table.dropna(subset=list(needed))
+    if table.empty:
+        return ""
+    selected = [("Most-connected moment", table.loc[table["ContactCount"].idxmax()]),
+                ("Typical moment", table.iloc[(table["ContactCount"] - table["ContactCount"].median()).abs().argsort().iloc[0]]),
+                ("Closest moment", table.loc[table["MinDistance_A"].idxmin()])]
+    cards = "".join(f'<div class="frame-card"><b>{escape(name)}</b><span>Frame {int(row["Frame"]):,} · {row["Time_ns"]:.2f} ns</span><small>{int(row["ContactCount"])} residue-pair contacts · closest gap {row["MinDistance_A"]:.2f} Å</small></div>' for name, row in selected)
+    return f'''<style>.frame-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}}.frame-card{{border:1px solid #285a79;border-radius:12px;background:#07111e;padding:12px}}.frame-card b,.frame-card span,.frame-card small{{display:block}}.frame-card b{{color:#35d0ff}}.frame-card span{{margin-top:5px;font-weight:800}}.frame-card small{{margin-top:5px;color:#9cb6d0;line-height:1.35}}</style><section class="representative-frames"><div class="eyebrow">Three easy checkpoints</div><h2>Which moments should I inspect?</h2><p>These are real frames from the analyzed trajectory. Use their time or frame number when checking the Structure and interface panels.</p><div class="frame-grid">{cards}</div>{guide_html("contact_frequency")}</section>'''
 
 
 def distance_carousel_html(analysis: Path) -> str:
@@ -2139,6 +2258,24 @@ def main() -> None:
         if scorecard:
             source = analysis / "Protein_RMSD.csv"
             groups["overview"].append(dashboard_card(scorecard, "Binding scorecard", source.relative_to(output.parent).as_posix() if source.is_file() else "", note="Read this as a trajectory summary, then use the stability, contacts, chemistry, and distance tabs for the supporting evidence."))
+    if context.partner_kind == "peptide":
+        interface_scorecard = interface_scorecard_html(analysis)
+        if interface_scorecard:
+            groups["overview"].append(interface_scorecard)
+        representative_frames = representative_interface_frames_html(analysis)
+        if representative_frames:
+            groups["overview"].append(representative_frames)
+        interface_source = analysis / "Interface_RIN" / "interface_node_summary.csv"
+        importance = peptide_importance_plot(analysis)
+        if importance and interface_source.is_file():
+            add("contacts", importance, "Peptide residue importance ranking", interface_source,
+                note="ELI5: taller bars mean this peptide position repeatedly reaches more protein partners or reaches them more persistently. This ranks simulated interface roles; it is not an experimental mutation result.")
+        regime_source = analysis / "Interface_RIN" / "interface_residue_pair_presence.npz"
+        regime = peptide_contact_regime_plot(analysis)
+        if regime and regime_source.is_file():
+            add("contacts", regime, "Peptide contact timeline", regime_source,
+                label="Download exact contact-presence matrix",
+                note="ELI5: each bright cell means that peptide position touched at least one protein residue in that sampled frame. Dark means no recorded contact in that frame, not a zero-distance measurement.")
     for contact_file in sorted(analysis.glob("*_contact_map_residue_time.csv")):
         graph = heatmap_plot(contact_file, "contacts")
         if graph:

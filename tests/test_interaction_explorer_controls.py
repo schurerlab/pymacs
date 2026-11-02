@@ -86,6 +86,20 @@ def test_distance_carousel_uses_observed_events_and_has_four_complementary_views
     assert 'valid_b = raw["ResidueB"].astype(str).str.contains(amino' in source
 
 
+def test_peptide_dossier_has_plain_language_interface_summaries():
+    source = (ROOT / "5_PyMACS_Result_Dashboard.py").read_text(encoding="utf-8")
+    for helper in (
+        "def interface_scorecard_html",
+        "def peptide_importance_plot",
+        "def peptide_contact_regime_plot",
+        "def representative_interface_frames_html",
+    ):
+        assert helper in source
+    assert "ELI5: what am I looking at?" in source
+    assert "One graph is a clue, not a verdict" in source
+    assert 'groups["overview"].append(interface_scorecard)' in source
+
+
 def test_ligand_dashboard_never_silently_hides_a_missing_explorer_artifact():
     source = (ROOT / "5_PyMACS_Result_Dashboard.py").read_text(encoding="utf-8")
     assert "def interactive_networx_html(analysis: Path, *, ligand_expected: bool = False)" in source
