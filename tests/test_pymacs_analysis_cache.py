@@ -194,6 +194,14 @@ class AnalysisCacheTests(unittest.TestCase):
         for key, value in payload.items():
             self.assertTrue(np.array_equal(loaded[key], value), msg=f"Mismatch for {key}")
 
+    def test_legacy_object_arrays_require_explicit_trusted_cache_mode(self) -> None:
+        npz_path = self.base / "legacy-presence.npz"
+        save_npz_atomic(npz_path, residue_a_labels=np.array(["A:GLY1"], dtype=object))
+        with self.assertRaises(ValueError):
+            load_npz_dict(npz_path)
+        loaded = load_npz_dict(npz_path, allow_legacy_object_arrays=True)
+        self.assertEqual(loaded["residue_a_labels"].tolist(), ["A:GLY1"])
+
 
 if __name__ == "__main__":
     unittest.main()

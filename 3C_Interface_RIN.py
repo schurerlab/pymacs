@@ -448,7 +448,12 @@ def load_cached_interface_outputs(outdir: Path) -> Dict[str, Any]:
         "residue_df": residue_df,
         "node_df": pd.read_csv(outdir / "interface_node_summary.csv"),
         "frame_index_df": pd.read_csv(outdir / "interface_frame_index.csv"),
-        "presence_payload": load_npz_dict(outdir / "interface_residue_pair_presence.npz"),
+        # This file is an already-validated local stage artifact.  Older
+        # PyMACS releases wrote its string labels as object arrays; permit
+        # only that legacy cache compatibility path here.
+        "presence_payload": load_npz_dict(
+            outdir / "interface_residue_pair_presence.npz", allow_legacy_object_arrays=True
+        ),
     }
 
 
@@ -575,7 +580,7 @@ def reduce_interface_shards(outdir, workdir, frame_indices, analyzed_times_ns, c
     matrix = np.zeros((len(residue_df), len(frame_indices)), dtype=np.uint8); frame_to_col = {int(frame): i for i, frame in enumerate(frame_indices)}
     for shard in frame_shards:
         for row in pd.read_csv(shard, usecols=["Pair_ID", "Frame"]).itertuples(index=False): matrix[pair_to_row[str(row.Pair_ID)], frame_to_col[int(row.Frame)]] = 1
-    save_npz_atomic(outdir / "interface_residue_pair_presence.npz", contact_matrix=matrix, frame_indices=np.asarray(frame_indices, dtype=np.int64), times_ns=np.asarray(analyzed_times_ns, dtype=float), pair_ids=residue_df.get("Pair_ID", pd.Series(dtype=str)).astype(str).to_numpy(), chain_a_labels=residue_df.get("ChainA_Label", pd.Series(dtype=str)).astype(str).to_numpy(), chain_b_labels=residue_df.get("ChainB_Label", pd.Series(dtype=str)).astype(str).to_numpy(), residue_a_labels=residue_df.get("ResidueA", pd.Series(dtype=str)).astype(str).to_numpy(), residue_b_labels=residue_df.get("ResidueB", pd.Series(dtype=str)).astype(str).to_numpy())
+    save_npz_atomic(outdir / "interface_residue_pair_presence.npz", contact_matrix=matrix, frame_indices=np.asarray(frame_indices, dtype=np.int64), times_ns=np.asarray(analyzed_times_ns, dtype=float), pair_ids=np.asarray(residue_df.get("Pair_ID", pd.Series(dtype=str)).astype(str), dtype=str), chain_a_labels=np.asarray(residue_df.get("ChainA_Label", pd.Series(dtype=str)).astype(str), dtype=str), chain_b_labels=np.asarray(residue_df.get("ChainB_Label", pd.Series(dtype=str)).astype(str), dtype=str), residue_a_labels=np.asarray(residue_df.get("ResidueA", pd.Series(dtype=str)).astype(str), dtype=str), residue_b_labels=np.asarray(residue_df.get("ResidueB", pd.Series(dtype=str)).astype(str), dtype=str))
     frame_index_df = build_interface_frame_index(frame_indices, analyzed_times_ns); frame_index_df.to_csv(outdir / "interface_frame_index.csv", index=False)
     timeseries_df = pd.read_csv(outdir / "interface_contact_timeseries.csv")
     summary = timeseries_df.groupby(["ChainA_Label", "ChainB_Label"], as_index=False).agg(Frames_Analyzed=("Frame", "size"), Frames_In_Contact=("InContact", "sum"), ContactFraction=("InContact", "mean"), MeanContactsPerFrame=("ContactCount", "mean"), MaxContactsInFrame=("ContactCount", "max"), MeanMinDistance_A=("MinDistance_A", "mean"), MinObservedDistance_A=("MinDistance_A", "min"))

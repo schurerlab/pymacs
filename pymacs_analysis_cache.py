@@ -164,8 +164,14 @@ def save_npz_atomic(path: os.PathLike[str] | str, **arrays: Any) -> Path:
     return target
 
 
-def load_npz_dict(path: os.PathLike[str] | str) -> Dict[str, np.ndarray]:
-    with np.load(Path(path), allow_pickle=False) as handle:
+def load_npz_dict(path: os.PathLike[str] | str, *, allow_legacy_object_arrays: bool = False) -> Dict[str, np.ndarray]:
+    """Load a PyMACS NPZ cache without accepting pickles by default.
+
+    Older, locally generated interface-presence caches stored pandas string
+    columns as object arrays.  They are accepted only by the explicit legacy
+    path after the caller has validated the cache manifest.
+    """
+    with np.load(Path(path), allow_pickle=allow_legacy_object_arrays) as handle:
         return {key: handle[key] for key in handle.files}
 
 
