@@ -1896,17 +1896,20 @@ document.querySelectorAll('.js-complex-3d').forEach(el=>{{
     el.replaceChildren();
     const panel=el.closest('.structure-card'), raw=atob(el.dataset.structureB64), viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}}), model=viewer.addModel(raw,'pdb'), chains=el.dataset.partnerChains.split(',').filter(Boolean), proteinColor={{slate:'#496985',mint:'#4fd1a5',violet:'#a78bfa'}}, peptideColor={{gold:'#ffe66d',magenta:'#ff70d2',cyan:'#35d0ff'}}, state={{mode:'complex',chain:'',protein:'slate',peptide:'gold',pepSide:'stick',proSide:'off'}};
     const peptideSel=()=>chains.length?{{chain:chains[0]}}:{{}};
-    const sideStyle=(kind,color)=>kind==='stick'?{{stick:{{radius:.16,color}}}}:kind==='line'?{{line:{{linewidth:1.3,color}}}}:{{}};
+    const proteinSel=()=>chains.length?{{chain:chains[0],invert:true}}:{{hetflag:false}};
+    const residueTone=atom=>{{const name=String(atom.resn||'').toUpperCase();if(['ASP','GLU'].includes(name))return '#ff5a78';if(['LYS','ARG','HIS'].includes(name))return '#5bc0ff';if(['SER','THR','ASN','GLN','TYR','CYS'].includes(name))return '#c084fc';if(['ALA','VAL','ILE','LEU','MET','PHE','TRP','PRO','GLY'].includes(name))return '#ffcf5b';return '#e6edf7'}};
+    const sideStyle=(kind,color)=>{{const paint=color==='residue'?{{colorfunc:residueTone}}:{{color}};return kind==='stick'?{{stick:{{radius:.16,...paint}}}}:kind==='line'?{{line:{{linewidth:1.3,...paint}}}}:{{}}}};
     const render=()=>{{
       model.setStyle({{}},{{cartoon:{{color:state.protein==='spectrum'?'spectrum':proteinColor[state.protein]||undefined,colorscheme:state.protein==='chain'?'chain':undefined}}}});
-      if(chains.length) {{ model.setStyle(peptideSel(),{{cartoon:{{color:state.peptide==='element'?undefined:peptideColor[state.peptide],colorscheme:state.peptide==='element'?'Jmol':undefined}},...sideStyle(state.pepSide,peptideColor[state.peptide]||'#ffe66d')}}); }}
-      if(state.proSide!=='off') model.setStyle({{hetflag:false}},sideStyle(state.proSide,'#8fb7d8'));
+      if(chains.length) {{ model.setStyle(peptideSel(),{{cartoon:{{color:state.peptide==='residue'?undefined:peptideColor[state.peptide],colorfunc:state.peptide==='residue'?residueTone:undefined}},...sideStyle(state.pepSide,state.peptide)}}); }}
+      if(state.proSide!=='off') model.setStyle(proteinSel(),sideStyle(state.proSide,'#8fb7d8'));
       if(state.mode==='chain'&&state.chain) {{model.setStyle({{}},{{cartoon:{{color:'#24364c',opacity:.25}}}});model.setStyle({{chain:state.chain}},{{cartoon:{{color:'#35d0ff'}},...sideStyle(state.proSide,'#35d0ff')}});viewer.zoomTo({{chain:state.chain}})}}
       else if(state.mode==='partner'&&chains.length) viewer.zoomTo(peptideSel());
       else if(state.mode==='interface'&&chains.length) viewer.zoomTo({{within:{{distance:7,sel:peptideSel()}}}});
       else viewer.zoomTo();
       viewer.render(); panel.querySelectorAll('[data-structure-view]').forEach(b=>b.classList.toggle('is-active',b.dataset.structureView===state.mode&&(state.mode!=='chain'||b.dataset.chainId===state.chain)));
     }};
+    const residueOption=panel.querySelector('[data-structure-control="peptide-color"] option[value="element"]');if(residueOption){{residueOption.value='residue';residueOption.textContent='By residue type'}};
     panel.querySelectorAll('[data-structure-view]').forEach(b=>b.addEventListener('click',()=>{{state.mode=b.dataset.structureView;state.chain=b.dataset.chainId||'';render()}}));
     panel.querySelectorAll('[data-structure-control]').forEach(control=>control.addEventListener('change',()=>{{const key=control.dataset.structureControl;if(key==='protein-color')state.protein=control.value;if(key==='peptide-color')state.peptide=control.value;if(key==='peptide-sidechains')state.pepSide=control.value;if(key==='protein-sidechains')state.proSide=control.value;render()}}));
     render(); addEventListener('resize',()=>viewer.resize());
