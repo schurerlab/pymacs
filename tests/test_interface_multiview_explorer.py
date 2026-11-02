@@ -113,11 +113,27 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("layout:'bipartite'", page)
         self.assertIn("state.layout=b.dataset.layout", page)
         self.assertIn("<tspan", page)
-        self.assertIn("residue(id)?.stable_id", page)
+        self.assertIn("${esc(chainCode(id))}", page)
         self.assertIn('id="zoom-in"', page)
         self.assertIn("$('#zoom-in').onclick", page)
         self.assertIn("scale=Math.min(11,250/span)*state.z", page)
         self.assertIn("resn:selected.name,resi:selected.number", page)
+
+    def test_network_nodes_use_pair_chain_codes_and_preserve_manual_positions(self):
+        page = build_cytoscape_interface_explorer(json.dumps({
+            "pairs": [{"id": "p", "left": "Rec", "right": "Pep",
+                       "left_chain": "A", "right_chain": "B"}],
+            "chains": {"Rec": {"type": "protein", "residues": []},
+                       "Pep": {"type": "peptide", "residues": []}},
+            "edges": [], "presence": {"available": True, "times_ns": [], "rows": {}},
+        }))
+        self.assertIn("function chainCode(id)", page)
+        self.assertIn("p.left_chain||'A'", page)
+        self.assertIn("manual:{}", page)
+        self.assertIn("svg.onpointerdown", page)
+        self.assertIn("state.manual[state.drag]", page)
+        self.assertIn('id="reset-layout"', page)
+        self.assertIn("detail-kicker", page)
 
     def test_reusable_3c_cache_rebuilds_the_explorer(self):
         source = Path(__file__).resolve().parents[1].joinpath("3C_Interface_RIN.py").read_text()

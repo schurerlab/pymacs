@@ -91,15 +91,31 @@ def build_interface_explorer(payload: str) -> str:
         1,
     )
     page = page.replace(
+        ".detail{padding:12px;border-left:1px solid var(--l);color:var(--m)}",
+        ".detail{padding:18px;border-left:1px solid #1d617f;color:#bdd9ef;background:linear-gradient(160deg,#0d1d31,#07101e 66%);box-shadow:inset 3px 0 0 #24e6ff,inset 0 0 36px rgba(36,230,255,.06);font-size:13px}.detail-kicker{color:#24e6ff;font-size:10px;letter-spacing:.15em;font-weight:900}.detail-title{margin:7px 0 12px;color:#f4fbff;font-size:19px}.detail-item{margin:7px 0;padding:8px;border:1px solid #20536f;border-radius:7px;background:#0b1828}.detail-item b{color:#ffcf5b}.detail-item .pep-txt{color:#24e6ff}.detail-item .pro-txt{color:#ff7b95}",
+        1,
+    )
+    page = page.replace(
         "function select(id,e){",
         "function select(id,e){if(state.selected===id){state.selected=null;$('#detail').textContent='Selection cleared.';render();return}",
         1,
     )
     page = page.replace(
         "function draw(){let p=pair(),es=edges(),svg=$('#rin');",
-        "function isPeptide(id){let p=pair();return[p.left,p.right].some(c=>DATA.chains[c].type==='peptide'&&DATA.chains[c].residues.some(r=>r.label===id))}function residue(id){let p=pair();return[...DATA.chains[p.left].residues,...DATA.chains[p.right].residues].find(r=>r.label===id)}function draw(){let p=pair(),es=edges(),svg=$('#rin');",
+        "function isPeptide(id){let p=pair();return[p.left,p.right].some(c=>DATA.chains[c].type==='peptide'&&DATA.chains[c].residues.some(r=>r.label===id))}function residue(id){let p=pair();return[...DATA.chains[p.left].residues,...DATA.chains[p.right].residues].find(r=>r.label===id)}function chainCode(id){let p=pair();return DATA.chains[p.left].residues.some(r=>r.label===id)?(p.left_chain||'A'):(p.right_chain||'B')}function brief(id){let r=residue(id),tone=isPeptide(id)?'pep-txt':'pro-txt';return '<span class=\"'+tone+'\">'+esc(chainCode(id))+' · '+esc(r?.name||'?')+' '+esc(r?.number||'?')+'</span>'}function draw(){let p=pair(),es=edges(),svg=$('#rin');",
         1,
     )
+    page = page.replace(
+        "$('#detail').innerHTML='<b>'+esc(id)+'</b><br>'+ (ps.length?ps.map(x=>esc(x.a===id?x.b:x.a)+' · '+(x.fraction*100).toFixed(1)+'% · '+esc(x.type)).join('<br>'):'No partners under active filters.');",
+        "$('#detail').innerHTML='<div class=\"detail-kicker\">ACTIVE RESIDUE</div><div class=\"detail-title\">'+brief(id)+'</div><div class=\"detail-kicker\">CONTACTS UNDER ACTIVE FILTER</div>'+ (ps.length?ps.map(x=>'<div class=\"detail-item\">'+brief(x.a===id?x.b:x.a)+'<br><b>'+(x.fraction*100).toFixed(1)+'%</b> · '+esc(x.type)+'</div>').join(''):'<div class=\"detail-item\">No partners under active filters.</div>');",
+        1,
+    )
+    page = page.replace(
+        "svg.querySelectorAll('[data-r]').forEach(n=>n.onclick=()=>select(n.dataset.r));",
+        "svg.querySelectorAll('[data-r]').forEach(n=>n.onclick=()=>{if(state.dragged){state.dragged=false;return}select(n.dataset.r)});svg.onpointerdown=e=>{let n=e.target.closest('[data-r]');if(!n)return;state.drag=n.dataset.r;svg.setPointerCapture?.(e.pointerId)};svg.onpointermove=e=>{if(!state.drag)return;let box=svg.getBoundingClientRect(),x=(e.clientX-box.left)*1200/box.width,y=(e.clientY-box.top)*610/box.height;state.manual[state.drag]=[Math.max(35,Math.min(1165,x)),Math.max(35,Math.min(575,y))];state.dragged=true;draw()};svg.onpointerup=svg.onpointercancel=()=>{state.drag=null};",
+        1,
+    )
+    page = page.replace('data-layout="chain">Chain-separated</button>', 'data-layout="chain">Chain-separated</button><button id="reset-layout">Reset positions</button>', 1)
     page = page.replace(
         "let A=[...new Set(es.map(e=>e.a))],B=[...new Set(es.map(e=>e.b))],pos={},at=(x,i,n)=>[x,80+i*470/Math.max(n-1,1)];A.forEach((x,i)=>pos[x]=at(180,i,A.length));B.forEach((x,i)=>pos[x]=at(1000,i,B.length));",
         "let A=[...new Set(es.map(e=>e.a))],B=[...new Set(es.map(e=>e.b))],all=[...A,...B],pos={},at=(x,i,n)=>[x,80+i*470/Math.max(n-1,1)];if(state.layout==='circle'||state.layout==='cose'){all.forEach((id,i)=>{let q=2*Math.PI*i/Math.max(all.length,1)-Math.PI/2;pos[id]=[600+330*Math.cos(q),305+230*Math.sin(q)]})}else if(state.layout==='concentric'){A.forEach((id,i)=>{let q=2*Math.PI*i/Math.max(A.length,1)-Math.PI/2;pos[id]=[600+360*Math.cos(q),305+240*Math.sin(q)]});B.forEach((id,i)=>{let q=2*Math.PI*i/Math.max(B.length,1)-Math.PI/2;pos[id]=[600+165*Math.cos(q),305+110*Math.sin(q)]})}else{A.forEach((x,i)=>pos[x]=at(180,i,A.length));B.forEach((x,i)=>pos[x]=at(1000,i,B.length))};let radius=Math.max(21,Math.min(38,220/Math.max(A.length,B.length,1)));",
@@ -121,15 +137,27 @@ def build_interface_explorer(payload: str) -> str:
         "y=\"${q[1]-12}\" text-anchor=\"middle\" fill=\"#07101e\" font-size=\"10\" font-weight=\"900\"><tspan x=\"${q[0]}\" dy=\"0\">${esc(String(residue(id)?.stable_id||'').split('|')[0]||'?')}</tspan><tspan x=\"${q[0]}\" dy=\"11\">${esc(residue(id)?.name||id.split(':').at(-1).replace(/-?\\d+$/,''))}</tspan><tspan x=\"${q[0]}\" dy=\"11\">${esc(residue(id)?.number||'')}</tspan></text>",
         1,
     )
+    # These replacements must follow the layout and three-line-label rewrites
+    # above: the original source has neither ``state.manual`` nor ``stable_id``.
+    page = page.replace(
+        "};let radius=Math.max(21,Math.min(38,220/Math.max(A.length,B.length,1)));",
+        "};all.forEach(id=>{if(state.manual[id])pos[id]=state.manual[id]});let radius=Math.max(21,Math.min(38,220/Math.max(A.length,B.length,1)));",
+        1,
+    )
+    page = page.replace("String(residue(id)?.stable_id||'').split('|')[0]||'?'", "chainCode(id)")
     page = page.replace(
         "c.fillStyle=isPep?'#ffcf5b':'#4bd7ff';",
         "c.fillStyle=state.selected===r.label?(isPep?'#24e6ff':'#ff5a78'):(isPep?'#ffcf5b':'#4bd7ff');",
         1,
     )
-    page = page.replace("view:'network',a:.35}", "view:'network',a:.35,z:1,layout:'bipartite'}", 1)
+    page = page.replace(
+        "view:'network',a:.35}",
+        "view:'network',a:.35,z:1,layout:'bipartite',manual:{},drag:null,dragged:false}",
+        1,
+    )
     page = page.replace(
         ";$('#export').onclick=",
-        ";$('#space').onwheel=e=>{e.preventDefault();state.z=Math.max(.35,Math.min(5,state.z*(e.deltaY<0?1.15:.87)));spatial()};$('#zoom-in').onclick=()=>{state.z=Math.min(5,state.z*1.3);spatial()};$('#zoom-out').onclick=()=>{state.z=Math.max(.35,state.z/1.3);spatial()};$('#zoom-reset').onclick=()=>{state.z=1;state.a=.35;spatial()};$('#layouts').querySelectorAll('button').forEach(b=>b.onclick=()=>{state.layout=b.dataset.layout;$('#layouts').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));draw()});$('#export').onclick=",
+        ";$('#space').onwheel=e=>{e.preventDefault();state.z=Math.max(.35,Math.min(5,state.z*(e.deltaY<0?1.15:.87)));spatial()};$('#zoom-in').onclick=()=>{state.z=Math.min(5,state.z*1.3);spatial()};$('#zoom-out').onclick=()=>{state.z=Math.max(.35,state.z/1.3);spatial()};$('#zoom-reset').onclick=()=>{state.z=1;state.a=.35;spatial()};$('#layouts').querySelectorAll('button[data-layout]').forEach(b=>b.onclick=()=>{state.layout=b.dataset.layout;state.manual={};$('#layouts').querySelectorAll('button[data-layout]').forEach(x=>x.classList.toggle('on',x===b));draw()});$('#reset-layout').onclick=()=>{state.manual={};draw()};$('#export').onclick=",
         1,
     )
     page = page.replace(
