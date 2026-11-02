@@ -1276,8 +1276,8 @@ def interface_scorecard_html(analysis: Path) -> str:
     table = table[peptide_a | peptide_b].copy()
     if table.empty:
         return ""
-    table["Peptide position"] = np.where(peptide_a, table["ResidueA"], table["ResidueB"]).astype(str).str.rsplit(":", n=1).str[-1]
-    table["Protein partner"] = np.where(peptide_a, table["ResidueB"], table["ResidueA"]).astype(str).str.rsplit(":", n=1).str[-1]
+    table["Peptide position"] = pd.Series(np.where(peptide_a, table["ResidueA"], table["ResidueB"]), index=table.index).astype(str).str.rsplit(":", n=1).str[-1]
+    table["Protein partner"] = pd.Series(np.where(peptide_a, table["ResidueB"], table["ResidueA"]), index=table.index).astype(str).str.rsplit(":", n=1).str[-1]
     table["ContactFraction"] = pd.to_numeric(table["ContactFraction"], errors="coerce")
     table["MeanMinDistance_A"] = pd.to_numeric(table["MeanMinDistance_A"], errors="coerce")
     table = table.dropna(subset=["ContactFraction", "MeanMinDistance_A"]).sort_values("ContactFraction", ascending=False).head(5)
