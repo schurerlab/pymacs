@@ -112,10 +112,14 @@ def build_interface_explorer(payload: str) -> str:
     )
     page = page.replace(
         "svg.querySelectorAll('[data-r]').forEach(n=>n.onclick=()=>select(n.dataset.r));",
-        "svg.querySelectorAll('[data-r]').forEach(n=>n.onclick=()=>{if(state.dragged){state.dragged=false;return}select(n.dataset.r)});svg.onpointerdown=e=>{let n=e.target.closest('[data-r]');if(!n)return;state.drag=n.dataset.r;svg.setPointerCapture?.(e.pointerId)};svg.onpointermove=e=>{if(!state.drag)return;let box=svg.getBoundingClientRect(),x=(e.clientX-box.left)*1200/box.width,y=(e.clientY-box.top)*610/box.height;state.manual[state.drag]=[Math.max(35,Math.min(1165,x)),Math.max(35,Math.min(575,y))];state.dragged=true;draw()};svg.onpointerup=svg.onpointercancel=()=>{state.drag=null};",
+        "svg.querySelectorAll('[data-r]').forEach(n=>n.onclick=e=>{if(state.skipClick){state.skipClick=false;return}select(n.dataset.r)});svg.onpointerdown=e=>{let n=e.target.closest('[data-r]');if(!n)return;state.drag={id:n.dataset.r,x:e.clientX,y:e.clientY,moved:false};svg.setPointerCapture?.(e.pointerId)};svg.onpointermove=e=>{let d=state.drag;if(!d)return;if(!d.moved&&Math.hypot(e.clientX-d.x,e.clientY-d.y)<5)return;d.moved=true;let box=svg.getBoundingClientRect(),x=(e.clientX-box.left)*1200/box.width,y=(e.clientY-box.top)*610/box.height;state.manual[d.id]=[Math.max(35,Math.min(1165,x)),Math.max(35,Math.min(575,y))];draw()};svg.onpointerup=svg.onpointercancel=e=>{let d=state.drag;state.drag=null;if(!d)return;state.skipClick=true;if(!d.moved)select(d.id)};",
         1,
     )
-    page = page.replace('data-layout="chain">Chain-separated</button>', 'data-layout="chain">Chain-separated</button><button id="reset-layout">Reset positions</button>', 1)
+    page = page.replace(
+        'data-layout="chain">Chain-separated</button>',
+        'data-layout="chain">Chain-separated</button><button id="reset-layout">Reset positions</button><label class="node-scale">Label size <input id="node-font" type="range" min="10" max="16" step="1" value="14"><b id="node-font-v">14px</b></label>',
+        1,
+    )
     page = page.replace(
         "let A=[...new Set(es.map(e=>e.a))],B=[...new Set(es.map(e=>e.b))],pos={},at=(x,i,n)=>[x,80+i*470/Math.max(n-1,1)];A.forEach((x,i)=>pos[x]=at(180,i,A.length));B.forEach((x,i)=>pos[x]=at(1000,i,B.length));",
         "let A=[...new Set(es.map(e=>e.a))],B=[...new Set(es.map(e=>e.b))],all=[...A,...B],pos={},at=(x,i,n)=>[x,80+i*470/Math.max(n-1,1)];if(state.layout==='circle'||state.layout==='cose'){all.forEach((id,i)=>{let q=2*Math.PI*i/Math.max(all.length,1)-Math.PI/2;pos[id]=[600+330*Math.cos(q),305+230*Math.sin(q)]})}else if(state.layout==='concentric'){A.forEach((id,i)=>{let q=2*Math.PI*i/Math.max(A.length,1)-Math.PI/2;pos[id]=[600+360*Math.cos(q),305+240*Math.sin(q)]});B.forEach((id,i)=>{let q=2*Math.PI*i/Math.max(B.length,1)-Math.PI/2;pos[id]=[600+165*Math.cos(q),305+110*Math.sin(q)]})}else{A.forEach((x,i)=>pos[x]=at(180,i,A.length));B.forEach((x,i)=>pos[x]=at(1000,i,B.length))};let radius=Math.max(21,Math.min(38,220/Math.max(A.length,B.length,1)));",
@@ -145,6 +149,8 @@ def build_interface_explorer(payload: str) -> str:
         1,
     )
     page = page.replace("String(residue(id)?.stable_id||'').split('|')[0]||'?'", "chainCode(id)")
+    page = page.replace('font-size="10" font-weight="900"', 'font-size="${state.font}" font-weight="900"')
+    page = page.replace('dy="11"', 'dy="${Math.max(11,Math.round(state.font*.95))}"')
     page = page.replace(
         "c.fillStyle=isPep?'#ffcf5b':'#4bd7ff';",
         "c.fillStyle=state.selected===r.label?(isPep?'#24e6ff':'#ff5a78'):(isPep?'#ffcf5b':'#4bd7ff');",
@@ -152,12 +158,12 @@ def build_interface_explorer(payload: str) -> str:
     )
     page = page.replace(
         "view:'network',a:.35}",
-        "view:'network',a:.35,z:1,layout:'bipartite',manual:{},drag:null,dragged:false}",
+        "view:'network',a:.35,z:1,layout:'bipartite',manual:{},drag:null,skipClick:false,font:14}",
         1,
     )
     page = page.replace(
         ";$('#export').onclick=",
-        ";$('#space').onwheel=e=>{e.preventDefault();state.z=Math.max(.35,Math.min(5,state.z*(e.deltaY<0?1.15:.87)));spatial()};$('#zoom-in').onclick=()=>{state.z=Math.min(5,state.z*1.3);spatial()};$('#zoom-out').onclick=()=>{state.z=Math.max(.35,state.z/1.3);spatial()};$('#zoom-reset').onclick=()=>{state.z=1;state.a=.35;spatial()};$('#layouts').querySelectorAll('button[data-layout]').forEach(b=>b.onclick=()=>{state.layout=b.dataset.layout;state.manual={};$('#layouts').querySelectorAll('button[data-layout]').forEach(x=>x.classList.toggle('on',x===b));draw()});$('#reset-layout').onclick=()=>{state.manual={};draw()};$('#export').onclick=",
+        ";$('#space').onwheel=e=>{e.preventDefault();state.z=Math.max(.35,Math.min(5,state.z*(e.deltaY<0?1.15:.87)));spatial()};$('#zoom-in').onclick=()=>{state.z=Math.min(5,state.z*1.3);spatial()};$('#zoom-out').onclick=()=>{state.z=Math.max(.35,state.z/1.3);spatial()};$('#zoom-reset').onclick=()=>{state.z=1;state.a=.35;spatial()};$('#layouts').querySelectorAll('button[data-layout]').forEach(b=>b.onclick=()=>{state.layout=b.dataset.layout;state.manual={};$('#layouts').querySelectorAll('button[data-layout]').forEach(x=>x.classList.toggle('on',x===b));draw()});$('#reset-layout').onclick=()=>{state.manual={};draw()};$('#node-font').oninput=e=>{state.font=+e.target.value;$('#node-font-v').textContent=state.font+'px';draw()};$('#export').onclick=",
         1,
     )
     page = page.replace(

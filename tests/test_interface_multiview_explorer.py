@@ -131,8 +131,12 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("p.left_chain||'A'", page)
         self.assertIn("manual:{}", page)
         self.assertIn("svg.onpointerdown", page)
-        self.assertIn("state.manual[state.drag]", page)
+        self.assertIn("state.manual[d.id]", page)
         self.assertIn('id="reset-layout"', page)
+        self.assertIn('id="node-font"', page)
+        self.assertIn("$('#node-font').oninput", page)
+        self.assertIn("Math.hypot(e.clientX-d.x,e.clientY-d.y)<5", page)
+        self.assertIn("if(!d.moved)select(d.id)", page)
         self.assertIn("detail-kicker", page)
 
     def test_reusable_3c_cache_rebuilds_the_explorer(self):
