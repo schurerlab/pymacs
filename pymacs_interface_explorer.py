@@ -264,6 +264,61 @@ def build_interface_explorer(payload: str) -> str:
         "((e.a.startsWith(p.left+':')&&e.b.startsWith(p.right+':'))||(e.a.startsWith(p.right+':')&&e.b.startsWith(p.left+':')))",
         1,
     )
+    # Shift-click extends the current residue selection; an ordinary click
+    # starts a fresh comparison.  ``selected`` remains the primary residue
+    # for backwards-compatible inspector and parent-window events.
+    page = page.replace(
+        "selected:null,view:'network'",
+        "selected:null,selectedMany:[],view:'network'",
+        1,
+    )
+    page = page.replace(
+        "function select(id,e){if(state.selected===id){state.selected=null;$('#detail').textContent='Selection cleared.';render();return}state.selected=id;",
+        "function select(id,e,extend=false){let prior=state.selectedMany||[];if(extend){state.selectedMany=prior.includes(id)?prior.filter(x=>x!==id):[...prior,id];state.selected=state.selectedMany.at(-1)||null}else{state.selectedMany=[id];state.selected=id};",
+        1,
+    )
+    page = page.replace(
+        "function typeTone(t){return/bond/i.test(t)?'#ff5578':/ionic/i.test(t)?'#c084fc':/hydrophobic/i.test(t)?'#7dff91':'#82c7ff'}function draw()",
+        "function typeTone(t){return/bond/i.test(t)?'#ff5578':/ionic/i.test(t)?'#c084fc':/hydrophobic/i.test(t)?'#7dff91':'#82c7ff'}function isSelected(id){return(state.selectedMany||[]).includes(id)}function draw()",
+        1,
+    )
+    page = page.replace("state.selected===r.label", "isSelected(r.label)")
+    page = page.replace("state.selected===id", "isSelected(id)")
+    page = page.replace("isPeptide(id)?'#24e6ff':'#ff5a78'", "isPeptide(id)?'#a78bfa':'#ff5a78'")
+    page = page.replace("isPep?'#24e6ff':'#ff5a78'", "isPep?'#a78bfa':'#ff5a78'")
+    page = page.replace("isPeptide(selected.label)?'#24e6ff':'#ff5a78'", "isPeptide(selected.label)?'#a78bfa':'#ff5a78'")
+    page = page.replace(".res.sel.pep{outline:3px solid #24e6ff", ".res.sel.pep{outline:3px solid #a78bfa", 1)
+    page = page.replace(
+        "if(!d.moved)select(d.id)",
+        "if(!d.moved)select(d.id,null,e.shiftKey)",
+        1,
+    )
+    page = page.replace(
+        "c.canvas.onclick=e=>{let hit=pick(e);if(hit)select(hit.r.label)}",
+        "c.canvas.onclick=e=>{let hit=pick(e);if(hit)select(hit.r.label,null,e.shiftKey)}",
+        1,
+    )
+    page = page.replace(
+        "n.onclick=()=>select(n.dataset.r)",
+        "n.onclick=e=>select(n.dataset.r,null,e.shiftKey)",
+    )
+    page = page.replace(
+        ".swatch.selpep{background:#24e6ff}",
+        ".swatch.selpep{background:#a78bfa}",
+        1,
+    )
+    page = page.replace(
+        "</style>",
+        ".spatial-detail .selection-note{margin:12px 0;color:#d5c7ff;font-size:12px}.spatial-detail .active-contacts{display:grid;gap:8px;margin-top:12px}.spatial-detail .contact-card{padding:10px;border:1px solid #654a9f;border-radius:9px;background:linear-gradient(135deg,#17132a,#0b1828);box-shadow:inset 3px 0 0 #a78bfa}.spatial-detail .contact-card h4{margin:0 0 7px;color:#f3efff;font-size:13px}.spatial-detail .contact-chip{display:flex;justify-content:space-between;gap:8px;margin-top:5px;padding:5px 7px;border:1px solid #284b66;border-radius:6px;background:#09131f;font-size:12px}.spatial-detail .contact-chip b{color:#ffcf5b}.spatial-detail .contact-chip em{font-style:normal;font-size:11px}.spatial-detail .contact-empty{padding:8px;border:1px dashed #31536c;border-radius:7px;color:#9bb0c9;font-size:12px}</style>",
+        1,
+    )
+    # The spatial inspector lists each currently selected residue together
+    # with its active partners instead of reducing the information to a count.
+    page = page.replace(
+        "function structureInspector(){",
+        "function spatialInspector(){let host=$('#spatial-detail'),chosen=state.selectedMany||[],cards=chosen.map(id=>{let r=residue(id),pep=isPeptide(id),partners=edges().filter(e=>e.a===id||e.b===id);let entries=partners.map(e=>{let t=typeTone(e.type),other=e.a===id?e.b:e.a;return '<div class=\"contact-chip\" style=\"border-color:'+t+'\"><span>'+brief(other)+'</span><span><b style=\"color:'+t+'\">'+(100*e.fraction).toFixed(1)+'%</b> <em style=\"color:'+t+'\">'+esc(e.type)+'</em></span></div>'}).join('')||'<div class=\"contact-empty\">No partners under the active filters.</div>';return '<div class=\"contact-card\"><div class=\"detail-kicker\">'+(pep?'PEPTIDE':'RECEPTOR')+' RESIDUE</div><h4>'+brief(id)+'</h4>'+entries+'</div>'}).join('');host.innerHTML='<div class=\"detail-kicker\">3D CONTACT SPACE</div><h3>Interface-focused coordinates</h3><p>Blue points are receptor contact partners; gold points retain peptide N→C context. Shift-click points to compare residues.</p><div class=\"spatial-legend\"><span><i class=\"swatch pro\"></i>Receptor contact partner</span><span><i class=\"swatch pep\"></i>Peptide residue</span><span><i class=\"swatch selpep\"></i>Selected peptide</span><span><i class=\"swatch selpro\"></i>Selected receptor</span></div><div class=\"selection-note\">'+(chosen.length?'SHIFT-CLICK SELECTION · '+chosen.length+' residue'+(chosen.length===1?'':'s'):'Click a point to inspect it; Shift-click adds or removes a residue.')+'</div><div class=\"active-contacts\">'+(cards||'<div class=\"contact-empty\">No residue selected.</div>')+'</div>'; }function structureInspector(){",
+        1,
+    )
     return page
 
 

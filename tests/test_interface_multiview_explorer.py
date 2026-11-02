@@ -97,8 +97,9 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
             "edges": [], "presence": {"available": True, "times_ns": [], "rows": {}},
         }))
         self.assertIn("#cy{display:none!important}#rin{display:block", page)
-        self.assertIn("state.selected===id){state.selected=null", page)
-        self.assertIn("#24e6ff", page)
+        self.assertIn("function select(id,e,extend=false)", page)
+        self.assertIn("state.selectedMany=[id]", page)
+        self.assertIn("#a78bfa", page)
         self.assertIn("#ff5a78", page)
         self.assertIn("$('#space').onwheel", page)
         self.assertIn("document.querySelector('#cy').offsetWidth===0", page)
@@ -136,7 +137,7 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn('id="node-font"', page)
         self.assertIn("$('#node-font').oninput", page)
         self.assertIn("Math.hypot(e.clientX-d.x,e.clientY-d.y)<5", page)
-        self.assertIn("if(!d.moved)select(d.id)", page)
+        self.assertIn("if(!d.moved)select(d.id,null,e.shiftKey)", page)
         self.assertIn("detail-kicker", page)
         self.assertIn("function typeTone(t)", page)
         self.assertIn("border-color:'+t", page)
@@ -144,6 +145,12 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("function spatialInspector()", page)
         self.assertIn("c.canvas.onclick", page)
         self.assertIn('id="spatial-structure"', page)
+        self.assertIn("selectedMany:[]", page)
+        self.assertIn("select(hit.r.label,null,e.shiftKey)", page)
+        self.assertIn("function isSelected(id)", page)
+        self.assertIn("#a78bfa", page)
+        self.assertIn("SHIFT-CLICK SELECTION", page)
+        self.assertIn("contact-chip", page)
 
     def test_reusable_3c_cache_rebuilds_the_explorer(self):
         source = Path(__file__).resolve().parents[1].joinpath("3C_Interface_RIN.py").read_text()
