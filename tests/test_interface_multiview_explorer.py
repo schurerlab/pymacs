@@ -70,6 +70,25 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("pepChain=p.left===pep?.label?p.left_chain:p.right_chain", page)
         self.assertIn("DATA.presence?.available===true", page)
 
+    def test_structure_selector_and_network_resize_contracts(self):
+        page = build_cytoscape_interface_explorer(json.dumps({
+            "pairs": [{"id": "p", "left": "Rec", "right": "Pep",
+                       "left_chain": "A", "right_chain": "B"}],
+            "chains": {"Rec": {"type": "protein", "residues": []},
+                       "Pep": {"type": "peptide", "residues": []}},
+            "edges": [], "default_threshold": .5,
+            "presence": {"available": True, "times_ns": [0, 1], "rows": {}},
+        }))
+        self.assertIn('class="structure-grid"', page)
+        self.assertIn('id="mol"', page)
+        self.assertIn('id="structure-detail"', page)
+        self.assertIn("function structureInspector()", page)
+        self.assertIn("viewer.resize()", page)
+        self.assertIn("defaultOcc=()=>", page)
+        self.assertIn("layout='bipartite'", page)
+        self.assertIn("label:''", page)
+        self.assertIn("if(window.ResizeObserver)", page)
+
     def test_reusable_3c_cache_rebuilds_the_explorer(self):
         source = Path(__file__).resolve().parents[1].joinpath("3C_Interface_RIN.py").read_text()
         match = re.search(
