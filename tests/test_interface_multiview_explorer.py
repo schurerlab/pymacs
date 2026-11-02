@@ -48,9 +48,25 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("window.PyMACSSelection", page)
         self.assertIn("pymacs-select", page)
         self.assertIn("left.type==='peptide'?left:right", page)
-        self.assertIn("e.window_geometric=true", page)
+        self.assertIn("e.window_geometric=$('#window').value!=='all'", page)
         self.assertIn("!e.window_geometric&&e.type===state.kind", page)
         self.assertNotIn("/static/3Dmol-min.js", page)
+
+    def test_embedded_views_are_contact_focused_and_contained(self):
+        page = build_cytoscape_interface_explorer(json.dumps({
+            "pairs": [{"id": "p", "left": "Rec", "right": "Pep",
+                       "left_chain": "A", "right_chain": "B"}],
+            "chains": {"Rec": {"type": "protein", "residues": []},
+                       "Pep": {"type": "peptide", "residues": []}},
+            "edges": [], "presence": {"available": True, "times_ns": [0, 1], "rows": {}}
+        }))
+        self.assertIn("visible=new Set(es.flatMap", page)
+        self.assertIn("No contacts meet the active filter", page)
+        self.assertIn(".map-scroll{max-width:100%;max-height:535px;overflow:auto", page)
+        self.assertIn("+'</table></div>';$('#map')", page)
+        self.assertIn("centre=bounds.reduce", page)
+        self.assertIn("pepChain=p.left===pep?.label?p.left_chain:p.right_chain", page)
+        self.assertIn("DATA.presence?.available===true", page)
 
 
 if __name__ == "__main__":

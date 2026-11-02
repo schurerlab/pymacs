@@ -43,7 +43,7 @@ def build_interface_explorer(payload: str) -> str:
     )
     page = page.replace(
         "if(viewer)return;",
-        "if(viewer){viewer.setStyle({},{cartoon:{color:'#53718c'}});let m=String(state.selected||'').split(':').at(-1).match(/([A-Z]{3})(-?\\d+)/);if(m)viewer.setStyle({resn:m[1],resi:m[2]},{stick:{radius:.24,color:'#ffffff'}});viewer.render();return;}",
+        "if(viewer){viewer.setStyle({},{cartoon:{color:'#3f5b76'}});let p=pair(),pep=[DATA.chains[p.left],DATA.chains[p.right]].find(c=>c.type==='peptide'),pepChain=p.left===pep?.label?p.left_chain:p.right_chain;viewer.setStyle({chain:pepChain},{cartoon:{color:'#ffcf5b'},stick:{radius:.18,color:'#ffdf85'}});let m=String(state.selected||'').split(':').at(-1).match(/([A-Z]{3})(-?\\d+)/);if(m)viewer.setStyle({resn:m[1],resi:m[2]},{stick:{radius:.24,color:'#ffffff'}});viewer.render();return;}",
         1,
     )
     page = page.replace(
@@ -66,9 +66,45 @@ def build_interface_explorer(payload: str) -> str:
         "function contact(){let p=pair(),left=DATA.chains[p.left],right=DATA.chains[p.right],L=(left.type==='peptide'?left:right).residues,R=(left.type==='peptide'?right:left).residues,",
         1,
     )
+    # Keep the wide receptor axis contained in its own scroller instead of
+    # letting a large contact map crop the embedded dossier.
+    page = page.replace(
+        "$('#map').innerHTML='<p>Rows preserve peptide N→C order when a peptide is the left selected chain. Cell colour is geometric-contact occupancy.</p><table>",
+        "$('#map').innerHTML='<p>Rows preserve peptide N→C order. Cell colour is geometric-contact occupancy.</p><div class=\"map-scroll\"><table>",
+        1,
+    )
+    page = page.replace("+'</tr>').join('')+'</table>';$('#map')",
+                        "+'</tr>').join('')+'</table></div>';$('#map')", 1)
+    page = page.replace("#rin{display:none}",
+                        "#map{overflow:hidden;max-height:610px}.map-scroll{max-width:100%;max-height:535px;overflow:auto;padding-bottom:6px;border:1px solid #29415b;border-radius:8px}.map-scroll table{min-width:max-content}.map-scroll th{position:sticky;top:0;background:#101d30;z-index:1}.map-scroll tr th:first-child{left:0;z-index:2}.map-scroll tr:first-child th:first-child{z-index:3}#rin{display:none}", 1)
+    # The spatial view is contact-focused: all peptide residues remain for
+    # sequence context, while protein labels are limited to active partners.
+    page = page.replace(
+        "function spatial(){let p=pair(),all=[...DATA.chains[p.left].residues,...DATA.chains[p.right].residues],by=new Map(all.map(r=>[r.label,r])),",
+        "function spatial(){let p=pair(),raw=[...DATA.chains[p.left].residues,...DATA.chains[p.right].residues],involved=new Set(edges().flatMap(e=>[e.a,e.b])),all=raw.filter(r=>DATA.chains[p.left].type==='peptide'&&DATA.chains[p.left].residues.includes(r)||DATA.chains[p.right].type==='peptide'&&DATA.chains[p.right].residues.includes(r)||involved.has(r.label)),by=new Map(raw.map(r=>[r.label,r])),",
+        1,
+    )
+    page = page.replace(
+        "co=r=>r.position||[0,0,0],pr=r=>{let[x,y,z]=co(r),q=Math.cos(state.a),s=Math.sin(state.a);return[600+(x*q-z*s)*7,305-y*7+(x*s+z*q)]};",
+        "co=r=>r.position||[0,0,0],bounds=all.map(co),centre=bounds.reduce((sum,v)=>sum.map((x,i)=>x+v[i]),[0,0,0]).map(x=>x/Math.max(bounds.length,1)),span=Math.max(1,...bounds.flatMap(v=>v.map((x,i)=>Math.abs(x-centre[i])))),scale=Math.min(11,250/span),pr=r=>{let[x,y,z]=co(r);x-=centre[0];y-=centre[1];z-=centre[2];let q=Math.cos(state.a),s=Math.sin(state.a);return[600+(x*q-z*s)*scale,305-y*scale+(x*s+z*q)*scale*.16]};",
+        1,
+    )
+    # Visually lift the peptide out of the receptor cartoon in the molecular
+    # view.  The stable ID carries the PDB chain identifier.
+    page = page.replace(
+        "viewer.setStyle({},{cartoon:{color:'#53718c'}});viewer.zoomTo();viewer.render()",
+        "let p=pair(),pep=[DATA.chains[p.left],DATA.chains[p.right]].find(c=>c.type==='peptide'),pepChain=p.left===pep?.label?p.left_chain:p.right_chain;viewer.setStyle({},{cartoon:{color:'#3f5b76'}});viewer.setStyle({chain:pepChain},{cartoon:{color:'#ffcf5b'},stick:{radius:.18,color:'#ffdf85'}});viewer.zoomTo();viewer.render()",
+        1,
+    )
     # Windowed values are explicitly geometric; chemistry filters cannot claim
     # chemically validated occupancy without matching framewise evidence.
-    page = page.replace("e.fraction=n?c/n:0});$('#note').textContent=", "e.fraction=n?c/n:0;e.window_geometric=true});$('#note').textContent=", 1)
+    page = page.replace("if(!times.length||!Object.keys(rows).length)", "if(!(DATA.presence?.available===true||(times.length&&Object.keys(rows).length)))", 1)
+    page = page.replace("e.fraction=n?c/n:0});$('#note').textContent=", "e.fraction=n?c/n:0;e.window_geometric=$('#window').value!=='all'});$('#note').textContent=", 1)
+    page = page.replace(
+        "$('#window').onchange=e=>{$('#custom').classList.toggle('hidden',e.target.value!=='custom');recalc();render()};",
+        "$('#window').onchange=e=>{$('#custom').classList.toggle('hidden',e.target.value!=='custom');let windowed=e.target.value!=='all';$('#type').disabled=windowed;if(windowed){state.kind='all';$('#type').value='all'}recalc();render()};",
+        1,
+    )
     page = page.replace("(state.kind==='all'||e.type===state.kind)", "(state.kind==='all'||(!e.window_geometric&&e.type===state.kind))")
     page = page.replace(
         "e.a.startsWith(p.left+':')&&e.b.startsWith(p.right+':')",
@@ -80,4 +116,28 @@ def build_interface_explorer(payload: str) -> str:
 
 def build_cytoscape_interface_explorer(payload: str) -> str:
     """Build the report, then append the Cytoscape primary-renderer bridge."""
-    return build_interface_explorer(payload).replace("</html>", CYTOSCAPE_BOOTSTRAP + "</html>")
+    page = build_interface_explorer(payload)
+    # The contact-focused bipartite view is readable on first load.  The
+    # exploratory force layout remains available as an explicit choice.
+    page = page.replace('data-layout="cose" class="on"', 'data-layout="cose"', 1)
+    page = page.replace('data-layout="bipartite">', 'data-layout="bipartite" class="on">', 1)
+    bootstrap = CYTOSCAPE_BOOTSTRAP
+    bootstrap = bootstrap.replace("let cy,layout='cose';", "let cy,layout='bipartite';", 1)
+    bootstrap = bootstrap.replace(
+        "e=>p&&(e.a.startsWith(p.left+':')||e.a.startsWith(p.right+':'))&&e.fraction>=o",
+        "e=>p&&((e.a.startsWith(p.left+':')&&e.b.startsWith(p.right+':'))||(e.a.startsWith(p.right+':')&&e.b.startsWith(p.left+':')))&&e.fraction>=o",
+        1,
+    )
+    bootstrap = bootstrap.replace(
+        "nodes=[...l,...r].map(x=>({data:{id:x.label,label:x.one+x.number,side:l.includes(x)?'left':'right',pep:(l.includes(x)?DATA.chains[p.left]:DATA.chains[p.right]).type==='peptide'}}))",
+        "visible=new Set(es.flatMap(e=>[e.a,e.b])),nodes=[...l,...r].filter(x=>visible.has(x.label)).map(x=>({data:{id:x.label,label:x.one+x.number,side:l.includes(x)?'left':'right',rank:(l.includes(x)?l:r).indexOf(x),pep:(l.includes(x)?DATA.chains[p.left]:DATA.chains[p.right]).type==='peptide'}}))",
+        1,
+    )
+    bootstrap = bootstrap.replace("'font-size':10", "'font-size':11", 1).replace("width:34,height:34", "width:38,height:38", 1)
+    bootstrap = bootstrap.replace("n.index()*470", "n.data('rank')*470", 1)
+    bootstrap = bootstrap.replace(
+        "if(!cy){cy=cytoscape",
+        "$('#detail').textContent=es.length?'Select a residue or edge to inspect it.':'No contacts meet the active filter. Lower the occupancy threshold to inspect the interface.';if(!cy){cy=cytoscape",
+        1,
+    )
+    return page.replace("</html>", bootstrap + "</html>")

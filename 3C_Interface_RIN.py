@@ -1230,7 +1230,13 @@ def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_co
         "thresholds": thresholds,
         "default_threshold": default_threshold,
         "has_peptide": has_peptide,
-        "presence": {"times_ns": presence_times, "rows": presence_rows},
+        # Make availability explicit: an empty or incomplete NPZ cannot
+        # support client-side window occupancy calculations.
+        "presence": {
+            "available": bool(presence_times and presence_rows),
+            "times_ns": presence_times,
+            "rows": presence_rows,
+        },
         "coordinate_frame": "final analyzed trajectory frame",
         "structure_pdb_b64": base64.b64encode(interface_structure_pdb(universe, chain_pairs).encode("utf-8")).decode("ascii"),
     }, separators=(",", ":")).replace("</", "<\\/")
