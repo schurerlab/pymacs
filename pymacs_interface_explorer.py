@@ -264,26 +264,26 @@ def build_interface_explorer(payload: str) -> str:
         "((e.a.startsWith(p.left+':')&&e.b.startsWith(p.right+':'))||(e.a.startsWith(p.right+':')&&e.b.startsWith(p.left+':')))",
         1,
     )
-    # Shift-click extends the current residue selection; an ordinary click
-    # starts a fresh comparison.  ``selected`` remains the primary residue
-    # for backwards-compatible inspector and parent-window events.
+    # Network selection is singular.  The 3D contact-space comparison has an
+    # independent list so it cannot alter the Network inspector.
     page = page.replace(
         "selected:null,view:'network'",
-        "selected:null,selectedMany:[],view:'network'",
+        "selected:null,spatialSelectedMany:[],view:'network'",
         1,
     )
     page = page.replace(
         "function select(id,e){if(state.selected===id){state.selected=null;$('#detail').textContent='Selection cleared.';render();return}state.selected=id;",
-        "function select(id,e,extend=false){let prior=state.selectedMany||[];if(extend){state.selectedMany=prior.includes(id)?prior.filter(x=>x!==id):[...prior,id];state.selected=state.selectedMany.at(-1)||null}else{state.selectedMany=[id];state.selected=id};",
+        "function select(id,e){state.selected=id;",
         1,
     )
     page = page.replace(
         "function typeTone(t){return/bond/i.test(t)?'#ff5578':/ionic/i.test(t)?'#c084fc':/hydrophobic/i.test(t)?'#7dff91':'#82c7ff'}function draw()",
-        "function typeTone(t){return/bond/i.test(t)?'#ff5578':/ionic/i.test(t)?'#c084fc':/hydrophobic/i.test(t)?'#7dff91':'#82c7ff'}function isSelected(id){return(state.selectedMany||[]).includes(id)}function draw()",
+        "function typeTone(t){return/bond/i.test(t)?'#ff5578':/ionic/i.test(t)?'#c084fc':/hydrophobic/i.test(t)?'#7dff91':'#82c7ff'}function isSelected(id){return state.selected===id}function isSpatialSelected(id){return(state.spatialSelectedMany||[]).includes(id)}function selectSpatial(id,extend){let prior=state.spatialSelectedMany||[];state.spatialSelectedMany=extend?(prior.includes(id)?prior.filter(x=>x!==id):[...prior,id]):[id];spatial();spatialInspector()}function draw()",
         1,
     )
     page = page.replace("state.selected===r.label", "isSelected(r.label)")
     page = page.replace("state.selected===id", "isSelected(id)")
+    page = page.replace("function isSelected(id){return isSelected(id)}", "function isSelected(id){return state.selected===id}", 1)
     page = page.replace("isPeptide(id)?'#24e6ff':'#ff5a78'", "isPeptide(id)?'#a78bfa':'#ff5a78'")
     page = page.replace("isPep?'#24e6ff':'#ff5a78'", "isPep?'#a78bfa':'#ff5a78'")
     page = page.replace("isPeptide(selected.label)?'#24e6ff':'#ff5a78'", "isPeptide(selected.label)?'#a78bfa':'#ff5a78'")
@@ -295,7 +295,7 @@ def build_interface_explorer(payload: str) -> str:
     )
     page = page.replace(
         "c.canvas.onclick=e=>{let hit=pick(e);if(hit)select(hit.r.label)}",
-        "c.canvas.onclick=e=>{let hit=pick(e);if(hit)select(hit.r.label,null,e.shiftKey)}",
+        "c.canvas.onclick=e=>{let hit=pick(e);if(hit)selectSpatial(hit.r.label,e.shiftKey)}",
         1,
     )
     page = page.replace(
@@ -316,7 +316,17 @@ def build_interface_explorer(payload: str) -> str:
     # with its active partners instead of reducing the information to a count.
     page = page.replace(
         "function structureInspector(){",
-        "function spatialInspector(){let host=$('#spatial-detail'),chosen=state.selectedMany||[],cards=chosen.map(id=>{let r=residue(id),pep=isPeptide(id),partners=edges().filter(e=>e.a===id||e.b===id);let entries=partners.map(e=>{let t=typeTone(e.type),other=e.a===id?e.b:e.a;return '<div class=\"contact-chip\" style=\"border-color:'+t+'\"><span>'+brief(other)+'</span><span><b style=\"color:'+t+'\">'+(100*e.fraction).toFixed(1)+'%</b> <em style=\"color:'+t+'\">'+esc(e.type)+'</em></span></div>'}).join('')||'<div class=\"contact-empty\">No partners under the active filters.</div>';return '<div class=\"contact-card\"><div class=\"detail-kicker\">'+(pep?'PEPTIDE':'RECEPTOR')+' RESIDUE</div><h4>'+brief(id)+'</h4>'+entries+'</div>'}).join('');host.innerHTML='<div class=\"detail-kicker\">3D CONTACT SPACE</div><h3>Interface-focused coordinates</h3><p>Blue points are receptor contact partners; gold points retain peptide N→C context. Shift-click points to compare residues.</p><div class=\"spatial-legend\"><span><i class=\"swatch pro\"></i>Receptor contact partner</span><span><i class=\"swatch pep\"></i>Peptide residue</span><span><i class=\"swatch selpep\"></i>Selected peptide</span><span><i class=\"swatch selpro\"></i>Selected receptor</span></div><div class=\"selection-note\">'+(chosen.length?'SHIFT-CLICK SELECTION · '+chosen.length+' residue'+(chosen.length===1?'':'s'):'Click a point to inspect it; Shift-click adds or removes a residue.')+'</div><div class=\"active-contacts\">'+(cards||'<div class=\"contact-empty\">No residue selected.</div>')+'</div>'; }function structureInspector(){",
+        "function spatialInspector(){let host=$('#spatial-detail'),chosen=state.spatialSelectedMany||[],cards=chosen.map(id=>{let r=residue(id),pep=isPeptide(id),partners=edges().filter(e=>e.a===id||e.b===id);let entries=partners.map(e=>{let t=typeTone(e.type),other=e.a===id?e.b:e.a;return '<div class=\"contact-chip\" style=\"border-color:'+t+'\"><span>'+brief(other)+'</span><span><b style=\"color:'+t+'\">'+(100*e.fraction).toFixed(1)+'%</b> <em style=\"color:'+t+'\">'+esc(e.type)+'</em></span></div>'}).join('')||'<div class=\"contact-empty\">No partners under the active filters.</div>';return '<div class=\"contact-card\"><div class=\"detail-kicker\">'+(pep?'PEPTIDE':'RECEPTOR')+' RESIDUE</div><h4>'+brief(id)+'</h4>'+entries+'</div>'}).join('');host.innerHTML='<div class=\"detail-kicker\">3D CONTACT SPACE</div><h3>Interface-focused coordinates</h3><p>Blue points are receptor contact partners; gold points retain peptide N→C context. Shift-click points to compare residues.</p><div class=\"spatial-legend\"><span><i class=\"swatch pro\"></i>Receptor contact partner</span><span><i class=\"swatch pep\"></i>Peptide residue</span><span><i class=\"swatch selpep\"></i>Selected peptide</span><span><i class=\"swatch selpro\"></i>Selected receptor</span></div><div class=\"selection-note\">'+(chosen.length?'SHIFT-CLICK SELECTION · '+chosen.length+' residue'+(chosen.length===1?'':'s'):'Click a point to inspect it; Shift-click adds or removes a residue.')+'</div><div class=\"active-contacts\">'+(cards||'<div class=\"contact-empty\">No residue selected.</div>')+'</div>'; }function structureInspector(){",
+        1,
+    )
+    page = page.replace(
+        "window.parent?.postMessage({type:'pymacs-rin-selection',residue:id,edge:e&&[e.a,e.b]},'*');render()}",
+        "render()}",
+        1,
+    )
+    page = page.replace(
+        "c.fillStyle=isSelected(r.label)?(isPep?'#a78bfa':'#ff5a78'):(isPep?'#ffcf5b':'#4bd7ff');c.beginPath();c.arc(x,y,isSelected(r.label)?9:5,0,7);c.fill();if(isPep||isSelected(r.label))",
+        "c.fillStyle=isSpatialSelected(r.label)?(isPep?'#a78bfa':'#ff5a78'):(isPep?'#ffcf5b':'#4bd7ff');c.beginPath();c.arc(x,y,isSpatialSelected(r.label)?9:5,0,7);c.fill();if(isPep||isSpatialSelected(r.label))",
         1,
     )
     return page
