@@ -1333,7 +1333,9 @@ def peptide_contact_regime_plot(analysis: Path) -> str | None:
     if not source.is_file():
         return None
     try:
-        payload = np.load(source, allow_pickle=False)
+        # This is a locally generated PyMACS archive; label arrays are stored
+        # as NumPy object arrays, so loading them requires pickle support.
+        payload = np.load(source, allow_pickle=True)
         matrix = np.asarray(payload["contact_matrix"], dtype=np.uint8)
         left = [str(value) for value in np.asarray(payload["residue_a_labels"]).tolist()]
         right = [str(value) for value in np.asarray(payload["residue_b_labels"]).tolist()]
