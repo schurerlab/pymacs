@@ -1271,11 +1271,41 @@ def distance_carousel_html(analysis: Path) -> str:
     from becoming visually persuasive spokes or traces.
     """
     events_path = analysis / "AllContacts_Framewise.csv"
-    if not events_path.is_file():
-        return ""
-    try:
-        events = pd.read_csv(events_path, usecols=lambda column: column in {"Time_ns", "Residue", "Distance"})
-    except (OSError, ValueError, pd.errors.ParserError):
+    interface_events_path = analysis / "Interface_RIN" / "interface_residue_pair_framewise.csv.gz"
+    if events_path.is_file():
+        try:
+            events = pd.read_csv(events_path, usecols=lambda column: column in {"Time_ns", "Residue", "Distance"})
+        except (OSError, ValueError, pd.errors.ParserError):
+            return ""
+    elif interface_events_path.is_file():
+        # Peptide dossiers persist their exact pairwise contact distances in
+        # 3C's framewise table rather than the ligand-only AllContacts file.
+        # Retain only canonical peptide residues on the explicitly labelled
+        # peptide side; this also rejects a legacy terminal SOL row.
+        try:
+            raw = pd.read_csv(interface_events_path, compression="gzip", usecols=lambda column: column in {
+                "Time_ns", "ChainA_Label", "ChainB_Label", "ResidueA", "ResidueB", "MinDistance_A"
+            })
+        except (OSError, ValueError, pd.errors.ParserError):
+            return ""
+        needed = {"Time_ns", "ChainA_Label", "ChainB_Label", "ResidueA", "ResidueB", "MinDistance_A"}
+        if not needed.issubset(raw.columns):
+            return ""
+        peptide_a = raw["ChainA_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)
+        peptide_b = raw["ChainB_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)
+        amino = r":(?:ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL)-?\d+$"
+        valid_a = raw["ResidueA"].astype(str).str.contains(amino, case=False, regex=True)
+        valid_b = raw["ResidueB"].astype(str).str.contains(amino, case=False, regex=True)
+        raw = raw[(peptide_a & valid_a) | (peptide_b & valid_b)].copy()
+        if raw.empty:
+            return ""
+        events = pd.DataFrame({
+            "Time_ns": raw["Time_ns"],
+            "Residue": np.where(peptide_a.loc[raw.index], raw["ResidueB"], raw["ResidueA"]),
+            "Distance": raw["MinDistance_A"],
+        })
+        events_path = interface_events_path
+    else:
         return ""
     required = {"Time_ns", "Residue", "Distance"}
     if not required.issubset(events.columns):

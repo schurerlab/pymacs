@@ -82,6 +82,8 @@ def test_distance_carousel_uses_observed_events_and_has_four_complementary_views
     assert "Longest uninterrupted observed contact episodes" in source
     assert "Missing frames are never converted to" in source
     assert "events = events[(events[\"Distance\"] > 0)" in source
+    assert 'interface_residue_pair_framewise.csv.gz' in source
+    assert 'valid_b = raw["ResidueB"].astype(str).str.contains(amino' in source
 
 
 def test_ligand_dashboard_never_silently_hides_a_missing_explorer_artifact():
