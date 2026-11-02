@@ -1280,7 +1280,7 @@ def interface_scorecard_html(analysis: Path) -> str:
     table["Protein partner"] = pd.Series(np.where(peptide_a, table["ResidueB"], table["ResidueA"]), index=table.index).astype(str).str.rsplit(":", n=1).str[-1]
     # Interface source tables can retain waters/ions as peptide-chain records.
     # They are useful provenance, but never meaningful peptide positions.
-    canonical_peptide = r"^(?:ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL)-?\\d+$"
+    canonical_peptide = r"^(?:ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL)-?\d+$"
     table = table[table["Peptide position"].str.match(canonical_peptide, case=False, na=False)].copy()
     table["ContactFraction"] = pd.to_numeric(table["ContactFraction"], errors="coerce")
     table["MeanMinDistance_A"] = pd.to_numeric(table["MeanMinDistance_A"], errors="coerce")
@@ -1305,7 +1305,7 @@ def peptide_importance_plot(analysis: Path) -> str | None:
     table = table[table["Chain_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)].copy()
     # Keep the explanatory ranking aligned with the visible peptide sequence:
     # omit non-polymer entries such as terminal SOL/water records.
-    canonical_peptide = r":(?:ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL)-?\\d+$"
+    canonical_peptide = r":(?:ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL)-?\d+$"
     table = table[table["Residue_Label"].astype(str).str.contains(canonical_peptide, case=False, regex=True)].copy()
     if table.empty:
         return None
