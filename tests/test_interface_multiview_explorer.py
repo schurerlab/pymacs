@@ -167,6 +167,12 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("write_interactive_interface_rin_html(", branch)
         self.assertIn("cached_events", branch)
 
+    def test_cached_nonpolymer_rows_cannot_return_as_peptide_x_positions(self):
+        source = Path(__file__).resolve().parents[1].joinpath("3C_Interface_RIN.py").read_text()
+        self.assertIn("valid_labels = {", source)
+        self.assertIn("cached non-polymer row", source)
+        self.assertIn('str(record.get("a", "")) in valid_labels', source)
+
 
 if __name__ == "__main__":
     unittest.main()

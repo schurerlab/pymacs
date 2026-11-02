@@ -1221,6 +1221,20 @@ def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_co
             records.append({"a": pair[0], "b": pair[1], "type": "Other contact",
                             "fraction": round(float(row.ContactFraction), 6)})
 
+    # Historical atomIndex ranges may include a terminal solvent molecule.
+    # The chain sequence above is the structural authority: do not let a
+    # cached non-polymer row re-enter any browser view as a fake ``X`` peptide
+    # position or a zero-like spoke.  This keeps presentation safe even before
+    # an older numerical cache is next fully recomputed.
+    valid_labels = {
+        str(residue.get("label", ""))
+        for chain in sequences.values()
+        for residue in chain.get("residues", [])
+    }
+    records = [record for record in records
+               if str(record.get("a", "")) in valid_labels
+               and str(record.get("b", "")) in valid_labels]
+
     pair_options = [
         {"id": f"{left['display_label']}__{right['display_label']}", "left": left["display_label"], "right": right["display_label"],
          "left_chain": str(left.get("current_chain") or left.get("source_chain") or "")[:1],
