@@ -1270,6 +1270,13 @@ def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_co
         # Historical runs may retain aggregate CSVs but not presence data.
         # The explorer deliberately marks custom windows unsupported there.
         pass
+    # Apply the same structural authority to the compact time-window payload.
+    # Otherwise an old solvent pair could remain hidden in JSON and reappear
+    # if a browser-level filter is changed after publication.
+    presence_rows = {
+        key: value for key, value in presence_rows.items()
+        if all(label in valid_labels for label in key.split("\u001f", 1))
+    }
     payload = json.dumps({
         "pairs": pair_options,
         "chains": sequences,

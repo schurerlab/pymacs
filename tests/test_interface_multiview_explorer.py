@@ -172,6 +172,7 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("valid_labels = {", source)
         self.assertIn("cached non-polymer row", source)
         self.assertIn('str(record.get("a", "")) in valid_labels', source)
+        self.assertIn('all(label in valid_labels for label in key.split("\\u001f", 1))', source)
 
 
 if __name__ == "__main__":
