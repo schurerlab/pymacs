@@ -103,6 +103,22 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("$('#space').onwheel", page)
         self.assertIn("document.querySelector('#cy').offsetWidth===0", page)
 
+    def test_svg_layouts_three_line_nodes_and_explicit_spatial_zoom(self):
+        page = build_cytoscape_interface_explorer(json.dumps({
+            "pairs": [{"id": "p", "left": "Rec", "right": "Pep"}],
+            "chains": {"Rec": {"type": "protein", "residues": []},
+                       "Pep": {"type": "peptide", "residues": []}},
+            "edges": [], "presence": {"available": True, "times_ns": [], "rows": {}},
+        }))
+        self.assertIn("layout:'bipartite'", page)
+        self.assertIn("state.layout=b.dataset.layout", page)
+        self.assertIn("<tspan", page)
+        self.assertIn("residue(id)?.stable_id", page)
+        self.assertIn('id="zoom-in"', page)
+        self.assertIn("$('#zoom-in').onclick", page)
+        self.assertIn("scale=Math.min(11,250/span)*state.z", page)
+        self.assertIn("resn:selected.name,resi:selected.number", page)
+
     def test_reusable_3c_cache_rebuilds_the_explorer(self):
         source = Path(__file__).resolve().parents[1].joinpath("3C_Interface_RIN.py").read_text()
         match = re.search(
