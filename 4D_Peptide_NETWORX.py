@@ -164,7 +164,9 @@ def svg_scene(model: dict, threshold: float = .25) -> str:
         active_node = str(residue.get("label")) in active
         fill, stroke, text = ("#ffdb80", "#ffe8ad", "#1d2430") if active_node else ("#25394f", "#7695b5", "#edf5ff")
         residue_name = str(residue.get("label", "")).split(":")[-1][:3].upper()
-        parts.append(f'<g class="node peptide" data-aa="{escape(residue_name)}"><circle cx="{x}" cy="{y}" r="40" fill="{fill}" stroke="{stroke}" stroke-width="3.5"/><text x="{x}" y="{y + 2}" text-anchor="middle" fill="{text}" font-size="27" font-weight="900">{escape(residue.get("one", "X"))}</text><text x="{x}" y="{y + 26}" text-anchor="middle" fill="{text}" font-size="12" font-weight="800">{index}</text><title>{escape(residue.get("label", ""))} · sequence position {index}</title></g>')
+        # Chemistry mode recolours the text.  Draw its dark stroke first so
+        # every label remains readable against the bright residue fills.
+        parts.append(f'<g class="node peptide" data-aa="{escape(residue_name)}"><circle cx="{x}" cy="{y}" r="40" fill="{fill}" stroke="{stroke}" stroke-width="3.5"/><text x="{x}" y="{y + 2}" text-anchor="middle" fill="{text}" stroke="#07111e" stroke-width="1.8" stroke-linejoin="round" paint-order="stroke fill" font-size="27" font-weight="900">{escape(residue.get("one", "X"))}</text><text x="{x}" y="{y + 26}" text-anchor="middle" fill="{text}" stroke="#07111e" stroke-width="1.25" stroke-linejoin="round" paint-order="stroke fill" font-size="12" font-weight="800">{index}</text><title>{escape(residue.get("label", ""))} · sequence position {index}</title></g>')
     first, last = peptide_xy[0], peptide_xy[-1]
     parts.extend((f'<text x="{first[0] - 78}" y="{first[1] + 8}" fill="#5ce5fa" font-size="22" font-weight="900">N</text>',
                   f'<text x="{last[0] + 62}" y="{last[1] + 8}" fill="#5ce5fa" font-size="22" font-weight="900">C</text>', "</svg>"))
