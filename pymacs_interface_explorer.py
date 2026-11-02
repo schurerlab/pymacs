@@ -48,7 +48,7 @@ def build_interface_explorer(payload: str) -> str:
     )
     page = page.replace(
         "viewer.addModel(atob(DATA.structure_pdb_b64),'pdb');viewer.setStyle",
-        "viewer.addModel(atob(DATA.structure_pdb_b64),'pdb');viewer.setClickable({},{},(...args)=>{let atom=args[0],event=args.find(value=>value&&typeof value.shiftKey==='boolean'),p=pair(),candidate=[...DATA.chains[p.left].residues,...DATA.chains[p.right].residues].find(r=>r.number==atom.resi&&String(r.name||'').toUpperCase()===String(atom.resn||'').toUpperCase());if(candidate)window.dispatchEvent(new CustomEvent('pymacs-select',{detail:{residue:candidate.label,extend:!!event?.shiftKey}}));});viewer.setStyle",
+        "viewer.addModel(atob(DATA.structure_pdb_b64),'pdb');host.addEventListener('pointerdown',event=>{state.structureShift=event.shiftKey},true);viewer.setClickable({},true,(atom,viewer,event)=>{let p=pair(),candidate=[...DATA.chains[p.left].residues,...DATA.chains[p.right].residues].find(r=>r.number==atom.resi&&String(r.name||'').toUpperCase()===String(atom.resn||'').toUpperCase());if(candidate)window.dispatchEvent(new CustomEvent('pymacs-select',{detail:{residue:candidate.label,extend:!!(event?.shiftKey||state.structureShift)}}));});viewer.setStyle",
         1,
     )
     bridge = """window.PyMACSSelection={residue:null,edge:null};window.addEventListener('pymacs-select',ev=>{const d=ev.detail||{};if(d.residue)selectSpatial(d.residue,!!d.extend);});window.addEventListener('message',ev=>{const d=ev.data||{};if(d.type==='pymacs-rin-selection'&&d.residue)select(d.residue);});"""
