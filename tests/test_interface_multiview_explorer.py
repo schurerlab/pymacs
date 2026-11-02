@@ -1,5 +1,7 @@
 import json
+import re
 import unittest
+from pathlib import Path
 
 from pymacs_interface_explorer import build_cytoscape_interface_explorer, build_interface_explorer
 
@@ -67,6 +69,18 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("centre=bounds.reduce", page)
         self.assertIn("pepChain=p.left===pep?.label?p.left_chain:p.right_chain", page)
         self.assertIn("DATA.presence?.available===true", page)
+
+    def test_reusable_3c_cache_rebuilds_the_explorer(self):
+        source = Path(__file__).resolve().parents[1].joinpath("3C_Interface_RIN.py").read_text()
+        match = re.search(
+            r"if cached_plot_parameters == plot_parameters and plots_ready:(.*?)progress\.complete\(\"contact_scan\"\)",
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        branch = match.group(1)
+        self.assertIn("write_interactive_interface_rin_html(", branch)
+        self.assertIn("cached_events", branch)
 
 
 if __name__ == "__main__":

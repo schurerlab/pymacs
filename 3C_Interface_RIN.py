@@ -1534,6 +1534,16 @@ def main():
             print("✅ Input trajectory/topology compatible")
             print("♻️ Reusing cached interface data")
             print("✅ Interface plots already present; no trajectory rescan needed.")
+            # The HTML explorer is presentation output, not a scientific
+            # calculation.  Rebuild it on every fully reusable cache hit so
+            # renderer fixes become visible without touching the trajectory.
+            # This consumes only the cached tables/presence matrix and the
+            # already-open final-frame coordinates.
+            events_path = outdir / "ValidatedInterfaceInteractionEvents.csv"
+            cached_events = pd.read_csv(events_path) if events_path.exists() else pd.DataFrame(columns=EVENT_COLUMNS)
+            write_interactive_interface_rin_html(
+                outdir, cached["residue_df"], cached_events, len(frame_indices), chain_pairs, universe
+            )
             progress.complete("contact_scan")
             progress.complete("write_tables")
             progress.complete("render_figures")
