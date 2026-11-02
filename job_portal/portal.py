@@ -11,14 +11,22 @@ import datetime as dt
 import base64
 import csv
 import fcntl
+import hashlib
+import hmac
+import io
 import json
 import os
+import pty
 import re
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
 import tarfile
+import termios
+import threading
+import time
 from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
 import uuid
@@ -26,7 +34,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
+from flask import Flask, Response, abort, flash, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
 from werkzeug.utils import secure_filename
 
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
@@ -36,6 +44,28 @@ EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 JOB_ID = re.compile(r"Job <(\d+)>")
 STRUCTURE_SUFFIXES = {".pdb", ".cif", ".mmcif"}
 RCSB_ID = re.compile(r"^[A-Za-z0-9]{4}$")
+DEFAULT_PORTAL_PASSWORD = "Banana"
+BOARD_CACHE_TTL_SECONDS = 20
+RESULT_FILE_SUFFIXES = {".html", ".pdf", ".png", ".svg"}
+RESULT_TRAJECTORY_NAMES = {"Final_Trajectory.pdb", "binding_pocket_only.pdb"}
+# The portal is a results viewer, not a second raw-data archive.  Keep CSV
+# summaries small enough that publishing a finished campaign cannot exhaust
+# Kyle's disk or delay every later result.
+RESULT_SUMMARY_CSV_LIMIT = 10 * 1024 * 1024
+RESULT_FILE_LIMIT = 2 * 1024 * 1024 * 1024
+_BOARD_REFRESH_LOCK = threading.Lock()
+_BOARD_REFRESH_IN_FLIGHT = False
+
+# These runs predate the portal's submission ledger.  They share one working
+# directory, but each receptor/site-frame is an independent scientific screen
+# with its own 15 ligand shards, so expose them as separate board campaigns.
+LEGACY_IE1_CAMPAIGNS = (
+    ("IE1 · Site B · frame 21910", "SiteB_frame21910"),
+    ("IE1 · Site B · frame 21940", "SiteB_frame21940"),
+    ("IE1 · Site C · frame 16230", "SiteC_frame16230"),
+    ("IE1 · Site C · frame 21940", "SiteC_frame21940"),
+)
+LEGACY_IE1_ROOT = "/nethome/jxs794/Docking_Experiments/IE1-Docking"
 
 
 class PortalError(RuntimeError):
@@ -58,6 +88,9 @@ class Settings:
     # ZIPs provide scientific data only; they never provide executable code.
     autodock_root: str = "/home/jxs794/INST11-Docking"
     pegasus_results_root: str = "/projectnb/cheminfo/home/jxs794/AutoDockVina-Results"
+    admin_email: str = "jmschulz@med.miami.edu"
+    ssh_setup_script: Path = Path(__file__).with_name("setup-cluster-ssh.sh")
+    collaboration_group: str = "cheminfo"
 
 
 def settings_from_env() -> Settings:
@@ -77,6 +110,9 @@ def settings_from_env() -> Settings:
         scp_bin=os.environ.get("LAB_PORTAL_SCP_BIN", "scp"),
         autodock_root=os.environ.get("LAB_PORTAL_AUTODOCK_ROOT", "/home/jxs794/INST11-Docking"),
         pegasus_results_root=os.environ.get("LAB_PORTAL_PEGASUS_RESULTS_ROOT", "/projectnb/cheminfo/home/jxs794/AutoDockVina-Results").rstrip("/"),
+        admin_email=os.environ.get("LAB_PORTAL_ADMIN_EMAIL", "jmschulz@med.miami.edu"),
+        ssh_setup_script=Path(os.environ.get("LAB_PORTAL_SSH_SETUP_SCRIPT", str(Path(__file__).with_name("setup-cluster-ssh.sh")))),
+        collaboration_group=os.environ.get("LAB_PORTAL_COLLABORATION_GROUP", "cheminfo"),
     )
 
 
@@ -97,6 +133,171 @@ def safe_extract(archive: Path, destination: Path) -> None:
             if (info.external_attr >> 16) & 0o170000 == 0o120000:
                 raise PortalError("Archive may not contain symlinks.")
         source.extractall(destination)
+
+
+def published_md_results_root(settings: Settings) -> Path:
+    """Kyle-local, browser-safe copies of finished MD result artifacts."""
+    return settings.stage_root / "published-md-results"
+
+
+def md_results_index_path(settings: Settings) -> Path:
+    return settings.stage_root / "md_results_index.json"
+
+
+def read_md_results_index(settings: Settings) -> dict[str, object]:
+    """Read the already-published Kyle results inventory without contacting Triton."""
+    try:
+        data = json.loads(md_results_index_path(settings).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and isinstance(data.get("systems"), list) else {"systems": []}
+    except (OSError, json.JSONDecodeError):
+        return {"systems": []}
+
+
+def safe_result_relative(value: str) -> PurePosixPath | None:
+    path = PurePosixPath(value)
+    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    return path
+
+
+def remote_md_result_inventory(settings: Settings, campaigns: list[dict[str, str]]) -> list[dict[str, object]]:
+    """List compact, finished analysis artifacts without altering Triton.
+
+    ``analysis_manifest.json`` is written by PyMACS only after its analysis
+    outputs are complete.  It is a reliable completion marker even when a
+    separately submitted HTML-report job was lost from LSF history.
+    """
+    if not campaigns:
+        return []
+    payload = base64.b64encode(json.dumps(campaigns).encode()).decode()
+    script = r'''import base64, json
+from pathlib import Path
+
+campaigns = json.loads(base64.b64decode(PAYLOAD))
+portable_suffixes = {".html", ".pdf", ".png", ".svg"}
+portable_names = {"Final_Trajectory.pdb", "binding_pocket_only.pdb", "analysis_manifest.json", "portal_results_manifest.json", "native_contact_q_summary.txt"}
+csv_limit = 10 * 1024 * 1024
+file_limit = 2 * 1024 * 1024 * 1024
+
+def projects(root):
+    try:
+        entries = json.loads((root / "md_campaign.json").read_text()).get("projects", [])
+        found = [root / "systems" / str(entry.get("id", "")) for entry in entries]
+        return [item for item in found if item.is_dir()]
+    except Exception:
+        return [root] if root.is_dir() else []
+
+items = []
+for campaign in campaigns:
+    for project in projects(Path(campaign["remote"])):
+        output = project / "Analysis_Results"
+        if not (output / "analysis_manifest.json").is_file():
+            continue
+        metadata = {}
+        try:
+            metadata = json.loads((project / "pymacs_run.json").read_text()).get("metadata", {})
+        except Exception:
+            pass
+        files = []
+        for candidate in output.rglob("*"):
+            try:
+                size = candidate.stat().st_size
+                include = (candidate.is_file() and size <= file_limit and (
+                    candidate.suffix.lower() in portable_suffixes or candidate.name in portable_names
+                    or (candidate.suffix.lower() == ".csv" and size <= csv_limit)
+                ))
+                if include:
+                    files.append({"relative": candidate.relative_to(project).as_posix(), "size": size})
+            except OSError:
+                pass
+        items.append({"campaign_key": campaign["key"], "project": project.name,
+                      "display_name": str(metadata.get("system_name") or project.name),
+                      "ligand_name": str(metadata.get("ligand_name") or ""), "files": files})
+print(json.dumps(items))
+'''.replace("PAYLOAD", repr(payload), 1)
+    encoded = base64.b64encode(script.encode()).decode()
+    try:
+        output = run([settings.ssh_bin, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                      settings.triton_host, f"printf %s {shell_quote(encoded)} | base64 -d | python3"], timeout=90)
+        parsed = json.loads(output)
+        return parsed if isinstance(parsed, list) else []
+    except (PortalError, ValueError, json.JSONDecodeError, subprocess.TimeoutExpired):
+        return []
+
+
+def refresh_md_results(settings: Settings) -> None:
+    """Copy finished analysis views to Kyle and atomically refresh the index."""
+    campaigns = [
+        {"key": str(index), "remote": str(record["remote"]), "submitter": str(record["submitter"]),
+         "campaign": str(record.get("project", ""))}
+        for index, record in enumerate(submission_records(settings))
+        if record.get("kind") == "md" and record.get("remote") and record.get("submitter")
+    ]
+    inventory = remote_md_result_inventory(settings, campaigns)
+    # Do not erase a healthy library when Triton is temporarily unavailable.
+    if campaigns and not inventory:
+        return
+    campaign_by_key = {item["key"]: item for item in campaigns}
+    root = published_md_results_root(settings)
+    root.mkdir(parents=True, exist_ok=True)
+    systems: list[dict[str, object]] = []
+    for item in inventory:
+        campaign = campaign_by_key.get(str(item.get("campaign_key", "")))
+        if campaign is None:
+            continue
+        destination = root / submitter_slug(campaign["submitter"]) / Path(campaign["remote"]).name / str(item["project"])
+        copied = []
+        for source in item.get("files", []):
+            if not isinstance(source, dict):
+                continue
+            relative = safe_result_relative(str(source.get("relative", "")))
+            size = int(source.get("size", 0))
+            if relative is None or size < 0 or size > RESULT_FILE_LIMIT:
+                continue
+            target = destination.joinpath(*relative.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.exists() or target.stat().st_size != size:
+                partial = target.with_name(target.name + ".partial")
+                try:
+                    run([settings.scp_bin, "-p", f"{settings.triton_host}:{campaign['remote']}/{relative.as_posix()}", str(partial)], timeout=900)
+                    os.replace(partial, target)
+                except (PortalError, OSError, subprocess.TimeoutExpired):
+                    partial.unlink(missing_ok=True)
+                    continue
+            copied.append({"relative": relative.as_posix(), "size": target.stat().st_size})
+        if copied:
+            systems.append({"submitter": campaign["submitter"], "campaign": campaign["campaign"],
+                            "system": item.get("display_name") or item["project"], "project": item["project"],
+                            "ligand_name": item.get("ligand_name", ""), "files": copied,
+                            "published_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                            "directory": destination.relative_to(root).as_posix(), "analysis_ready": True})
+    # Inventory calls can be interrupted while Triton is rate-limiting SSH.
+    # Merge successful copies into the last index instead of making a partial
+    # response hide already-published systems from the results library.
+    previous = read_md_results_index(settings).get("systems", [])
+    merged = {
+        str(entry.get("directory")): entry
+        for entry in previous if isinstance(entry, dict) and entry.get("directory")
+    }
+    for system in systems:
+        merged[str(system["directory"])] = system
+    target = md_results_index_path(settings)
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                                    "systems": list(merged.values())}), encoding="utf-8")
+    os.replace(temporary, target)
+
+
+def start_md_results_worker(settings: Settings) -> None:
+    """Refresh published results out of band, never during a browser request."""
+    def worker() -> None:
+        while True:
+            try:
+                refresh_md_results(settings)
+            except Exception:
+                pass
+            threading.Event().wait(300)
+    threading.Thread(target=worker, name="md-results-publisher", daemon=True).start()
 
 
 def project_root(extracted: Path) -> Path:
@@ -239,7 +440,7 @@ def build_docking_campaign(settings: Settings, root: Path, form) -> dict[str, ob
         # LSF starts the job in the submitted batch directory.  ``$0`` is
         # merely the shell when a job is fed through ``bsub < file``, so use
         # that execution CWD rather than trying to infer the script path.
-        prelude = 'BATCH_DIR="$PWD"\nROOT="$(cd "$BATCH_DIR/../.." && pwd)"\ncd "$BATCH_DIR"\nmkdir -p logs\nsource /nethome/jxs794/miniconda3/etc/profile.d/conda.sh\nconda activate vina_env\nPYBIN="$(command -v python3 || command -v python)"\n'
+        prelude = 'BATCH_DIR="$PWD"\nROOT="$(cd "$BATCH_DIR/../.." && pwd)"\ncd "$BATCH_DIR"\nmkdir -p logs\nsource /projectnb/cheminfo/share/pymacs-lab/lab-tools/pegasus/envs/vina_env/bin/activate\nPYBIN="$(command -v python3 || command -v python)"\n'
         confgen_handoff = (
             command
             + f" --num-confs {opts['confgen_poses']} --workers {opts['confgen_workers']}{state_flags}\n"
@@ -471,8 +672,8 @@ def prepare_ligand_cgenff(settings: Settings, project: Path, ligand_code: str) -
     project.joinpath(f"{code}.str").write_bytes(stream)
 
 
-def run(command: list[str], *, cwd: Path | None = None) -> str:
-    completed = subprocess.run(command, cwd=cwd, text=True, capture_output=True, timeout=120)
+def run(command: list[str], *, cwd: Path | None = None, timeout: int = 120) -> str:
+    completed = subprocess.run(command, cwd=cwd, text=True, capture_output=True, timeout=timeout)
     if completed.returncode:
         detail = (completed.stderr or completed.stdout or "command failed").strip()
         raise PortalError(detail[-2000:])
@@ -484,11 +685,199 @@ def shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\\\"'\\\"'") + "'"
 
 
+def collaborative_permissions_command(path: str, group: str) -> str:
+    """Return a fixed remote command for a portal-owned collaborative tree."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", group):
+        raise PortalError("The portal collaboration group name is invalid.")
+    quoted_path = shell_quote(path)
+    return (
+        f"setfacl -R -m g:{group}:rwX,m::rwX {quoted_path} && "
+        f"find {quoted_path} -type d -exec setfacl -m d:g:{group}:rwx,d:m::rwx {{}} +"
+    )
+
+
 def submitter_slug(name: str) -> str:
     cleaned = "-".join(name.strip().lower().split())
     if not SUBMITTER_NAME.fullmatch(name.strip()):
         raise PortalError("Enter your first name using letters, spaces, or hyphens only.")
     return re.sub(r"[^a-z-]", "", cleaned)
+
+
+def eligible_submitter(settings: Settings, submitter: str, email: str) -> dict[str, str] | None:
+    """Return the pre-authorized roster match, without exposing the roster."""
+    try:
+        roster = json.loads((settings.stage_root / "eligible_accounts.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    accounts = roster.get("accounts", []) if isinstance(roster, dict) else []
+    if not isinstance(accounts, list):
+        return None
+    wanted_name, wanted_email = submitter.strip().casefold(), email.strip().casefold()
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        name, account_email = str(account.get("name", "")).strip(), str(account.get("email", "")).strip()
+        if name.casefold() == wanted_name and account_email.casefold() == wanted_email:
+            return {"name": name, "email": account_email}
+    return None
+
+
+def require_eligible_submitter(settings: Settings, submitter: str, email: str) -> dict[str, str]:
+    match = eligible_submitter(settings, submitter, email)
+    if match is None:
+        raise PortalError(
+            "This name and Miami directory email are not authorized to claim a Digital Drug Discovery Lab Portal account."
+        )
+    return match
+
+
+def configured_profiles(settings: Settings, submitter: str) -> list[str]:
+    """Return cluster aliases that are explicitly configured for a first name.
+
+    ``ssh -G`` first checks that a named alias resolves to the reviewed
+    cluster endpoint; a short BatchMode login then proves its key works
+    without a password.  This keeps account enrolment tied to an
+    administrator-created, working SSH profile rather than browser input.
+    """
+    name = submitter.strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z-]{0,39}", name):
+        raise PortalError("Enter one first name using letters or hyphens only.")
+
+    def expanded(host: str) -> dict[str, str]:
+        try:
+            output = run([settings.ssh_bin, "-G", host])
+        except PortalError:
+            return {}
+        return dict(line.split(None, 1) for line in output.splitlines() if " " in line)
+
+    configured: list[str] = []
+    for label, host in (("Triton", settings.triton_host), ("Pegasus", settings.pegasus_host)):
+        profile = f"{name}-{label}"
+        profile_config, cluster_config = expanded(profile), expanded(host)
+        if not (profile_config.get("hostname") == cluster_config.get("hostname")
+                and profile_config.get("hostname", "").casefold() != profile.casefold()
+                and profile_config.get("identityfile")):
+            continue
+        try:
+            # A configured alias is not enough: prove its key can authenticate
+            # without a password before telling someone they are compatible.
+            run([settings.ssh_bin, "-o", "BatchMode=yes", "-o", "NumberOfPasswordPrompts=0",
+                 "-o", "ConnectTimeout=12", profile, "true"])
+        except PortalError:
+            continue
+        configured.append(label)
+    return configured
+
+
+def require_configured_submitter(settings: Settings, submitter: str) -> list[str]:
+    profiles = configured_profiles(settings, submitter)
+    if not profiles:
+        raise PortalError(
+            "Your cluster account has not been configured yet. "
+            "Please email the lab administrator so they can create your SSH profile."
+        )
+    return profiles
+
+
+def bootstrap_cluster_profiles(settings: Settings, submitter: str, email: str, password: str) -> list[str]:
+    """Run the reviewed, fixed SSH bootstrap script through a private PTY.
+
+    SSH reads interactive passwords from its controlling terminal, not stdin.
+    A PTY lets the browser provide that one-time credential to the existing
+    setup script without exposing a general shell or accepting any commands.
+    Neither the password nor the terminal transcript is persisted or returned.
+    """
+    if not re.fullmatch(r"[A-Za-z][A-Za-z-]{0,39}", submitter):
+        raise PortalError("Enter one first name using letters or hyphens only.")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+@miami\.edu", email):
+        raise PortalError("Enter a valid @miami.edu address.")
+    if not password:
+        raise PortalError("Enter your Triton/Pegasus cluster password to set up cluster SSH.")
+    script = settings.ssh_setup_script
+    if not script.is_file():
+        raise PortalError("Kyle's SSH setup script is not installed. Ask the lab administrator to deploy it.")
+
+    master_fd, slave_fd = pty.openpty()
+    process: subprocess.Popen[bytes] | None = None
+    def attach_controlling_terminal() -> None:
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+    try:
+        process = subprocess.Popen(
+            ["bash", str(script)], stdin=slave_fd, stdout=slave_fd, stderr=slave_fd,
+            close_fds=True, preexec_fn=attach_controlling_terminal, env={**os.environ, "TERM": "dumb"},
+        )
+        os.close(slave_fd)
+        slave_fd = -1
+        os.write(master_fd, f"{submitter}\n{email}\n".encode())
+        recent = b""
+        answered = 0
+        deadline = time.monotonic() + 180
+        while process.poll() is None:
+            if time.monotonic() >= deadline:
+                process.terminate()
+                raise PortalError("SSH setup timed out. Please try again from Kyle.")
+            ready, _, _ = select.select([master_fd], [], [], 0.25)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(master_fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                continue
+            recent = (recent + chunk)[-1024:]
+            prompts = len(re.findall(br"(?:password|passcode)\s*:", recent, flags=re.IGNORECASE))
+            while answered < prompts:
+                os.write(master_fd, password.encode() + b"\n")
+                answered += 1
+        if process.wait(timeout=10) != 0:
+            raise PortalError("Cluster SSH setup did not complete. Check your Triton/Pegasus cluster password and try again.")
+    except subprocess.TimeoutExpired as exc:
+        raise PortalError("SSH setup did not exit cleanly. Please try again from Kyle.") from exc
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+        if slave_fd >= 0:
+            os.close(slave_fd)
+        os.close(master_fd)
+
+    profiles = require_configured_submitter(settings, submitter)
+    if set(profiles) != {"Triton", "Pegasus"}:
+        raise PortalError("SSH setup finished, but both Triton and Pegasus profiles could not be verified.")
+    return profiles
+
+
+def submitter_cluster_host(settings: Settings, submitter: str, cluster: str) -> str:
+    """Return the reviewed per-person SSH alias for a real job submission.
+
+    The portal service may prepare shared files, but scheduler commands must
+    run through the signed-in person's alias so LSF records the right owner.
+    """
+    if cluster not in require_configured_submitter(settings, submitter):
+        raise PortalError(
+            f"{submitter} is not configured for {cluster} yet. "
+            "Ask the lab administrator to finish that passwordless SSH profile."
+        )
+    return f"{submitter.strip()}-{cluster}"
+
+
+def require_md_runtime(settings: Settings, submitter: str) -> str:
+    """Ensure an approved Triton account can run PyMACS setup before staging."""
+    host = submitter_cluster_host(settings, submitter, "Triton")
+    try:
+        run([
+            settings.ssh_bin, "-o", "BatchMode=yes", host,
+            "source /etc/bashrc "
+            "&& /projectnb/cheminfo/share/pymacs-lab/lab-tools/triton/envs/cgenff/bin/python -c 'import openmm, numpy, networkx' "
+            "&& /projectnb/cheminfo/share/pymacs-lab/lab-tools/triton/envs/mdanalysis/bin/python -c 'import MDAnalysis, mdtraj'",
+        ])
+    except PortalError as exc:
+        raise PortalError(
+            f"{submitter}'s Triton SSH is ready, but their PyMACS runtime is not ready yet. "
+            "Ask the lab administrator to provision it before submitting MD workflows."
+        ) from exc
+    return host
 
 
 def record_submission(settings: Settings, submitter: str, kind: str, name: str, result: dict[str, str]) -> None:
@@ -575,8 +964,16 @@ def md_campaign(campaign):
         progress = log_progress(project, target_ns)
         if state == "DONE":
             progress = {{"percent": 100.0}}
-        systems.append({{"name": project.name, "job_id": job_id, "state": state, "target_ns": target_ns, "progress": progress}})
-    done = sum(1 for item in systems if item["state"] == "DONE")
+        # An analysis/report job can remain pending after production MD has
+        # reached its requested duration.  The board should call that MD run
+        # finished, while retaining the LSF state for transparency.
+        simulation_complete = state == "DONE" or bool(progress and progress.get("percent", 0) >= 99.9)
+        # The recorded ID may be a report job rather than the production MD
+        # job.  Once the trajectory itself has reached the requested length,
+        # present the MD row as complete; retain the scheduler value for
+        # diagnostics instead of letting a stale report dependency say PEND.
+        systems.append({{"name": project.name, "job_id": job_id, "state": "DONE" if simulation_complete else state, "scheduler_state": state, "target_ns": target_ns, "progress": progress, "complete": simulation_complete}})
+    done = sum(1 for item in systems if item["complete"])
     return {{"systems": systems, "done": done, "total": len(systems)}}
 
 def docking_campaign(campaign):
@@ -678,11 +1075,47 @@ def docking_campaign(campaign):
     units = sum((1 if item["confgen_done"] else 0) + (1 if item["vina_done"] else 0) for item in items)
     return {{"batches": items, "done": sum(1 for item in items if item["vina_done"]), "total": len(items), "progress": round((units / (2 * len(items)) * 100) if items else 0, 1)}}
 
+def legacy_ie1_campaign(campaign):
+    """Read legacy IE1 progress from its logs without modifying the jobs."""
+    root = Path(campaign["remote"])
+    site = str(campaign.get("legacy_site", ""))
+    batches = []
+    for number in range(1, 16):
+        part = f"{{number:03d}}"
+        ligand_dirs = list(root.glob(f"chembl_phase4_approved_smiles_part_{{part}}_Ligands_PDBQT_64Poses_20260924_*"))
+        total = sum(1 for path in ligand_dirs[0].glob("*.pdbqt")) if ligand_dirs else 0
+        logs = list(root.glob(f"run_log_Receptors_IE1_{{site}}_chembl_phase4_approved_smiles_part_{{part}}_Ligands_PDBQT_64Poses_20260924_*_10Poses_*.txt"))
+        log = max(logs, key=lambda path: path.stat().st_mtime, default=None)
+        successful = failed = 0
+        if log:
+            try:
+                text = log.read_text(errors="replace")
+                successful = len(re.findall(r"^✅", text, re.M))
+                failed = len(re.findall(r"^❌", text, re.M))
+            except OSError:
+                pass
+        attempted = successful + failed
+        state = next((row["state"] for row in states.values()
+                      if f"IE1_{{site}}_" in row.get("name", "") and f"part_{{part}}_" in row.get("name", "")), "")
+        if not state:
+            state = "DONE" if total and attempted >= total else "UNKNOWN"
+        batches.append({{"name": f"part {{part}}", "vina": state, "total": total,
+                        "attempted": attempted, "successful": successful, "failed": failed,
+                        "progress": round(attempted / total * 100, 1) if total else 0}})
+    total = sum(item["total"] for item in batches)
+    attempted = sum(item["attempted"] for item in batches)
+    successful = sum(item["successful"] for item in batches)
+    failed = sum(item["failed"] for item in batches)
+    return {{"legacy": True, "batches": batches, "done": sum(1 for item in batches if item["total"] and item["attempted"] >= item["total"]),
+            "total": len(batches), "ligand_total": total, "attempted": attempted, "successful": successful,
+            "failed": failed, "progress": round(attempted / total * 100, 1) if total else 0}}
+
 output = {{}}
 for campaign in campaigns:
     key = str(campaign["key"])
     try:
-        output[key] = docking_campaign(campaign) if campaign["kind"] == "docking" else md_campaign(campaign)
+        output[key] = (legacy_ie1_campaign(campaign) if campaign.get("legacy_ie1") else
+                       docking_campaign(campaign) if campaign["kind"] == "docking" else md_campaign(campaign))
     except Exception as error:
         output[key] = {{"error": str(error)}}
 print(json.dumps(output))
@@ -690,7 +1123,7 @@ print(json.dumps(output))
     script = script.replace("PAYLOAD", repr(payload), 1).replace("{{", "{").replace("}}", "}")
     encoded = base64.b64encode(script.encode()).decode()
     try:
-        output = run([settings.ssh_bin, "-o", "BatchMode=yes", host,
+        output = run([settings.ssh_bin, "-o", "BatchMode=yes", "-o", "ConnectTimeout=12", host,
                       f"printf %s {shell_quote(encoded)} | base64 -d | python3"])
         parsed = json.loads(output)
         return parsed if isinstance(parsed, dict) else {}
@@ -701,18 +1134,60 @@ print(json.dumps(output))
 def monitored_submissions(settings: Settings) -> list[dict[str, object]]:
     """Merge the submission ledger with current read-only scheduler evidence."""
     records = submission_records(settings)
+    # Legacy IE1 screens were launched before the portal recorded submissions.
+    # Include them as virtual, read-only ledger entries so the board shows the
+    # real work without moving files or rewriting scheduler history.
+    records.extend({
+        "submitted_at": "2026-10-15T00:00:00+00:00", "submitter": "Joey", "kind": "docking",
+        "project": project, "remote": LEGACY_IE1_ROOT, "legacy_ie1": True, "legacy_site": site,
+    } for project, site in LEGACY_IE1_CAMPAIGNS)
+    published_by_source = {
+        str(item.get("source_path")): str(item.get("directory"))
+        for item in read_md_results_index(settings).get("systems", [])
+        if isinstance(item, dict) and item.get("source_path") and item.get("directory")
+    }
+    published_by_owner_project = {
+        (str(item.get("submitter")), str(item.get("project"))): str(item.get("directory"))
+        for item in read_md_results_index(settings).get("systems", [])
+        if isinstance(item, dict) and item.get("submitter") and item.get("project") and item.get("directory")
+    }
     requests: dict[str, list[dict[str, object]]] = {settings.pegasus_host: [], settings.triton_host: []}
     prepared = []
     for index, record in enumerate(records):
         result = {key: value for key, value in record.items() if key not in {"submitted_at", "submitter", "kind", "project"}}
         kind = str(record["kind"])
-        key = str(index)
+        # A completed result that predates the portal ledger is a durable
+        # historical board entry, not a scheduler job.  It must appear on the
+        # Finished Board and point at its exact published bundle without
+        # querying, recreating, or accidentally duplicating cluster work.
+        published_directory = str(result.get("completed_result_directory", "")).strip()
+        if published_directory:
+            system_name = str(result.get("completed_system", record.get("project", "Finished system"))).strip()
+            prepared.append({
+                "submitted_at": record.get("submitted_at"), "submitter": record.get("submitter"),
+                "kind": kind, "project": record.get("project"), "remote": str(result.get("remote", "")),
+                "result_directory": published_directory,
+                "monitor": {
+                    "systems": [{"name": system_name, "state": "DONE", "scheduler_state": "HISTORICAL",
+                                 "target_ns": 0, "progress": {"percent": 100.0}, "complete": True}],
+                    "done": 1, "total": 1, "historical": True,
+                },
+            })
+            continue
+        # A ledger can contain both a docking and an MD record at the same
+        # position in their respective scheduler request lists.  Keep the
+        # host/kind in the evidence key so Pegasus results never overwrite
+        # Triton MD evidence when the dictionaries are merged below.
+        key = f"{kind}-{index}"
         remote = str(result.get("remote", ""))
         request_item = {"key": key, "kind": kind, "remote": remote, "results": str(result.get("results", "")),
-                        "md_jobs": str(result.get("md jobs", result.get("md", "")))}
+                        "md_jobs": str(result.get("md jobs", result.get("md", ""))),
+                        "legacy_ie1": bool(result.get("legacy_ie1")), "legacy_site": str(result.get("legacy_site", ""))}
         requests[settings.pegasus_host if kind == "docking" else settings.triton_host].append(request_item)
         prepared.append({"key": key, "submitted_at": record.get("submitted_at"), "submitter": record.get("submitter"),
-                         "kind": kind, "project": record.get("project"), "remote": remote})
+                         "kind": kind, "project": record.get("project"), "remote": remote,
+                         "result_directory": (published_by_source.get(remote)
+                                              or published_by_owner_project.get((str(record.get("submitter", "")), Path(remote).name), ""))})
     evidence = {}
     for host, entries in requests.items():
         if entries:
@@ -722,7 +1197,96 @@ def monitored_submissions(settings: Settings) -> list[dict[str, object]]:
     return prepared
 
 
-def remember_submitter(settings: Settings, submitter: str, email: str = "") -> None:
+def _board_cache_path(settings: Settings) -> Path:
+    return settings.stage_root / "board_cache.json"
+
+
+def _read_board_cache(settings: Settings) -> dict[str, object] | None:
+    try:
+        payload = json.loads(_board_cache_path(settings).read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("campaigns"), list):
+            return payload
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _board_cache_is_stale(payload: dict[str, object] | None) -> bool:
+    if not payload:
+        return True
+    try:
+        refreshed = dt.datetime.fromisoformat(str(payload["refreshed_at"]))
+        if refreshed.tzinfo is None:
+            refreshed = refreshed.replace(tzinfo=dt.timezone.utc)
+        return (dt.datetime.now(dt.timezone.utc) - refreshed).total_seconds() >= BOARD_CACHE_TTL_SECONDS
+    except (KeyError, TypeError, ValueError):
+        return True
+
+
+def _write_board_cache(settings: Settings, payload: dict[str, object]) -> None:
+    path = _board_cache_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def _refresh_board_in_background(settings: Settings) -> None:
+    """Start one read-only remote board refresh without delaying an HTTP response."""
+    global _BOARD_REFRESH_IN_FLIGHT
+    with _BOARD_REFRESH_LOCK:
+        if _BOARD_REFRESH_IN_FLIGHT:
+            return
+        _BOARD_REFRESH_IN_FLIGHT = True
+
+    def refresh() -> None:
+        global _BOARD_REFRESH_IN_FLIGHT
+        try:
+            now = dt.datetime.now(dt.timezone.utc).isoformat()
+            _write_board_cache(settings, {
+                "campaigns": monitored_submissions(settings),
+                "generated_at": now,
+                "refreshed_at": now,
+            })
+        finally:
+            with _BOARD_REFRESH_LOCK:
+                _BOARD_REFRESH_IN_FLIGHT = False
+
+    threading.Thread(target=refresh, name="portal-board-refresh", daemon=True).start()
+
+
+def board_payload(settings: Settings) -> dict[str, object]:
+    """Return cached board data immediately and refresh remote status in the background."""
+    cached = _read_board_cache(settings)
+    refreshing = _board_cache_is_stale(cached)
+    if refreshing:
+        _refresh_board_in_background(settings)
+    if cached:
+        return {
+            "campaigns": cached["campaigns"],
+            "generated_at": cached.get("generated_at"),
+            "refreshing": refreshing,
+        }
+
+    # The first request after installation still shows ledger ownership and
+    # campaign names immediately, while its live status is collected.
+    campaigns = []
+    for record in submission_records(settings):
+        campaigns.append({
+            "submitted_at": record.get("submitted_at"),
+            "submitter": record.get("submitter"),
+            "kind": record.get("kind"),
+            "project": record.get("project"),
+            "remote": record.get("remote", ""),
+            "monitor": {"systems": [], "batches": [], "done": 0, "total": 0, "progress": 0},
+        })
+    return {"campaigns": campaigns, "generated_at": None, "refreshing": True}
+
+
+def remember_submitter(
+    settings: Settings, submitter: str, email: str = "", profiles: list[str] | None = None,
+    approved: bool | None = None, portal_password: str | None = None,
+) -> None:
     """Persist friendly names on Kyle for portal autocomplete and folder ownership."""
     path = settings.stage_root / "submitters.json"
     settings.stage_root.mkdir(parents=True, exist_ok=True)
@@ -733,14 +1297,24 @@ def remember_submitter(settings: Settings, submitter: str, email: str = "") -> N
             names = json.load(handle)
         except json.JSONDecodeError:
             names = []
-        users = [{"name": item, "email": ""} if isinstance(item, str) else item for item in names]
+        users = [{"name": item, "email": ""} if isinstance(item, str) else dict(item) for item in names]
         canonical = submitter.strip()
         match = next((item for item in users if str(item.get("name", "")).lower() == canonical.lower()), None)
         if match is None:
-            users.append({"name": canonical, "email": email.strip(), "created_at": dt.datetime.now(dt.timezone.utc).isoformat()})
+            record = {"name": canonical, "email": email.strip(), "profiles": profiles or [], "created_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+            if approved is not None:
+                record["approved"] = approved
+            users.append(record)
             users.sort(key=lambda item: str(item["name"]).casefold())
         elif email.strip():
             match["email"] = email.strip()
+            if profiles is not None:
+                match["profiles"] = profiles
+        if match is not None and approved is not None:
+            match["approved"] = approved
+        if approved is not None:
+            target = match if match is not None else next(item for item in users if str(item.get("name", "")).casefold() == canonical.casefold())
+            target["password_hash"] = password_hash(portal_password or DEFAULT_PORTAL_PASSWORD)
         if users != names:
             handle.seek(0); handle.truncate()
             json.dump(users, handle)
@@ -751,10 +1325,40 @@ def saved_submitters(settings: Settings) -> list[dict[str, str]]:
     try:
         names = json.loads((settings.stage_root / "submitters.json").read_text(encoding="utf-8"))
         users = [{"name": item, "email": ""} if isinstance(item, str) else item for item in names]
-        return [{"name": str(item.get("name", "")), "email": str(item.get("email", ""))}
+        return [{"name": str(item.get("name", "")), "email": str(item.get("email", "")), "profiles": item.get("profiles", []), "approved": bool(item.get("approved"))}
                 for item in users if SUBMITTER_NAME.fullmatch(str(item.get("name", "")).strip())]
     except (OSError, json.JSONDecodeError):
         return []
+
+
+def password_hash(password: str, salt: str | None = None) -> str:
+    salt = salt or os.urandom(16).hex()
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 310_000).hex()
+    return f"pbkdf2_sha256$310000${salt}${digest}"
+
+
+def password_matches(password: str, encoded: str) -> bool:
+    try:
+        algorithm, rounds, salt, expected = encoded.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(rounds)).hex()
+        return hmac.compare_digest(actual, expected)
+    except (TypeError, ValueError):
+        return False
+
+
+def approved_submitter(settings: Settings, name: str, password: str) -> dict[str, str] | None:
+    path = settings.stage_root / "submitters.json"
+    try:
+        users = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    for item in users:
+        if isinstance(item, dict) and str(item.get("name", "")).casefold() == name.casefold() and item.get("approved"):
+            if password_matches(password, str(item.get("password_hash", ""))):
+                return {"name": str(item["name"]), "email": str(item.get("email", ""))}
+    return None
 
 
 def reserve_project_number(settings: Settings, remote_root: str, submitter: str, project: str, label: str) -> int:
@@ -779,7 +1383,8 @@ def reserve_project_number(settings: Settings, remote_root: str, submitter: str,
 def stage_project(settings: Settings, root: Path, host: str, remote_root: str, job_name: str, submitter: str, label: str) -> str:
     number = reserve_project_number(settings, remote_root, submitter, job_name, label)
     remote = f"{remote_root}/{submitter_slug(submitter)}/{job_name}/{label}-{number:03d}"
-    run([settings.ssh_bin, "-o", "BatchMode=yes", host, "mkdir", "-p", remote])
+    run([settings.ssh_bin, "-o", "BatchMode=yes", host,
+         f"mkdir -p {shell_quote(remote)} && {collaborative_permissions_command(remote, settings.collaboration_group)}"])
     # Create a server-side archive instead of relying on scp's ambiguous
     # handling of a source directory's `/.` suffix.
     with tempfile.NamedTemporaryFile(prefix="lab-portal-stage-", suffix=".tar", delete=False) as handle:
@@ -790,7 +1395,8 @@ def stage_project(settings: Settings, root: Path, host: str, remote_root: str, j
                 bundle.add(item, arcname=item.name, recursive=True)
         run([settings.scp_bin, str(archive), f"{host}:{remote}/project.tar"])
         run([settings.ssh_bin, "-o", "BatchMode=yes", host,
-             f"cd {shell_quote(remote)} && tar -xf project.tar && rm project.tar"])
+             f"cd {shell_quote(remote)} && tar -xf project.tar && rm project.tar && "
+             f"{collaborative_permissions_command(remote, settings.collaboration_group)}"])
     finally:
         archive.unlink(missing_ok=True)
     return remote
@@ -805,15 +1411,16 @@ def submit_docking(settings: Settings, root: Path, name: str, submitter: str) ->
         batches = [str(item) for item in manifest["batches"]]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise PortalError("The docking campaign manifest is invalid.") from exc
-    remote = stage_project(settings, root, settings.pegasus_host, settings.pegasus_remote_root, name, submitter, "campaign")
+    host = submitter_cluster_host(settings, submitter, "Pegasus")
+    remote = stage_project(settings, root, host, settings.pegasus_remote_root, name, submitter, "campaign")
     results_root = f"{settings.pegasus_results_root}/{submitter_slug(submitter)}/{name}/{Path(remote).name}"
     # Submit every batch immediately. LSF performs the actual scheduling;
     # each Vina job remains dependent on its matching ConfGen completion.
-    lines = ["#!/bin/bash", "set -euo pipefail", f"ROOT={shell_quote(remote)}", f"export VINA_RESULTS_ROOT={shell_quote(results_root)}", "mkdir -p \"$VINA_RESULTS_ROOT\"", "for batch in " + " ".join(shell_quote(batch) for batch in batches) + "; do", "  out=$(cd \"$ROOT/batches/$batch\" && bsub < run_confgen.lsf)", "  conf_id=$(printf '%s' \"$out\" | sed -n 's/.*<\\([0-9][0-9]*\\)>.*/\\1/p')", "  [ -n \"$conf_id\" ] || { echo \"Could not parse ConfGen submission: $out\" >&2; exit 2; }", "  vina_out=$(cd \"$ROOT/batches/$batch\" && bsub -w \"done($conf_id)\" < run_vina.lsf)", "  vina_id=$(printf '%s' \"$vina_out\" | sed -n 's/.*<\\([0-9][0-9]*\\)>.*/\\1/p')", "  [ -n \"$vina_id\" ] || { echo \"Could not parse Vina submission: $vina_out\" >&2; exit 2; }", "  printf '{\"batch\":\"%s\",\"confgen\":\"%s\",\"vina\":\"%s\"}\\n' \"$batch\" \"$conf_id\" \"$vina_id\" >> \"$ROOT/job_ids.jsonl\"", "done"]
+    lines = ["#!/bin/bash", "set -euo pipefail", f"ROOT={shell_quote(remote)}", f"export VINA_RESULTS_ROOT={shell_quote(results_root)}", "mkdir -p \"$VINA_RESULTS_ROOT\"", collaborative_permissions_command(results_root, settings.collaboration_group), "for batch in " + " ".join(shell_quote(batch) for batch in batches) + "; do", "  out=$(cd \"$ROOT/batches/$batch\" && bsub < run_confgen.lsf)", "  conf_id=$(printf '%s' \"$out\" | sed -n 's/.*<\\([0-9][0-9]*\\)>.*/\\1/p')", "  [ -n \"$conf_id\" ] || { echo \"Could not parse ConfGen submission: $out\" >&2; exit 2; }", "  vina_out=$(cd \"$ROOT/batches/$batch\" && bsub -w \"done($conf_id)\" < run_vina.lsf)", "  vina_id=$(printf '%s' \"$vina_out\" | sed -n 's/.*<\\([0-9][0-9]*\\)>.*/\\1/p')", "  [ -n \"$vina_id\" ] || { echo \"Could not parse Vina submission: $vina_out\" >&2; exit 2; }", "  printf '{\"batch\":\"%s\",\"confgen\":\"%s\",\"vina\":\"%s\"}\\n' \"$batch\" \"$conf_id\" \"$vina_id\" >> \"$ROOT/job_ids.jsonl\"", "done"]
     dispatcher = "\n".join(lines) + "\n"
     encoded = base64.b64encode(dispatcher.encode()).decode()
     command = f"cd {shell_quote(remote)} && printf %s {shell_quote(encoded)} | base64 -d > submit_campaign.sh && chmod 700 submit_campaign.sh && nohup ./submit_campaign.sh > dispatcher.log 2>&1 & echo dispatcher-started"
-    output = run([settings.ssh_bin, "-o", "BatchMode=yes", settings.pegasus_host, command])
+    output = run([settings.ssh_bin, "-o", "BatchMode=yes", host, command])
     if "dispatcher-started" not in output:
         raise PortalError("Pegasus did not start the campaign dispatcher: " + output)
     return {"remote": remote, "results": results_root, "campaign": "dispatcher started", "batches": str(len(batches))}
@@ -829,18 +1436,22 @@ def write_docking_answers(root: Path, form) -> None:
 def submit_md(settings: Settings, root: Path, name: str, submitter: str) -> dict[str, str]:
     project = require_md_project(root)
     relative = project.relative_to(root).as_posix()
-    remote = stage_project(settings, root, settings.triton_host, settings.triton_remote_root, name, submitter, "run")
+    host = require_md_runtime(settings, submitter)
+    remote = stage_project(settings, root, host, settings.triton_remote_root, name, submitter, "run")
     workdir = remote if relative == "." else f"{remote}/{relative}"
     # Setup is intentionally a separate explicit phase: PyMACS only renders a
     # production LSF job after required setup outputs are verified.
     command = (
         f"source /etc/bashrc && module load gcc-runtime/13.4.0-none-none-gh6rpjx gromacs/2025.1-gcc-13.4.0-6vq7xfo && "
-        f"source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh && conda activate cgenff && "
-        f"cp -a {shell_quote(settings.pymacs_root + '/.')} {shell_quote(workdir)}/ && "
+        f"source /projectnb/cheminfo/share/pymacs-lab/lab-tools/triton/envs/cgenff/bin/activate && "
         f"cd {shell_quote(workdir)} && python pymacs_run.py validate && "
         f"python pymacs_run.py setup && python pymacs_run.py submit --with-analysis"
     )
-    output = run([settings.ssh_bin, "-o", "BatchMode=yes", settings.triton_host, command])
+    # The reviewed runner belongs to the portal service, while the actual
+    # setup/submission command above runs as the signed-in lab member.
+    run([settings.ssh_bin, "-o", "BatchMode=yes", settings.triton_host,
+         f"cp -a {shell_quote(settings.pymacs_root + '/.')} {shell_quote(workdir)}/"])
+    output = run([settings.ssh_bin, "-o", "BatchMode=yes", host, command])
     ids = JOB_ID.findall(output)
     if not ids:
         raise PortalError("Triton completed setup but did not return an LSF job ID: " + output)
@@ -855,10 +1466,11 @@ def submit_md_campaign(settings: Settings, root: Path, name: str, submitter: str
         raise PortalError("The MD campaign manifest is invalid.") from exc
     if not isinstance(projects, list) or not projects:
         raise PortalError("The MD campaign contains no projects.")
-    remote = stage_project(settings, root, settings.triton_host, settings.triton_remote_root, name, submitter, "campaign")
+    host = require_md_runtime(settings, submitter)
+    remote = stage_project(settings, root, host, settings.triton_remote_root, name, submitter, "campaign")
     lines = ["#!/bin/bash", "set -euo pipefail",
              "source /etc/bashrc", "module load gcc-runtime/13.4.0-none-none-gh6rpjx gromacs/2025.1-gcc-13.4.0-6vq7xfo",
-             "source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh", "conda activate cgenff",
+             "source /projectnb/cheminfo/share/pymacs-lab/lab-tools/triton/envs/cgenff/bin/activate",
              f"ROOT={shell_quote(remote)}"]
     for project in projects:
         project_id = str(project.get("id", ""))
@@ -866,11 +1478,12 @@ def submit_md_campaign(settings: Settings, root: Path, name: str, submitter: str
             raise PortalError("The MD campaign manifest contains an invalid project ID.")
         submit_flag = " --with-analysis" if project.get("analysis") else ""
         lines += [f"WORKDIR=\"$ROOT/systems/{project_id}\"",
-                  f"cp -a {shell_quote(settings.pymacs_root + '/.')} \"$WORKDIR\"/",
                   "cd \"$WORKDIR\"", "python pymacs_run.py validate", "python pymacs_run.py setup",
                   f"python pymacs_run.py submit{submit_flag}"]
     command = "\n".join(lines) + "\n"
-    output = run([settings.ssh_bin, "-o", "BatchMode=yes", settings.triton_host, command])
+    run([settings.ssh_bin, "-o", "BatchMode=yes", settings.triton_host,
+         f"cp -a {shell_quote(settings.pymacs_root + '/.')} {shell_quote(remote)}/"])
+    output = run([settings.ssh_bin, "-o", "BatchMode=yes", host, command])
     ids = JOB_ID.findall(output)
     if len(ids) < len(projects):
         raise PortalError("Triton did not return an MD job ID for every system: " + output[-1000:])
@@ -881,19 +1494,226 @@ def create_app(settings: Settings | None = None) -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = MAX_ARCHIVE_BYTES
     app.config["SECRET_KEY"] = os.environ.get("LAB_PORTAL_SECRET", os.urandom(32))
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["SESSION_COOKIE_SECURE"] = os.environ.get("LAB_PORTAL_COOKIE_SECURE", "0") == "1"
     app.config["SETTINGS"] = settings or settings_from_env()
+
+    @app.errorhandler(403)
+    def forbidden(_error):
+        return render_template("error.html", title="Access restricted",
+                               message="You do not have permission to open this portal page."), 403
+
+    @app.errorhandler(404)
+    def not_found(_error):
+        return render_template("error.html", title="Page not found",
+                               message="That portal page or published result could not be found."), 404
+
+    @app.errorhandler(413)
+    def too_large(_error):
+        return render_template("error.html", title="Upload too large",
+                               message="The selected file is larger than this portal accepts."), 413
+
+    @app.errorhandler(500)
+    def server_error(_error):
+        return render_template("error.html", title="Something went wrong",
+                               message="The portal could not complete that request. Please try again or contact the lab administrator."), 500
 
     @app.get("/")
     def index():
         return render_template("index.html")
 
+    @app.get("/results")
+    def results():
+        if not isinstance(session.get("submitter"), dict):
+            flash("Sign in with an approved account to view the results library.", "error")
+            return redirect(url_for("index"))
+        index = read_md_results_index(app.config["SETTINGS"])
+        current_user = str(session["submitter"].get("name", "")).strip()
+        systems: list[dict[str, object]] = []
+        for system in index["systems"]:
+            if isinstance(system, dict):
+                # Published-result inventories created before the preview
+                # feature do not have this optional field.  Keep those rows
+                # viewable rather than turning the entire results page into
+                # a 500 error.
+                system.setdefault("preview", {})
+                files = system.get("files", [])
+                system["images"] = [item for item in files if isinstance(item, dict) and str(item.get("relative", "")).lower().endswith(".png")]
+                systems.append(system)
+        return render_template("results.html", results=index, current_user=current_user,
+                               systems=systems)
+
+    def published_system(directory: str) -> tuple[dict[str, object], PurePosixPath] | None:
+        """Resolve one indexed system to the Kyle-local result tree."""
+        requested = safe_result_relative(directory)
+        if requested is None:
+            return None
+        system = next((item for item in read_md_results_index(app.config["SETTINGS"]).get("systems", [])
+                       if isinstance(item, dict) and str(item.get("directory", "")) == requested.as_posix()), None)
+        return (system, requested) if isinstance(system, dict) else None
+
+    @app.get("/results/system/<path:directory>")
+    def result_detail(directory: str):
+        """Open the scientific dashboard directly, with portal controls in it."""
+        if not isinstance(session.get("submitter"), dict):
+            return redirect(url_for("index"))
+        found = published_system(directory)
+        if found is None:
+            abort(404)
+        system, requested = found
+        report = published_md_results_root(app.config["SETTINGS"]).joinpath(
+            *requested.parts, "Analysis_Results", "PyMACS_Result_Dashboard.html"
+        )
+        if not report.is_file():
+            abort(404)
+        try:
+            dashboard = report.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            abort(404)
+        title = str(system.get("system") or system.get("project") or "PyMACS result")
+        qx = system.get("qx") if isinstance(system.get("qx"), dict) else {}
+        qx_text = f"Q(x) {float(qx['mean']):.3f}" if isinstance(qx, dict) and qx.get("mean") is not None else "Q(x) not reported"
+        qx_info = "Q(x) is the mean fraction of native heavy-atom contacts retained across the analyzed trajectory."
+        controls = (
+            '<div class="portal-result-bar"><a href="' + url_for("results") + '">← Results library</a>'
+            '<span>' + title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + '</span>'
+            '<span class="portal-qx" title="' + qx_info + '">' + qx_text + ' <i>i</i></span>'
+            '<a class="portal-download" href="' + url_for("download_result_data", directory=requested.as_posix()) + '">Download published data (.zip)</a></div>'
+        )
+        style = """<style>
+          .portal-result-bar{max-width:1210px;margin:18px auto 0;padding:12px 18px;border:1px solid #1b6681;border-radius:12px;background:linear-gradient(110deg,#071d2d,#07111f);color:#d7f7ff;display:flex;align-items:center;justify-content:space-between;gap:16px;font:700 14px system-ui,sans-serif;box-sizing:border-box;box-shadow:0 0 22px #00d9ff26}.portal-result-bar a{color:#6eefff;text-decoration:none}.portal-result-bar .portal-download{background:linear-gradient(135deg,#00afcf,#267ee2);color:#00111d;padding:9px 12px;border-radius:8px;box-shadow:0 0 16px #00d9ff42}.portal-qx{color:#8cefff;white-space:nowrap}.portal-qx i{display:inline-grid;place-items:center;width:15px;height:15px;border:1px solid currentColor;border-radius:50%;font-size:11px;font-style:normal;cursor:help}@media(max-width:700px){.portal-result-bar{margin:10px;align-items:flex-start;flex-direction:column}}
+        </style>"""
+        dashboard = dashboard.replace("</head>", style + "</head>", 1)
+        dashboard = re.sub(r"(<body[^>]*>)", r"\1" + controls, dashboard, count=1, flags=re.IGNORECASE)
+        dashboard = dashboard.replace("</body>", controls + "</body>", 1)
+        return Response(dashboard, mimetype="text/html")
+
+    @app.get("/results/download/<path:directory>")
+    def download_result_data(directory: str):
+        """Download the locally published result package, not raw HPC data."""
+        if not isinstance(session.get("submitter"), dict):
+            return redirect(url_for("index"))
+        found = published_system(directory)
+        if found is None:
+            abort(404)
+        system, requested = found
+        root = published_md_results_root(app.config["SETTINGS"]).resolve()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for entry in system.get("files", []):
+                if not isinstance(entry, dict):
+                    continue
+                relative = safe_result_relative(str(entry.get("relative", "")))
+                if relative is None:
+                    continue
+                source = root.joinpath(*requested.parts, *relative.parts).resolve()
+                if root not in source.parents or not source.is_file():
+                    continue
+                archive.write(source, arcname=relative.as_posix())
+        buffer.seek(0)
+        name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(system.get("project") or "pymacs-result"))
+        return send_file(buffer, mimetype="application/zip", as_attachment=True, download_name=f"{name}_published_data.zip")
+
+    @app.get("/results/files/<path:relative>")
+    def result_file(relative: str):
+        """Serve a published result only from the trusted local results tree."""
+        safe_relative = safe_result_relative(relative)
+        if safe_relative is None:
+            abort(404)
+        root = published_md_results_root(app.config["SETTINGS"]).resolve()
+        candidate = root.joinpath(*safe_relative.parts).resolve()
+        if root not in candidate.parents or not candidate.is_file():
+            abort(404)
+        inline = request.args.get("inline") == "1" and candidate.suffix.lower() in {".html", ".pdf", ".png"}
+        return send_from_directory(root, safe_relative.as_posix(), as_attachment=not inline,
+                                   download_name=candidate.name)
+
     @app.get("/api/submitters")
     def submitters():
-        return jsonify(names=saved_submitters(app.config["SETTINGS"]))
+        return jsonify(names=[item for item in saved_submitters(app.config["SETTINGS"]) if item["approved"]])
+
+    @app.post("/api/session")
+    def sign_in():
+        payload = request.get_json(silent=True) or request.form
+        user = approved_submitter(app.config["SETTINGS"], str(payload.get("name", "")).strip(), str(payload.get("password", "")))
+        if user is None:
+            return jsonify(error="That account is not approved or the password is incorrect."), 403
+        session.clear()
+        session["submitter"] = user
+        return jsonify(user=user)
+
+    @app.delete("/api/session")
+    def sign_out():
+        session.clear()
+        return "", 204
+
+    @app.post("/api/submitters/validate")
+    def validate_submitter():
+        """Check the administrator-created SSH profiles without creating a user."""
+        settings = app.config["SETTINGS"]
+        payload = request.get_json(silent=True) or request.form
+        submitter, email = str(payload.get("name", "")).strip(), str(payload.get("email", "")).strip()
+        if not email or not EMAIL.fullmatch(email):
+            return jsonify(error="Enter a valid email address to check compatibility."), 400
+        try:
+            eligible = require_eligible_submitter(settings, submitter, email)
+        except PortalError as exc:
+            return jsonify(error=str(exc), administrator_email=settings.admin_email, eligible=False), 403
+        try:
+            profiles = configured_profiles(settings, eligible["name"])
+        except PortalError as exc:
+            return jsonify(error=str(exc), administrator_email=settings.admin_email), 400
+        if set(profiles) != {"Triton", "Pegasus"}:
+            return jsonify(name=eligible["name"], email=eligible["email"], profiles=profiles,
+                           setup_required=True, eligible=True), 409
+        return jsonify(name=eligible["name"], email=eligible["email"], profiles=profiles, eligible=True)
+
+    @app.post("/api/submitters/bootstrap-ssh")
+    def bootstrap_submitter_ssh():
+        """Perform the one-time, browser-guided SSH key installation on Kyle."""
+        settings = app.config["SETTINGS"]
+        payload = request.get_json(silent=True) or request.form
+        submitter = str(payload.get("name", "")).strip()
+        email = str(payload.get("email", "")).strip()
+        password = str(payload.get("cluster_password", ""))
+        try:
+            eligible = require_eligible_submitter(settings, submitter, email)
+        except PortalError as exc:
+            return jsonify(error=str(exc), administrator_email=settings.admin_email, eligible=False), 403
+        try:
+            profiles = bootstrap_cluster_profiles(settings, eligible["name"], eligible["email"], password)
+        except PortalError as exc:
+            return jsonify(error=str(exc)), 400
+        # SSH setup is not account approval: an administrator still assigns
+        # the portal password before this name appears in the sign-in list.
+        remember_submitter(settings, eligible["name"], eligible["email"], profiles=profiles)
+        return jsonify(name=eligible["name"], email=eligible["email"], profiles=profiles, approved=False)
+
+    @app.post("/api/submitters")
+    def create_submitter():
+        # Browser sign-up is deliberately not allowed to create an account.
+        # SSH profiles and a password must be provisioned by an administrator,
+        # otherwise somebody could create a friendly name and bypass approval.
+        settings = app.config["SETTINGS"]
+        payload = request.get_json(silent=True) or request.form
+        submitter, email = str(payload.get("name", "")).strip(), str(payload.get("email", "")).strip()
+        if not email or not EMAIL.fullmatch(email):
+            return jsonify(error="Enter a valid email address to create your portal profile."), 400
+        try:
+            eligible = require_eligible_submitter(settings, submitter, email)
+            profiles = require_configured_submitter(settings, eligible["name"])
+        except PortalError as exc:
+            return jsonify(error=str(exc), administrator_email=settings.admin_email, eligible=False), 403
+        return jsonify(
+            error="Your SSH access is compatible, but an administrator must approve the account and set its password.",
+            administrator_email=settings.admin_email,
+            profiles=profiles,
+        ), 403
 
     @app.get("/api/jobs")
     def jobs():
-        return jsonify(campaigns=monitored_submissions(app.config["SETTINGS"]), generated_at=dt.datetime.now(dt.timezone.utc).isoformat())
+        return jsonify(board_payload(app.config["SETTINGS"]))
 
     @app.post("/api/inspect-docking")
     def inspect_docking():
@@ -968,11 +1788,17 @@ def create_app(settings: Settings | None = None) -> Flask:
             return "Unknown job type", 404
         name, submitter, email = request.form.get("job_name", "").strip(), request.form.get("submitter", "").strip(), request.form.get("submitter_email", "").strip()
         upload = request.files.get("project")
+        account = session.get("submitter")
+        if not isinstance(account, dict):
+            flash("Sign in with an approved account before submitting a job.", "error")
+            return redirect(url_for("index"))
+        submitter, email = str(account.get("name", "")), str(account.get("email", ""))
         if not JOB_NAME.fullmatch(name):
             flash("Job name: letters, numbers, dots, dashes, and underscores only (max 80).", "error")
             return redirect(url_for("index"))
         try:
             submitter_slug(submitter)
+            require_configured_submitter(app.config["SETTINGS"], submitter)
         except PortalError as exc:
             flash(str(exc), "error"); return redirect(url_for("index"))
         if email and not EMAIL.fullmatch(email):
@@ -1008,11 +1834,17 @@ def create_app(settings: Settings | None = None) -> Flask:
     @app.post("/submit/md-wizard")
     def submit_md_wizard():
         name, submitter, email, upload = request.form.get("job_name", "").strip(), request.form.get("submitter", "").strip(), request.form.get("submitter_email", "").strip(), request.files.get("structure")
+        account = session.get("submitter")
+        if not isinstance(account, dict):
+            flash("Sign in with an approved account before submitting a job.", "error")
+            return redirect(url_for("index"))
+        submitter, email = str(account.get("name", "")), str(account.get("email", ""))
         if not JOB_NAME.fullmatch(name):
             flash("Job name: letters, numbers, dots, dashes, and underscores only (max 80).", "error")
             return redirect(url_for("index"))
         try:
             submitter_slug(submitter)
+            require_configured_submitter(app.config["SETTINGS"], submitter)
         except PortalError as exc:
             flash(str(exc), "error"); return redirect(url_for("index"))
         if email and not EMAIL.fullmatch(email):
@@ -1059,11 +1891,17 @@ def create_app(settings: Settings | None = None) -> Flask:
         name = request.form.get("job_name", "").strip()
         submitter, email = request.form.get("submitter", "").strip(), request.form.get("submitter_email", "").strip()
         upload, rcsb_id = request.files.get("structures"), request.form.get("rcsb_id", "").strip()
+        account = session.get("submitter")
+        if not isinstance(account, dict):
+            flash("Sign in with an approved account before submitting a job.", "error")
+            return redirect(url_for("index"))
+        submitter, email = str(account.get("name", "")), str(account.get("email", ""))
         if not JOB_NAME.fullmatch(name):
             flash("Job name: letters, numbers, dots, dashes, and underscores only (max 80).", "error")
             return redirect(url_for("index"))
         try:
             submitter_slug(submitter)
+            require_configured_submitter(app.config["SETTINGS"], submitter)
         except PortalError as exc:
             flash(str(exc), "error"); return redirect(url_for("index"))
         if email and not EMAIL.fullmatch(email):
@@ -1114,11 +1952,17 @@ def create_app(settings: Settings | None = None) -> Flask:
 
 if __name__ == "__main__":
     app = create_app()
+    # The portal normally remains loopback-only for a Tailscale Funnel setup.
+    # A lab administrator may set PORTAL_BIND_HOST=0.0.0.0 in the service
+    # environment to additionally offer the same Waitress service to the
+    # trusted UM/VPN network on PORT (currently 8788).
+    bind_host = os.environ.get("PORTAL_BIND_HOST", "127.0.0.1")
+    bind_port = int(os.environ.get("PORT", "8788"))
     try:
         from waitress import serve
     except ImportError:
         # Kyle's minimal OS image may not have pip yet. This fallback keeps the
         # VPN-only pilot usable; production service deployment uses Waitress.
-        app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "8788")))
+        app.run(host=bind_host, port=bind_port)
     else:
-        serve(app, host="127.0.0.1", port=int(os.environ.get("PORT", "8788")))
+        serve(app, host=bind_host, port=bind_port)

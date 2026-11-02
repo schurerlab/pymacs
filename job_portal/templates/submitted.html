@@ -1,1 +1,9 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Submitted</title><link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}"></head><body><main class="confirmation"><p class="eyebrow">JOB SUBMITTED</p><h1>{{ kind|title }} is on its way.</h1><p>The scheduler accepted these jobs:</p><dl>{% for key, value in result.items() %}<dt>{{ key }}</dt><dd><code>{{ value }}</code></dd>{% endfor %}</dl><a class="button" href="{{ url_for('index') }}">Submit another job</a></main></body></html>
+{% extends "base.html" %}
+{% block title %}Submission accepted · Schürer Digital Drug Discovery Lab Job Portal{% endblock %}
+{% block content %}
+<main class="confirmation">
+  <p class="eyebrow">JOB SUBMITTED</p><h1>{{ kind|title }} is on its way.</h1><p>The scheduler accepted these jobs:</p>
+  <dl>{% for key, value in result.items() %}<dt>{{ key }}</dt><dd><code>{{ value }}</code></dd>{% endfor %}</dl>
+  <div class="confirmation-actions"><a class="button" href="{{ url_for('index') }}">Submit another job</a><a class="button secondary-button" href="{{ url_for('results') }}">Browse results</a></div>
+</main>
+{% endblock %}

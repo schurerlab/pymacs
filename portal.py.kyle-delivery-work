@@ -40,7 +40,7 @@ EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 JOB_ID = re.compile(r"Job <(\d+)>")
 STRUCTURE_SUFFIXES = {".pdb", ".cif", ".mmcif"}
 RCSB_ID = re.compile(r"^[A-Za-z0-9]{4}$")
-RESULT_FILE_SUFFIXES = {".csv", ".html", ".pdf", ".png"}
+RESULT_FILE_SUFFIXES = {".csv", ".html", ".json", ".pdf", ".png", ".svg"}
 RESULT_TRAJECTORY_NAMES = {
     "Final_Trajectory.pdb", "Final_Trajectory.xtc",
     "binding_pocket_only.pdb", "binding_pocket_only.xtc",
@@ -795,7 +795,10 @@ for campaign in campaigns:
                 files.append({"relative": rel, "size": candidate.stat().st_size})
             except (OSError, ValueError):
                 pass
-        ready = any(entry["relative"].endswith(("MD_ANALYSIS_FIGUREBOOK.pdf", "PROTAC_MD_ANALYSIS_FIGUREBOOK.pdf")) for entry in files)
+        ready = any(entry["relative"].endswith((
+            "MD_ANALYSIS_FIGUREBOOK.pdf", "PROTAC_MD_ANALYSIS_FIGUREBOOK.pdf",
+            "PyMACS_Result_Dashboard.html", "portal_results_manifest.json",
+        )) for entry in files)
         if ready:
             items.append({"campaign_key": campaign["key"], "project": project.name,
                           "display_name": str(metadata.get("system_name") or project.name),
@@ -859,7 +862,7 @@ for collection_index, collection in enumerate(collections):
         if output.is_dir():
             for candidate in output.rglob("*"):
                 try:
-                    if candidate.is_file() and (candidate.suffix.lower() in {".csv", ".html", ".pdf", ".png", ".svg"} or candidate.name in trajectory_names) and candidate.stat().st_size <= limit:
+                if candidate.is_file() and (candidate.suffix.lower() in {".csv", ".html", ".json", ".pdf", ".png", ".svg"} or candidate.name in trajectory_names) and candidate.stat().st_size <= limit:
                         files.append({"relative": candidate.relative_to(project).as_posix(), "size": candidate.stat().st_size})
                 except OSError:
                     pass
@@ -868,7 +871,10 @@ for collection_index, collection in enumerate(collections):
             metadata = json.loads((project / "pymacs_run.json").read_text()).get("metadata", {})
         except Exception:
             pass
-        ready = any(file["relative"].endswith(("MD_ANALYSIS_FIGUREBOOK.pdf", "PROTAC_MD_ANALYSIS_FIGUREBOOK.pdf")) for file in files)
+        ready = any(file["relative"].endswith((
+            "MD_ANALYSIS_FIGUREBOOK.pdf", "PROTAC_MD_ANALYSIS_FIGUREBOOK.pdf",
+            "PyMACS_Result_Dashboard.html", "portal_results_manifest.json",
+        )) for file in files)
         items.append({
             "collection_key": str(collection_index), "project": project.name, "project_remote": str(project),
             "display_name": str(metadata.get("system_name") or f"{collection.get('protein_name', '')} · {project.name}"),
@@ -1523,14 +1529,14 @@ def refresh_job_monitor_cache(settings: Settings) -> None:
 
 
 def start_job_monitor_cache_worker(settings: Settings) -> None:
-    """Keep the campaign board responsive with a 30-second status snapshot."""
+    """Refresh Kyle's campaign snapshot every five minutes, off the request path."""
     def worker() -> None:
         while True:
             try:
                 refresh_job_monitor_cache(settings)
             except Exception:
                 pass
-            threading.Event().wait(30)
+            threading.Event().wait(300)
     threading.Thread(target=worker, name="job-monitor-cache-refresh", daemon=True).start()
 
 
@@ -2152,11 +2158,15 @@ def create_app(settings: Settings | None = None) -> Flask:
 
 if __name__ == "__main__":
     app = create_app()
+    # Keep Funnel working through localhost while also allowing the same
+    # Waitress service to be reached from the trusted UM/VPN network.
+    bind_host = os.environ.get("PORTAL_BIND_HOST", "127.0.0.1")
+    bind_port = int(os.environ.get("PORT", "8788"))
     try:
         from waitress import serve
     except ImportError:
         # Kyle's minimal OS image may not have pip yet. This fallback keeps the
         # VPN-only pilot usable; production service deployment uses Waitress.
-        app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "8788")))
+        app.run(host=bind_host, port=bind_port)
     else:
-        serve(app, host="127.0.0.1", port=int(os.environ.get("PORT", "8788")))
+        serve(app, host=bind_host, port=bind_port)

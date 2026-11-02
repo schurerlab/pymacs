@@ -46,8 +46,7 @@ mkdir -p "$STAGE"
 cp -a "$SOURCE/Analysis_Results" "$STAGE/"
 find "$SOURCE" -maxdepth 1 -type f \\
   \\( -name '*.cgenff.mol2' -o -name '*.mol2' -o -name '*.pdb' -o -name '*.gro' -o -name 'atomIndex*.txt' -o -name '.chainmap.json' \\) \\
-  -exec cp -a {{}} "$STAGE/" \\
-  \\;
+  -exec cp -a {{}} "$STAGE/" +
 
 source /etc/bashrc
 module purge

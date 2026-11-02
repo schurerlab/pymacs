@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "description": "Only these pre-authorized lab members may claim a Schürer Digital Drug Discovery Lab Job Portal account.",
+  "accounts": [
+    {"name": "Joey", "email": "jxs794@miami.edu"},
+    {"name": "Maddison", "email": "mrm431@miami.edu"},
+    {"name": "Mainak", "email": "mxb2638@miami.edu"},
+    {"name": "Jiaming", "email": "jxh1011@miami.edu"},
+    {"name": "Joseph", "email": "jxs794@miami.edu"},
+    {"name": "Rabia", "email": "rxk614@miami.edu"},
+    {"name": "Oliver", "email": "oxm338@miami.edu"},
+    {"name": "Lukas", "email": "lxr1046@miami.edu"},
+    {"name": "Saurabh", "email": "mxs1754@miami.edu"},
+    {"name": "Kathleen", "email": "kmj135@miami.edu"},
+    {"name": "Gabriel", "email": "gxl674@miami.edu"},
+    {"name": "Caty", "email": "c.chung@miami.edu"},
+    {"name": "Catherine", "email": "jxg1847@miami.edu"},
+    {"name": "Angela", "email": "aeb289@miami.edu"},
+    {"name": "Ritik", "email": "rxb1593@miami.edu"},
+    {"name": "Nicolette", "email": "ncr54@miami.edu"},
+    {"name": "Dusica", "email": "DVidovic@miami.edu"},
+    {"name": "Vas", "email": "v.stathias@miami.edu"},
+    {"name": "Sarah", "email": "sis77@miami.edu"},
+    {"name": "Stephan", "email": "sschurer@miami.edu"}
+  ]
+}

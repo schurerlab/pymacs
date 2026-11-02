@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}Schürer Digital Drug Discovery Lab Job Portal{% endblock %}</title>
+  <link rel="icon" href="{{ url_for('static', filename='images/favicon.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css', v='20261023-results-list-1') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-brand" href="{{ url_for('index') }}" aria-label="Schürer Digital Drug Discovery Lab Job Portal home">
+      <span>Schürer Digital Drug Discovery Lab</span><small>Job Portal</small>
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="{{ url_for('index') }}">Home</a>
+      <a href="{{ url_for('index', workflow='docking') }}">Docking</a>
+      <a href="{{ url_for('index', workflow='md') }}">Molecular dynamics</a>
+      <a href="{{ url_for('index', workflow='monitor') }}">Job monitor</a>
+      <a href="{{ url_for('results') }}">Results</a>
+    </nav>
+  </header>
+  {% block content %}{% endblock %}
+  <footer class="site-footer">
+    <span>Schürer Digital Drug Discovery Lab · Internal tools</span>
+    <span>Questions or access changes: <a href="mailto:jmschulz@med.miami.edu">contact the lab administrator</a></span>
+  </footer>
+</body>
+</html>

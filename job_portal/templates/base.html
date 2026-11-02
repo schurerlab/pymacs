@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}Schürer Digital Drug Discovery Lab Job Portal{% endblock %}</title>
+  <script>document.documentElement.dataset.theme=localStorage.getItem('pymacs-portal-theme')||'light';</script>
+  <link rel="icon" href="{{ url_for('static', filename='images/favicon.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='portal.css', v='20261023-tron-1') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="site-header">
+    <a class="site-brand" href="{{ url_for('index') }}" aria-label="Schürer Digital Drug Discovery Lab Job Portal home">
+      <span>Schürer Digital Drug Discovery Lab</span><small>Job Portal</small>
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="{{ url_for('index') }}">Home</a>
+      <a href="{{ url_for('index', workflow='docking') }}">Docking</a>
+      <a href="{{ url_for('index', workflow='md') }}">Molecular dynamics</a>
+      <a href="{{ url_for('index', workflow='monitor') }}">Job monitor</a>
+      <a href="{{ url_for('results') }}">Results</a>
+      <button type="button" class="theme-toggle" data-theme-toggle aria-label="Switch to electric dark mode" aria-pressed="false"><span aria-hidden="true">◐</span><span data-theme-label>Electric</span></button>
+    </nav>
+  </header>
+  {% block content %}{% endblock %}
+  <footer class="site-footer">
+    <span>Schürer Digital Drug Discovery Lab · Internal tools</span>
+    <span>Questions or access changes: <a href="mailto:jmschulz@med.miami.edu">contact the lab administrator</a></span>
+  </footer>
+  <script>
+    (() => { const key='pymacs-portal-theme', root=document.documentElement, button=document.querySelector('[data-theme-toggle]'); if(!button)return; const update=()=>{const tron=root.dataset.theme==='tron';button.setAttribute('aria-pressed',String(tron));button.setAttribute('aria-label',tron?'Switch to light mode':'Switch to electric dark mode');button.querySelector('[data-theme-label]').textContent=tron?'Light':'Electric'}; button.addEventListener('click',()=>{root.dataset.theme=root.dataset.theme==='tron'?'light':'tron';localStorage.setItem(key,root.dataset.theme);update()}); update() })();
+  </script>
+</body>
+</html>

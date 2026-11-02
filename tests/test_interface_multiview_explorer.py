@@ -1,0 +1,57 @@
+import json
+import unittest
+
+from pymacs_interface_explorer import build_cytoscape_interface_explorer, build_interface_explorer
+
+
+class InterfaceMultiviewExplorerTests(unittest.TestCase):
+    def test_mock_peptide_lengths_keep_all_residues_and_views(self):
+        for length in (5, 10, 15, 20, 25):
+            peptide = [{"label": f"Pep:ALA{i}", "stable_id": f"B|{i}", "one": "A", "number": i,
+                        "position": [i, 0, 0]} for i in range(1, length + 1)]
+            receptor = [{"label": f"Rec:LYS{i}", "stable_id": f"A|{i}", "one": "K", "number": i,
+                         "position": [i, 1, 0]} for i in range(1, length + 1)]
+            data = {
+                "pairs": [{"id": "p", "left": "Rec", "right": "Pep"}],
+                "chains": {"Rec": {"type": "protein", "residues": receptor},
+                           "Pep": {"type": "peptide", "residues": peptide}},
+                "edges": [{"a": peptide[0]["label"], "b": receptor[0]["label"],
+                           "fraction": 0.5, "type": "Hydrogen bond"}],
+                "default_threshold": 0.25, "presence": {"times_ns": [0, 1], "rows": {}},
+            }
+            page = build_interface_explorer(json.dumps(data))
+            for view in ("Network", "3D Structure", "3D Nodes", "Contact Map", "Peptide Sequence"):
+                self.assertIn(view, page)
+            self.assertIn("Time window", page)
+            self.assertIn("stable_id", page)
+            self.assertIn(f"Pep:ALA{length}", page)
+
+    def test_cytoscape_is_vendored_and_layouts_are_embedded(self):
+        page = build_cytoscape_interface_explorer(json.dumps({"pairs": [], "chains": {}, "edges": {}, "presence": {}}))
+        self.assertIn("Cytoscape.js 3.34.4", page)
+        self.assertIn(".cytoscape=t()", page)
+        for layout in ("Force-directed", "Bipartite", "Concentric", "Circular", "Chain-separated"):
+            self.assertIn(layout, page)
+
+    def test_selection_bridge_orientation_and_geometric_window_contract(self):
+        peptide = [{"label": "Pep:TYR7", "stable_id": "B|7", "name": "TYR", "one": "Y", "number": 7,
+                    "position": [0, 0, 0]}]
+        receptor = [{"label": "Rec:LYS7", "stable_id": "A|7", "name": "LYS", "one": "K", "number": 7,
+                     "position": [1, 0, 0]}]
+        page = build_cytoscape_interface_explorer(json.dumps({
+            "pairs": [{"id": "reversed", "left": "Pep", "right": "Rec"}],
+            "chains": {"Pep": {"type": "peptide", "residues": peptide},
+                       "Rec": {"type": "protein", "residues": receptor}},
+            "edges": [{"a": "Pep:TYR7", "b": "Rec:LYS7", "fraction": .5, "type": "Hydrogen bond"}],
+            "default_threshold": .25, "presence": {"times_ns": [0, 1], "rows": {}},
+        }))
+        self.assertIn("window.PyMACSSelection", page)
+        self.assertIn("pymacs-select", page)
+        self.assertIn("left.type==='peptide'?left:right", page)
+        self.assertIn("e.window_geometric=true", page)
+        self.assertIn("!e.window_geometric&&e.type===state.kind", page)
+        self.assertNotIn("/static/3Dmol-min.js", page)
+
+
+if __name__ == "__main__":
+    unittest.main()

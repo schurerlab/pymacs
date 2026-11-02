@@ -774,11 +774,19 @@ def interface_rin_context(analysis: Path) -> dict:
             f"let pair={json.dumps(pair_id)},threshold=.90,selected=null;",
             1,
         )
+        # The multiview explorer owns its state in a select control rather
+        # than a global ``pair`` variable.  Set it after its inline scripts
+        # have initialized so each dashboard panel opens its own chain pair.
+        focused = focused.replace(
+            "</html>",
+            f"<script>addEventListener('DOMContentLoaded',()=>{{const p=document.querySelector('#pair');if(p){{p.value={json.dumps(pair_id)};p.dispatchEvent(new Event('change'));}}}});</script></html>",
+            1,
+        )
         if compact:
             focused = focused.replace(".controls{display:flex", "#pairs{display:none}.controls{display:flex", 1)
         return (
             f'<iframe title="{escape(title)}" srcdoc="{escape(focused, quote=True)}" '
-            'sandbox="allow-scripts" style="display:block;width:100%;height:1200px;border:1px solid #285a79;'
+            'sandbox="allow-scripts allow-same-origin allow-downloads" style="display:block;width:100%;height:1420px;border:1px solid #285a79;'
             'border-radius:16px;background:#05070d" loading="lazy"></iframe>'
         )
 
@@ -1861,6 +1869,9 @@ def build_document(system_name: str, context: PartnerContext, cards: list[str], 
  document.querySelectorAll('.js-ligand-3d').forEach(el=>{{try{{const raw=atob(el.dataset.structureB64),viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}});viewer.addModel(raw,el.dataset.format);viewer.setStyle({{}},{{stick:{{radius:.105,color:'#ffe66d'}},sphere:{{scale:.16,color:'#ffe66d'}}}});viewer.setStyle({{elem:'N'}},{{stick:{{radius:.105,color:'#35d0ff'}},sphere:{{scale:.16,color:'#35d0ff'}}}});viewer.setStyle({{elem:'O'}},{{stick:{{radius:.105,color:'#ff3b5c'}},sphere:{{scale:.16,color:'#ff3b5c'}}}});viewer.setStyle({{elem:'Cl'}},{{stick:{{radius:.105,color:'#18ff8b'}},sphere:{{scale:.20,color:'#18ff8b'}}}});viewer.zoomTo();viewer.render();addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D ligand preview unavailable.'}}}});
  document.querySelectorAll('.js-complex-3d').forEach(el=>{{try{{const viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}}),raw=atob(el.dataset.structureB64),ligand=el.dataset.ligand,pdbLigand=el.dataset.pdbLigand||ligand,finalLigand=el.dataset.finalLigandB64?atob(el.dataset.finalLigandB64):'',chains=el.dataset.partnerChains.split(',').filter(Boolean),pdbModel=viewer.addModel(raw,'pdb'),ligandModel=finalLigand?viewer.addModel(finalLigand,'mol2'):null;const ligandStyle={{stick:{{radius:.20,colorscheme:'Jmol',singleBonds:false,aromaticStyle:'solid'}},sphere:{{scale:.25,colorscheme:'Jmol'}}}},clear=()=>{{pdbModel.setStyle({{}},{{}});if(ligandModel)ligandModel.setStyle({{}},{{}})}},paintLigand=()=>{{if(ligandModel)ligandModel.setStyle({{}},ligandStyle)}};const render=(mode,chain='')=>{{clear();pdbModel.setStyle({{hetflag:false}},{{cartoon:{{color:'spectrum'}}}});if(mode==='complex'){{pdbModel.setStyle({{hetflag:true}},{{stick:{{radius:.16,colorscheme:'Jmol'}}}});if(ligandModel)pdbModel.setStyle({{resn:pdbLigand}},{{}});paintLigand();viewer.zoomTo()}}if(mode==='chain'&&chain){{pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.18}}}});pdbModel.setStyle({{chain}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}});viewer.zoomTo({{chain}})}}if(mode==='partner'&&chains.length){{pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.18}}}});pdbModel.setStyle({{chain:chains[0]}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.10}}}});viewer.zoomTo({{chain:chains[0]}})}}if(mode==='interface'&&chains.length>1){{const sel={{chain:chains[0]}};pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.22}}}});pdbModel.setStyle({{chain:chains[0]}},{{cartoon:{{color:'#35d0ff'}}}});pdbModel.setStyle({{within:{{distance:5,sel}}}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.10}}}});viewer.zoomTo({{within:{{distance:7,sel}}}})}}if(mode==='pocket'&&pdbLigand){{pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.28}}}});pdbModel.setStyle({{within:{{distance:5,sel:{{resn:pdbLigand}}}}}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}});pdbModel.setStyle({{resn:pdbLigand}},{{}});paintLigand();viewer.zoomTo({{resn:pdbLigand}})}}if(mode==='protein')viewer.zoomTo();viewer.render();el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.classList.toggle('is-active',button.dataset.structureView===mode&&(mode!=='chain'||button.dataset.chainId===chain)))}};el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.addEventListener('click',()=>render(button.dataset.structureView,button.dataset.chainId||'')));render('complex');addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D final-structure preview unavailable.'}}}});
 }})();
+</script><script>
+/* Forward chain-aware explorer selections between independently sandboxed panels. */
+addEventListener('message',event=>{{const data=event.data||{{}};if(data.type!=='pymacs-rin-selection'||!data.residue)return;document.querySelectorAll('iframe[title*="interface explorer"]').forEach(frame=>{{if(frame.contentWindow!==event.source)frame.contentWindow?.postMessage(data,'*')}})}});
 </script></body></html>'''
 
 

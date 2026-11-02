@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ system.system }} · Results · Schürer Digital Drug Discovery Lab Job Portal{% endblock %}
+{% block head %}<style>.result-board{max-width:1280px}.result-board-head{display:flex;align-items:end;justify-content:space-between;gap:20px;margin-bottom:22px}.result-board-head h1{font-size:clamp(2rem,5vw,3.6rem)}.result-board-frame{width:100%;height:min(78vh,980px);min-height:620px;border:1px solid var(--line);border-radius:16px;background:#fff}.result-board-actions{display:flex;gap:10px;flex-wrap:wrap}.result-board-actions .button{display:inline-flex;align-items:center;text-decoration:none}.result-assets{margin-top:28px;padding-top:22px;border-top:1px solid var(--line)}.result-assets ul{padding-left:20px}.result-assets a{color:var(--green);font-weight:750}@media(max-width:700px){.result-board-head{align-items:start;flex-direction:column}.result-board-frame{min-height:480px}}</style>{% endblock %}
+{% block content %}
+<main class="result-board">
+  <section class="result-board-head"><div><p class="eyebrow">RESULT BOARD · {{ system.campaign }}</p><h1>{{ system.system }}</h1><p class="lead">{{ system.project }}{% if system.ligand_name %} · {{ system.ligand_name }}{% endif %}</p></div><div class="result-board-actions"><a class="button secondary-button" href="{{ url_for('results') }}">← Results library</a><a class="button" href="{{ report_url }}" target="_blank" rel="noopener">Open report in new tab ↗</a></div></section>
+  {% if report_url %}<iframe class="result-board-frame" title="Interactive analysis report for {{ system.system }}" src="{{ report_url }}"></iframe>{% else %}<section class="empty"><h2>No interactive report is published yet</h2><p>The result assets below remain available to download.</p></section>{% endif %}
+  <section class="result-assets"><h2>Published result assets</h2><ul>{% for file in system.files %}<li><a href="{{ url_for('result_file', relative=system.directory ~ '/' ~ file.relative) }}">{{ file.relative }}</a></li>{% endfor %}</ul></section>
+</main>
+{% endblock %}

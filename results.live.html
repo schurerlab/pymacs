@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Results · Schürer Digital Drug Discovery Lab Job Portal{% endblock %}
+{% block head %}
+<script src="{{ url_for('static', filename='3Dmol-min.js') }}"></script>
+<style>
+  .results-main{max-width:1200px}.results-hero{margin-bottom:28px}.results-hero h1{font-size:clamp(2.5rem,6vw,4.5rem)}
+  .result-scope{margin:22px 0;border:1px solid var(--line);border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 10px 30px #173d2b10}.result-scope>summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:18px 22px;cursor:pointer;list-style:none}.result-scope>summary::-webkit-details-marker,.owner-results>summary::-webkit-details-marker,.result-entry summary::-webkit-details-marker{display:none}.result-scope>summary:hover,.owner-results>summary:hover{background:#f3faf6}.scope-title{display:flex;align-items:center;gap:12px}.scope-title strong{display:block;font-size:1.15rem;color:var(--ink)}.scope-title span{display:block;margin-top:2px;color:var(--muted);font-size:.85rem}.scope-count{border-radius:999px;background:#edf5ef;color:var(--green);font-weight:850;padding:6px 10px;font-size:.78rem;white-space:nowrap}
+  .owner-results{--owner-color:#00bce8;border-top:1px solid var(--line)}.owner-results>summary{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;padding:15px 22px;cursor:pointer;list-style:none;border-left:5px solid var(--owner-color)}.owner-name{display:flex;align-items:center;gap:9px;font-weight:900;color:var(--owner-color);font-size:1.05rem}.owner-dot{width:11px;height:11px;border-radius:999px;background:var(--owner-color);box-shadow:0 0 0 4px color-mix(in srgb,var(--owner-color) 18%,transparent)}.owner-summary{margin-left:20px;color:var(--muted);font-size:.85rem}.owner-chevron{color:var(--owner-color);font-weight:900;font-size:1.2rem;transition:transform .18s ease}.owner-results[open] .owner-chevron{transform:rotate(180deg)}
+  .result-entry{--workflow-color:#00aeea}.result-entry--docking{--workflow-color:#ed4658}.result-entry+ .result-entry{border-top:1px solid var(--line)}.result-entry summary{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:18px;align-items:center;padding:17px 22px;cursor:pointer;list-style:none;box-shadow:inset 4px 0 0 var(--workflow-color)}.result-entry summary:hover{background:#f7fcff}.result-entry--docking summary:hover{background:#fff8f8}.result-entry[open] summary{background:#effaff;border-bottom:1px solid var(--line)}.result-entry--docking[open] summary{background:#fff4f5}
+  .result-title{display:block;font-size:1.13rem;font-weight:900;letter-spacing:-.025em;color:var(--ink)}.result-subtitle{display:block;margin-top:3px;color:var(--muted);font-size:.91rem}.result-badges{display:flex;gap:7px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.result-badge{padding:5px 8px;border-radius:999px;background:#e8f3eb;color:var(--green);font-weight:850;font-size:.77rem;white-space:nowrap}.result-badge.qx{background:#e7f1fa;color:#08749e}.result-workflow{padding:5px 8px;border-radius:999px;font-size:.76rem;font-weight:900;white-space:nowrap;background:#e5f7fe;color:#007aaa}.result-workflow--docking{background:#ffeaed;color:#c4293c}.result-chevron{font-size:1.4rem;font-weight:900;color:var(--workflow-color);transition:transform .18s ease}.result-entry[open] .result-chevron{transform:rotate(180deg)}
+  .result-body{padding:22px;background:#fbfeff}.result-entry--docking .result-body{background:#fffdfd}.result-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:20px}.result-stat{padding:13px;border:1px solid var(--line);border-radius:12px;background:#fff}.result-stat strong{display:block;color:var(--ink);font-size:1.12rem;line-height:1.2}.result-stat span{display:block;margin-top:4px;color:var(--muted);font-size:.78rem;font-weight:750;text-transform:uppercase;letter-spacing:.06em}
+  .result-previews{display:grid;grid-template-columns:1.1fr 1fr 1.35fr;gap:14px;align-items:stretch}.result-preview{border:1px solid var(--line);border-radius:14px;background:#f9fcfa;padding:13px;min-height:246px}.result-preview h3{font-size:.94rem;margin:0 0 4px}.result-preview p{color:var(--muted);font-size:.82rem;line-height:1.35;margin:0 0 10px}.ligand-2d{height:185px;display:flex;align-items:center;justify-content:center;background:#071016;border:1px solid #153c4a;border-radius:10px;overflow:hidden}.ligand-2d img{max-width:100%;max-height:100%;object-fit:contain}.molecule-preview{height:185px;border-radius:10px;background:#071016;border:1px solid #153c4a;position:relative}.molecule-placeholder{display:flex;align-items:center;justify-content:center;color:#83a3b0;font-size:.85rem;text-align:center;padding:15px;height:100%;box-sizing:border-box}.result-open-dossier{display:inline-flex;align-items:center;gap:7px;margin-top:20px;padding:11px 14px;border-radius:9px;background:var(--green);color:#fff;text-decoration:none;font-weight:850}.result-open-dossier:hover{filter:brightness(.94)}.empty{padding:36px;border:1px dashed var(--line);border-radius:16px;color:var(--muted)}
+  @media(max-width:880px){.result-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.result-previews{grid-template-columns:1fr}.result-preview{min-height:220px}}@media(max-width:580px){.result-scope>summary,.owner-results>summary{padding:15px}.owner-summary{margin-left:0}.result-entry summary{grid-template-columns:1fr auto;padding:16px}.result-badges{grid-column:1/2;justify-content:flex-start}.result-chevron{grid-column:2;grid-row:1}.result-body{padding:16px}.result-summary{grid-template-columns:1fr}}
+</style>
+{% endblock %}
+{% macro result_rows(systems) -%}
+  {% for system in systems %}
+    {% set qx = system.qx if system.qx is mapping else {} %}
+    <details class="result-entry result-entry--{{ system.workflow_kind }}" data-result-row>
+      <summary>
+        <span><span class="result-title">{{ system.system }}</span><span class="result-subtitle">{{ system.campaign }} · submitted by {{ system.submitter }}{% if system.ligand_name %} · ligand / PROTAC: {{ system.ligand_name }}{% endif %}</span></span>
+        <span class="result-badges"><span class="result-workflow result-workflow--{{ system.workflow_kind }}">{% if system.workflow_kind == 'docking' %}Docking{% else %}MD{% endif %}</span><span class="result-badge">{{ system.files|length }} assets</span>{% if qx.mean is defined %}<span class="result-badge qx">Q(x) {{ '%.3f'|format(qx.mean) }}</span>{% elif system.analysis_ready %}<span class="result-badge">analysis ready</span>{% endif %}</span>
+        <span class="result-chevron" aria-hidden="true">⌄</span>
+      </summary>
+      <div class="result-body">
+        <div class="result-summary">
+          <div class="result-stat"><strong>{{ system.project }}</strong><span>Project</span></div>
+          <div class="result-stat"><strong>{{ system.ligand_name or 'No ligand label' }}</strong><span>Ligand / PROTAC</span></div>
+          <div class="result-stat"><strong>{% if qx.mean is defined %}{{ '%.3f'|format(qx.mean) }}{% else %}—{% endif %}</strong><span>Mean native-contact Q(x)</span></div>
+          <div class="result-stat"><strong>{% if qx.frames is defined %}{{ '{:,}'.format(qx.frames) }}{% else %}—{% endif %}</strong><span>Frames analyzed</span></div>
+        </div>
+        <div class="result-previews">
+          <section class="result-preview"><h3>2D ligand identity</h3><p>Parameterized chemical identity used for this run.</p><div class="ligand-2d">{% if system.preview.ligand_2d_url %}<img loading="lazy" src="{{ system.preview.ligand_2d_url }}" alt="2D structure of {{ system.ligand_name or 'ligand' }}">{% else %}<span class="molecule-placeholder">No 2D ligand depiction was published for this system.</span>{% endif %}</div></section>
+          <section class="result-preview"><h3>3D ligand</h3><p>Drag to rotate · scroll to zoom.</p><div class="molecule-preview" data-mol-viewer data-model-url="{{ system.preview.ligand_url }}" data-format="mol2"><span class="molecule-placeholder">3D ligand preview loads when this row opens.</span></div></section>
+          <section class="result-preview"><h3>Ligand in submitted complex</h3><p>Centered on the ligand and nearby protein; falls back to the full complex.</p><div class="molecule-preview" data-complex-viewer data-model-url="{{ system.preview.structure_url }}" data-ligand="{{ system.ligand_name or '' }}"><span class="molecule-placeholder">Complex preview loads when this row opens.</span></div></section>
+        </div>
+        <a class="result-open-dossier" href="{{ url_for('result_detail', directory=system.directory) }}">Open full dossier ↗</a>
+      </div>
+    </details>
+  {% endfor %}
+{%- endmacro %}
+{% macro owner_group(group, label='') -%}
+  <details class="owner-results" data-owner="{{ group.owner }}">
+    <summary>
+      <span><span class="owner-name"><i class="owner-dot"></i>{{ label or group.owner }}</span><span class="owner-summary">{{ group.systems|length }} finished {{ 'result' if group.systems|length == 1 else 'results' }}</span></span>
+      <span class="owner-chevron" aria-hidden="true">⌄</span>
+    </summary>
+    {{ result_rows(group.systems) }}
+  </details>
+{%- endmacro %}
+{% block content %}
+<main class="results-main" data-current-user="{{ current_user }}">
+  <section class="results-hero"><p class="eyebrow">SCHÜRER LAB · FINISHED ANALYSES</p><h1>Results library</h1><p class="lead">Finished results are grouped by owner. Open a result to inspect its local scientific summary and structure previews; the full interactive analysis remains one click away.</p></section>
+  {% if results.systems %}
+    {% if my_groups %}
+    <details class="result-scope" data-result-scope>
+      <summary><span class="scope-title"><span><strong>My results</strong><span>Your completed systems, marked with your selected board color.</span></span></span><span class="scope-count">{{ my_groups[0].systems|length }} finished</span></summary>
+      {{ owner_group(my_groups[0], 'My results · ' ~ my_groups[0].owner) }}
+    </details>
+    {% endif %}
+    <details class="result-scope" data-result-scope>
+      <summary><span class="scope-title"><span><strong>All results</strong><span>Every published finished system in the lab, grouped by owner.</span></span></span><span class="scope-count">{{ results.systems|length }} finished</span></summary>
+      {% for group in owner_groups %}{{ owner_group(group) }}{% endfor %}
+    </details>
+  {% else %}
+    <section class="empty"><h2>No published results yet</h2><p>Finished PyMACS analyses will appear here automatically.</p></section>
+  {% endif %}
+</main>
+<script>
+(() => {
+  const palette=['#00c879','#00bce8','#8b5cf6','#ec4899','#f97316','#d49a00','#2563eb','#0f9f9a','#dc2468','#5865d8'];
+  function fallbackColor(owner){let hash=0;for(const char of String(owner||''))hash=((hash<<5)-hash)+char.charCodeAt(0)|0;return palette[Math.abs(hash)%palette.length]}
+  document.querySelectorAll('[data-owner]').forEach(group => {const owner=group.dataset.owner||'';const key='pymacs-board-accent:'+owner.toLocaleLowerCase();group.style.setProperty('--owner-color',localStorage.getItem(key)||fallbackColor(owner));});
+  function makeViewer(node, complex) {
+    if (node.dataset.loaded === '1') return;
+    const url=node.dataset.modelUrl;
+    if (!url || !window.$3Dmol) { node.textContent='A local molecular file was not published for this preview.'; return; }
+    node.dataset.loaded='1';node.textContent='';const viewer=$3Dmol.createViewer(node,{backgroundColor:'#071016'});
+    fetch(url).then(r=>{if(!r.ok)throw new Error('file unavailable');return r.text();}).then(data=>{
+      viewer.addModel(data,complex?'pdb':(node.dataset.format||'mol2'));
+      if(complex){const ligand=(node.dataset.ligand||'').trim();viewer.setStyle({},{cartoon:{color:'spectrum'}});if(ligand){const selected={resn:ligand};viewer.setStyle(selected,{stick:{colorscheme:'Jmol',radius:0.24},sphere:{colorscheme:'Jmol',scale:0.22}});viewer.zoomTo(selected);viewer.zoom(0.85);}else viewer.zoomTo();}
+      else{viewer.setStyle({},{stick:{colorscheme:'Jmol',radius:0.22},sphere:{colorscheme:'Jmol',scale:0.21}});viewer.zoomTo();}viewer.render();
+    }).catch(()=>{node.textContent='The local molecular preview could not be loaded.';});
+  }
+  document.querySelectorAll('[data-result-row]').forEach(row=>row.addEventListener('toggle',()=>{if(row.open)row.querySelectorAll('[data-mol-viewer]').forEach(node=>makeViewer(node,false));if(row.open)row.querySelectorAll('[data-complex-viewer]').forEach(node=>makeViewer(node,true));}));
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#BSUB -J pymacs_validate_human_balo_3b_5
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 04:00
+#BSUB -n 4
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/cheminfo/home/jxs794/MD-Backups/KYLE_MD_JOBS/Nahuel/HUMAN_BALO/pymacs_validate_human_balo_3b_5.%J.out
+#BSUB -eo /projectnb/cheminfo/home/jxs794/MD-Backups/KYLE_MD_JOBS/Nahuel/HUMAN_BALO/pymacs_validate_human_balo_3b_5.%J.err
+
+source /etc/bashrc
+set -euo pipefail
+cd /projectnb/cheminfo/home/jxs794/MD-Backups/KYLE_MD_JOBS/Nahuel/HUMAN_BALO
+module purge
+module load gcc-runtime/13.4.0-none-none-gh6rpjx
+module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export OMP_NUM_THREADS=4
+
+python /projectnb/triton/home/jxs794/Pymacs/3B_NETWORX.py --ligand LIG --filter 0.10 --output LIG --mode ligand
+test -s Analysis_Results/NETWORX/LIG_interactive.html
+python /projectnb/triton/home/jxs794/Pymacs/5_PyMACS_Result_Dashboard.py --root .
+grep -q "Interactive ligand interaction explorer" Analysis_Results/PyMACS_Result_Dashboard.html

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import gzip
 import itertools
@@ -37,6 +38,7 @@ from pymacs_analysis_cache import (
     write_json_atomic,
 )
 from pymacs_progress import ProgressReporter
+from pymacs_interface_explorer import build_cytoscape_interface_explorer
 from pymacs_interaction_chemistry import (
     EVENT_COLUMNS,
     aggregate_event_occupancy,
@@ -1093,9 +1095,16 @@ def interface_chain_sequences(universe, chain_pairs):
                 seen.add(key)
                 sequence.append({
                     "label": residue_label(label, residue),
+                    # ``label`` remains the backwards-compatible display key.
+                    # This key is unambiguous even when residue numbers repeat
+                    # between chains and is used by every browser view.
+                    "stable_id": f"{label}|residue_ix={residue.ix}|resid={residue_number(residue)}",
                     "name": str(residue.resname).upper(),
                     "number": residue_number(residue),
                     "one": AA1.get(str(residue.resname).upper(), "X"),
+                    "position": next((atom.position.astype(float).round(3).tolist()
+                                      for atom in residue.atoms if str(atom.name).upper() == "CA"),
+                                     residue.atoms.center_of_geometry().astype(float).round(3).tolist()),
                 })
             sequences[label] = {
                 "label": label,
@@ -1103,6 +1112,32 @@ def interface_chain_sequences(universe, chain_pairs):
                 "residues": sequence,
             }
     return sequences
+
+
+def interface_structure_pdb(universe, chain_pairs) -> str:
+    """Return a small, real-coordinate PDB for the analysed interface chains.
+
+    This is a single selected conformation (the universe's current/final
+    analysed frame), never a reconstruction from occupancy data.
+    """
+    lines, seen, serial = [], set(), 1
+    for left, right in chain_pairs:
+        for entry in (left, right):
+            label = str(entry["display_label"])
+            if label in seen:
+                continue
+            seen.add(label)
+            chain = str(entry.get("current_chain") or entry.get("source_chain") or "X")[:1] or "X"
+            for atom in atomgroup_for_entry(universe, entry).atoms:
+                residue = atom.residue
+                name = str(atom.name)[:4]
+                resname = str(residue.resname)[:3].upper()
+                resid = int(getattr(residue, "resid", 0))
+                x, y, z = (float(value) for value in atom.position)
+                element = str(getattr(atom, "element", "") or name[:1]).strip()[:2].upper()
+                lines.append(f"ATOM  {serial:5d} {name:>4s} {resname:>3s} {chain:1s}{resid:4d}    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00          {element:>2s}")
+                serial += 1
+    return "\n".join(lines + ["END", ""])
 
 
 def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_count, chain_pairs, universe):
@@ -1154,7 +1189,9 @@ def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_co
                             "fraction": round(float(row.ContactFraction), 6)})
 
     pair_options = [
-        {"id": f"{left['display_label']}__{right['display_label']}", "left": left["display_label"], "right": right["display_label"]}
+        {"id": f"{left['display_label']}__{right['display_label']}", "left": left["display_label"], "right": right["display_label"],
+         "left_chain": str(left.get("current_chain") or left.get("source_chain") or "")[:1],
+         "right_chain": str(right.get("current_chain") or right.get("source_chain") or "")[:1]}
         for left, right in chain_pairs
     ]
     # Peptide interfaces benefit from the full occupancy range; readers often
@@ -1168,6 +1205,24 @@ def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_co
         f'<button data-t="{threshold:.2f}" class="{"active" if threshold == default_threshold else ""}">{int(threshold * 100)}% retained</button>'
         for threshold in thresholds
     )
+    # The compact presence payload is the only trajectory-dependent data sent
+    # to the explorer.  It permits client-side window occupancies without
+    # repeating atom-distance calculations or loading the trajectory itself.
+    presence_rows = {}
+    presence_times = []
+    try:
+        presence = load_npz_dict(outdir / "interface_residue_pair_presence.npz")
+        matrix = np.asarray(presence.get("contact_matrix", np.zeros((0, 0))), dtype=np.uint8)
+        labels_a = [str(value) for value in np.asarray(presence.get("residue_a_labels", []))]
+        labels_b = [str(value) for value in np.asarray(presence.get("residue_b_labels", []))]
+        presence_times = [round(float(value), 6) for value in np.asarray(presence.get("times_ns", []))]
+        for index, (left_label, right_label) in enumerate(zip(labels_a, labels_b)):
+            if index < matrix.shape[0]:
+                presence_rows[f"{left_label}\u001f{right_label}"] = base64.b64encode(matrix[index].tobytes()).decode("ascii")
+    except (OSError, ValueError, KeyError):
+        # Historical runs may retain aggregate CSVs but not presence data.
+        # The explorer deliberately marks custom windows unsupported there.
+        pass
     payload = json.dumps({
         "pairs": pair_options,
         "chains": sequences,
@@ -1175,7 +1230,14 @@ def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_co
         "thresholds": thresholds,
         "default_threshold": default_threshold,
         "has_peptide": has_peptide,
+        "presence": {"times_ns": presence_times, "rows": presence_rows},
+        "coordinate_frame": "final analyzed trajectory frame",
+        "structure_pdb_b64": base64.b64encode(interface_structure_pdb(universe, chain_pairs).encode("utf-8")).decode("ascii"),
     }, separators=(",", ":")).replace("</", "<\\/")
+    # The shared frontend is intentionally generated after all 3C artifacts;
+    # it only consumes this payload and never recalculates trajectory contacts.
+    (outdir / "Interface_RIN_Explorer.html").write_text(build_cytoscape_interface_explorer(payload), encoding="utf-8")
+    return
     title = "Interface RIN explorer"
     html = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><style>
 :root{{--bg:#05070d;--panel:#0e1625;--line:#2a405e;--text:#ecf5ff;--muted:#9bb0c9;--cyan:#4bd7ff;--pep:#ffcf5b;--hbond:#ff5578;--ionic:#c084fc;--hydrophobic:#7dff91;--other:#94a3b8}}*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at 90% 0,rgba(75,215,255,.16),transparent 31%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,sans-serif}}main{{max-width:1500px;margin:auto;padding:28px}}.eyebrow{{color:var(--cyan);font-size:.73rem;font-weight:900;letter-spacing:.14em}}h1{{font-size:clamp(2rem,4vw,4.2rem);letter-spacing:-.06em;margin:.25rem 0}}p{{line-height:1.5;color:var(--muted);max-width:850px}}.controls{{display:flex;gap:9px;flex-wrap:wrap;margin:20px 0}}button{{border:1px solid var(--line);border-radius:10px;background:#101d30;color:var(--text);font:800 .88rem inherit;padding:10px 13px;cursor:pointer}}button:hover,button.active{{border-color:var(--cyan);background:#12425b}}.layout{{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:16px}}.panel{{background:linear-gradient(145deg,#111b2c,#080c14);border:1px solid var(--line);border-radius:20px}}.diagram{{padding:14px;overflow:auto}}svg{{display:block;width:100%;min-width:720px;height:650px}}.edge{{fill:none;stroke-width:3;stroke-dasharray:8 6;opacity:.85;cursor:pointer}}.edge:hover,.edge.selected{{stroke-width:6;opacity:1}}.hbond{{stroke:var(--hbond)}}.ionic{{stroke:var(--ionic)}}.hydrophobic{{stroke:var(--hydrophobic)}}.other{{stroke:var(--other)}}.node circle{{fill:#d8e6f4;stroke:#07101e;stroke-width:2.5}}.node.left circle{{fill:#ffdb76}}.node text{{font-size:11px;font-weight:900;text-anchor:middle;pointer-events:none;fill:#07101e}}.side{{padding:18px}}.metric{{font-size:2.5rem;font-weight:900;color:var(--cyan);letter-spacing:-.07em}}.detail{{border-top:1px solid var(--line);margin-top:14px;padding-top:14px;color:var(--muted);line-height:1.5}}.legend{{display:grid;gap:8px;margin-top:18px;color:var(--muted);font-size:.85rem}}.swatch{{display:inline-block;width:27px;border-top:4px dashed currentColor;vertical-align:middle;margin-right:7px}}.sequence-panel{{margin-top:16px;padding:18px}}.sequence-title{{font-weight:900}}.sequence{{display:flex;flex-wrap:wrap;gap:4px;margin-top:10px;max-height:170px;overflow:auto;padding:3px}}.aa{{min-width:25px;text-align:center;padding:5px 3px;border-radius:6px;background:#17243a;color:#dbeafe;font:800 .76rem ui-monospace,monospace;cursor:default}}.aa.contact{{background:var(--pep);color:#17110a;box-shadow:0 0 0 1px rgba(255,207,91,.55)}}.aa.selected{{outline:3px solid var(--cyan)}}.empty{{padding:30px;color:var(--muted)}}@media(max-width:900px){{main{{padding:18px}}.layout{{grid-template-columns:1fr}}.side{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}.side h2,.legend{{grid-column:1/-1}}}}@media(max-width:520px){{.side{{display:block}}}}
