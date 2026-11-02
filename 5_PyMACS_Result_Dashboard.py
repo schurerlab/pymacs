@@ -819,6 +819,44 @@ def interface_rin_context(analysis: Path) -> dict:
     }
 
 
+def interface_svg_snapshots(explorer: Path) -> list[tuple[str, str]]:
+    """Create lightweight 50%-persistence SVG previews from the explorer data."""
+    try:
+        text = explorer.read_text(encoding="utf-8")
+        match = re.search(r"<script>const DATA=(.*?);\n\(\(\)=>", text, re.DOTALL)
+        data = json.loads(match.group(1)) if match else {}
+        pair = (data.get("pairs") or [])[0]
+        left, right = pair["left"], pair["right"]
+        edges = [edge for edge in data.get("edges", []) if edge.get("fraction", 0) >= .5 and
+                 {edge.get("a", "").split(":", 1)[0], edge.get("b", "").split(":", 1)[0]} == {left, right}]
+        chains = data.get("chains", {})
+        left_nodes = list(dict.fromkeys(edge["a"] for edge in edges))
+        right_nodes = list(dict.fromkeys(edge["b"] for edge in edges))
+        def short(label: str) -> str:
+            return label.split(":")[-1]
+        def y(index: int, count: int) -> int:
+            return 48 + round(index * 185 / max(count - 1, 1))
+        left_pos = {node: (76, y(i, len(left_nodes))) for i, node in enumerate(left_nodes)}
+        right_pos = {node: (424, y(i, len(right_nodes))) for i, node in enumerate(right_nodes)}
+        lines = ''.join(f'<path d="M{x1} {y1} L{x2} {y2}" stroke="#35d0ff" stroke-opacity="{.3 + .7 * edge["fraction"]:.2f}" stroke-width="{1 + 5 * edge["fraction"]:.1f}"/>'
+                        for edge in edges for (x1, y1), (x2, y2) in [(left_pos[edge["a"]], right_pos[edge["b"]])])
+        nodes = ''.join(f'<g><circle cx="{x}" cy="{yy}" r="13" fill="{color}"/><text x="{x}" y="{yy + 3}" text-anchor="middle" font-size="7" font-weight="800">{escape(short(node))}</text></g>'
+                        for mapping, color in ((left_pos, '#ffe66d'), (right_pos, '#35d0ff')) for node, (x, yy) in mapping.items())
+        network = f'<svg viewBox="0 0 500 250" role="img" aria-label="Persistent residue contacts at 50 percent"><rect width="500" height="250" fill="#07111e"/><text x="18" y="20" fill="#b9d8ef" font-size="11" font-weight="800">{escape(left)} ↔ {escape(right)} · ≥50% persistence</text>{lines}{nodes}</svg>'
+        lres, rres = chains.get(left, {}).get("residues", []), chains.get(right, {}).get("residues", [])
+        lookup = {(edge["a"], edge["b"]): edge for edge in edges}
+        cells = []
+        for row, residue_l in enumerate(lres):
+            for col, residue_r in enumerate(rres):
+                edge = lookup.get((residue_l.get("label"), residue_r.get("label"))) or lookup.get((residue_r.get("label"), residue_l.get("label")))
+                fill = f'rgba(53,208,255,{.14 + .86 * edge["fraction"]:.2f})' if edge else '#102039'
+                cells.append(f'<rect x="{75 + col * 18}" y="{42 + row * 18}" width="15" height="15" rx="2" fill="{fill}"/>')
+        heatmap = f'<svg viewBox="0 0 {max(360, 90 + len(rres)*18)} {max(250, 58 + len(lres)*18)}" role="img" aria-label="Residue-pair persistence heatmap"><rect width="100%" height="100%" fill="#07111e"/><text x="12" y="21" fill="#b9d8ef" font-size="11" font-weight="800">Residue-pair persistence · ≥50%</text>{"".join(cells)}</svg>'
+        return [(network, "Bipartite residue contacts · default ≥50% persistence"), (heatmap, "Residue-pair persistence map · default ≥50% persistence")]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+
+
 def interface_evidence_html(analysis: Path, context: PartnerContext, rin: dict) -> str:
     """Make interface-network availability obvious; never silently hide a peptide relationship."""
     if not context.is_interface:
@@ -838,7 +876,8 @@ def interface_evidence_html(analysis: Path, context: PartnerContext, rin: dict) 
         "Interface_RIN_Network.png", "Interface_ChainLevel_Network.png", "Interface_ResiduePair_ContactHeatmap.png",
     ))
     if explorer.is_file() or has_maps:
-        previews = []
+        previews = [f'<figure class="interface-preview">{svg}<figcaption>{escape(label)}</figcaption></figure>'
+                    for svg, label in interface_svg_snapshots(explorer)]
         for filename, label in (
             ("Interface_RIN_Network.png", "Residue interaction-node map"),
             ("Interface_ChainLevel_Network.png", "Chain-level interface map"),
@@ -909,6 +948,15 @@ def final_structure_html(root: Path, context: PartnerContext) -> str:
     """Embed the final complex or apo PDB in the report's 3Dmol viewer."""
     candidates = (root / "Final_Trajectory.pdb", root / "binding_pocket_only.pdb")
     structure = next((path for path in candidates if path.is_file()), None)
+    # Historical runs often retained the submitted complex but not a final
+    # trajectory snapshot.  It remains a useful, explicitly labelled starting
+    # structure for visual inspection; never imply that it is an MD endpoint.
+    fallback = False
+    if structure is None:
+        structure = next((path for path in sorted(root.glob("*.pdb"))
+                          if path.name not in {"protein.pdb", "protein_pdb2gmx_ready.pdb",
+                                               "protein_pdbfixer_ready.pdb", "selected_input_source.pdb"}), None)
+        fallback = structure is not None
     if structure is None:
         return (
             '<section class="structure-card"><div class="eyebrow">Final structure</div>'
@@ -948,7 +996,9 @@ def final_structure_html(root: Path, context: PartnerContext) -> str:
     protein_label = "Protein/receptor" if context.partner_kind == "peptide" else "Protein"
     bond_note = " Ligand bonds use the matching CGenFF topology." if final_ligand_payload else ""
     snapshots = representative_snapshots_html(root, root / "Analysis_Results")
-    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Final structure</div><h2>3D complex / apo viewer</h2><p>Drag to rotate, scroll to zoom, and choose a focused view. The model is the final published PDB, not a representative image.{bond_note}</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure display"><button type="button" data-structure-view="complex">Full complex</button><button type="button" data-structure-view="protein">{protein_label}</button>{chain_buttons}{focused_button}</div><div class="complex-3d js-complex-3d" data-ligand="{escape(ligand)}" data-pdb-ligand="{escape(pdb_ligand_resname)}" data-final-ligand-b64="{final_ligand_payload}" data-partner-kind="{escape(context.partner_kind)}" data-partner-chains="{escape(','.join(context.partner_chain_ids))}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · final published coordinate snapshot.</p>{snapshots}</section>'''
+    source_note = ("submitted/input complex; no final trajectory PDB was published" if fallback
+                   else "final published coordinate snapshot")
+    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Structure viewer</div><h2>3D complex presentation</h2><p>Drag to rotate and scroll to zoom. This viewer is independent from the contact explorer and controls its own peptide, protein, and side-chain display.{bond_note}</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure focus"><button type="button" data-structure-view="complex">Full complex</button><button type="button" data-structure-view="protein">{protein_label}</button>{chain_buttons}{focused_button}</div><div class="structure-control-grid"><label>Protein color <select data-structure-control="protein-color"><option value="slate">Slate blue</option><option value="spectrum">Spectrum</option><option value="chain">By chain</option><option value="mint">Mint</option><option value="violet">Violet</option></select></label><label>Peptide color <select data-structure-control="peptide-color"><option value="gold">Gold</option><option value="magenta">Magenta</option><option value="cyan">Cyan</option><option value="element">By element</option></select></label><label>Peptide side chains <select data-structure-control="peptide-sidechains"><option value="stick">Sticks</option><option value="line">Lines</option><option value="off">Hidden</option></select></label><label>Protein side chains <select data-structure-control="protein-sidechains"><option value="off">Hidden</option><option value="line">Lines</option><option value="stick">Sticks</option></select></label></div><div class="complex-3d js-complex-3d" data-ligand="{escape(ligand)}" data-pdb-ligand="{escape(pdb_ligand_resname)}" data-final-ligand-b64="{final_ligand_payload}" data-partner-kind="{escape(context.partner_kind)}" data-partner-chains="{escape(','.join(context.partner_chain_ids))}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · {source_note}.</p>{snapshots}</section>'''
 
 
 def read_metadata(root: Path) -> dict:
@@ -1869,6 +1919,29 @@ def build_document(system_name: str, context: PartnerContext, cards: list[str], 
  document.querySelectorAll('.js-ligand-3d').forEach(el=>{{try{{const raw=atob(el.dataset.structureB64),viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}});viewer.addModel(raw,el.dataset.format);viewer.setStyle({{}},{{stick:{{radius:.105,color:'#ffe66d'}},sphere:{{scale:.16,color:'#ffe66d'}}}});viewer.setStyle({{elem:'N'}},{{stick:{{radius:.105,color:'#35d0ff'}},sphere:{{scale:.16,color:'#35d0ff'}}}});viewer.setStyle({{elem:'O'}},{{stick:{{radius:.105,color:'#ff3b5c'}},sphere:{{scale:.16,color:'#ff3b5c'}}}});viewer.setStyle({{elem:'Cl'}},{{stick:{{radius:.105,color:'#18ff8b'}},sphere:{{scale:.20,color:'#18ff8b'}}}});viewer.zoomTo();viewer.render();addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D ligand preview unavailable.'}}}});
  document.querySelectorAll('.js-complex-3d').forEach(el=>{{try{{const viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}}),raw=atob(el.dataset.structureB64),ligand=el.dataset.ligand,pdbLigand=el.dataset.pdbLigand||ligand,finalLigand=el.dataset.finalLigandB64?atob(el.dataset.finalLigandB64):'',chains=el.dataset.partnerChains.split(',').filter(Boolean),pdbModel=viewer.addModel(raw,'pdb'),ligandModel=finalLigand?viewer.addModel(finalLigand,'mol2'):null;const ligandStyle={{stick:{{radius:.20,colorscheme:'Jmol',singleBonds:false,aromaticStyle:'solid'}},sphere:{{scale:.25,colorscheme:'Jmol'}}}},clear=()=>{{pdbModel.setStyle({{}},{{}});if(ligandModel)ligandModel.setStyle({{}},{{}})}},paintLigand=()=>{{if(ligandModel)ligandModel.setStyle({{}},ligandStyle)}};const render=(mode,chain='')=>{{clear();pdbModel.setStyle({{hetflag:false}},{{cartoon:{{color:'spectrum'}}}});if(mode==='complex'){{pdbModel.setStyle({{hetflag:true}},{{stick:{{radius:.16,colorscheme:'Jmol'}}}});if(ligandModel)pdbModel.setStyle({{resn:pdbLigand}},{{}});paintLigand();viewer.zoomTo()}}if(mode==='chain'&&chain){{pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.18}}}});pdbModel.setStyle({{chain}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}});viewer.zoomTo({{chain}})}}if(mode==='partner'&&chains.length){{pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.18}}}});pdbModel.setStyle({{chain:chains[0]}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.10}}}});viewer.zoomTo({{chain:chains[0]}})}}if(mode==='interface'&&chains.length>1){{const sel={{chain:chains[0]}};pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.22}}}});pdbModel.setStyle({{chain:chains[0]}},{{cartoon:{{color:'#35d0ff'}}}});pdbModel.setStyle({{within:{{distance:5,sel}}}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.10}}}});viewer.zoomTo({{within:{{distance:7,sel}}}})}}if(mode==='pocket'&&pdbLigand){{pdbModel.setStyle({{}},{{cartoon:{{color:'#34495e',opacity:.28}}}});pdbModel.setStyle({{within:{{distance:5,sel:{{resn:pdbLigand}}}}}},{{cartoon:{{color:'#35d0ff'}},stick:{{radius:.10}}}});pdbModel.setStyle({{resn:pdbLigand}},{{}});paintLigand();viewer.zoomTo({{resn:pdbLigand}})}}if(mode==='protein')viewer.zoomTo();viewer.render();el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.classList.toggle('is-active',button.dataset.structureView===mode&&(mode!=='chain'||button.dataset.chainId===chain)))}};el.parentElement.querySelectorAll('[data-structure-view]').forEach(button=>button.addEventListener('click',()=>render(button.dataset.structureView,button.dataset.chainId||'')));render('complex');addEventListener('resize',()=>viewer.resize())}}catch(_){{el.textContent='3D final-structure preview unavailable.'}}}});
 }})();
+</script><script>
+/* Independent presentation viewer for the dashboard Structure tab. */
+document.querySelectorAll('.js-complex-3d').forEach(el=>{{
+  try {{
+    el.replaceChildren();
+    const panel=el.closest('.structure-card'), raw=atob(el.dataset.structureB64), viewer=$3Dmol.createViewer(el,{{backgroundColor:'#05060a',antialias:true}}), model=viewer.addModel(raw,'pdb'), chains=el.dataset.partnerChains.split(',').filter(Boolean), proteinColor={{slate:'#496985',mint:'#4fd1a5',violet:'#a78bfa'}}, peptideColor={{gold:'#ffe66d',magenta:'#ff70d2',cyan:'#35d0ff'}}, state={{mode:'complex',chain:'',protein:'slate',peptide:'gold',pepSide:'stick',proSide:'off'}};
+    const peptideSel=()=>chains.length?{{chain:chains[0]}}:{{}};
+    const sideStyle=(kind,color)=>kind==='stick'?{{stick:{{radius:.16,color}}}}:kind==='line'?{{line:{{linewidth:1.3,color}}}}:{{}};
+    const render=()=>{{
+      model.setStyle({{}},{{cartoon:{{color:state.protein==='spectrum'?'spectrum':proteinColor[state.protein]||undefined,colorscheme:state.protein==='chain'?'chain':undefined}}}});
+      if(chains.length) {{ model.setStyle(peptideSel(),{{cartoon:{{color:state.peptide==='element'?undefined:peptideColor[state.peptide],colorscheme:state.peptide==='element'?'Jmol':undefined}},...sideStyle(state.pepSide,peptideColor[state.peptide]||'#ffe66d')}}); }}
+      if(state.proSide!=='off') model.setStyle({{hetflag:false}},sideStyle(state.proSide,'#8fb7d8'));
+      if(state.mode==='chain'&&state.chain) {{model.setStyle({{}},{{cartoon:{{color:'#24364c',opacity:.25}}}});model.setStyle({{chain:state.chain}},{{cartoon:{{color:'#35d0ff'}},...sideStyle(state.proSide,'#35d0ff')}});viewer.zoomTo({{chain:state.chain}})}}
+      else if(state.mode==='partner'&&chains.length) viewer.zoomTo(peptideSel());
+      else if(state.mode==='interface'&&chains.length) viewer.zoomTo({{within:{{distance:7,sel:peptideSel()}}}});
+      else viewer.zoomTo();
+      viewer.render(); panel.querySelectorAll('[data-structure-view]').forEach(b=>b.classList.toggle('is-active',b.dataset.structureView===state.mode&&(state.mode!=='chain'||b.dataset.chainId===state.chain)));
+    }};
+    panel.querySelectorAll('[data-structure-view]').forEach(b=>b.addEventListener('click',()=>{{state.mode=b.dataset.structureView;state.chain=b.dataset.chainId||'';render()}}));
+    panel.querySelectorAll('[data-structure-control]').forEach(control=>control.addEventListener('change',()=>{{const key=control.dataset.structureControl;if(key==='protein-color')state.protein=control.value;if(key==='peptide-color')state.peptide=control.value;if(key==='peptide-sidechains')state.pepSide=control.value;if(key==='protein-sidechains')state.proSide=control.value;render()}}));
+    render(); addEventListener('resize',()=>viewer.resize());
+  }} catch (_) {{ el.textContent='3D structure preview unavailable.'; }}
+}});
 </script><script>
 /* Forward chain-aware explorer selections between independently sandboxed panels. */
 addEventListener('message',event=>{{const data=event.data||{{}};if(data.type!=='pymacs-rin-selection'||!data.residue)return;document.querySelectorAll('iframe[title*="interface explorer"]').forEach(frame=>{{if(frame.contentWindow!==event.source)frame.contentWindow?.postMessage(data,'*')}})}});
