@@ -138,6 +138,12 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn("Math.hypot(e.clientX-d.x,e.clientY-d.y)<5", page)
         self.assertIn("if(!d.moved)select(d.id)", page)
         self.assertIn("detail-kicker", page)
+        self.assertIn("function typeTone(t)", page)
+        self.assertIn("border-color:'+t", page)
+        self.assertIn('id="spatial-detail"', page)
+        self.assertIn("function spatialInspector()", page)
+        self.assertIn("c.canvas.onclick", page)
+        self.assertIn('id="spatial-structure"', page)
 
     def test_reusable_3c_cache_rebuilds_the_explorer(self):
         source = Path(__file__).resolve().parents[1].joinpath("3C_Interface_RIN.py").read_text()

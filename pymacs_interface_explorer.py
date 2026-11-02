@@ -96,18 +96,28 @@ def build_interface_explorer(payload: str) -> str:
         1,
     )
     page = page.replace(
+        "canvas{width:100%;height:auto;background:#07111e}",
+        "canvas{width:100%;height:auto;background:#07111e}.spatial-grid{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:12px}.spatial-grid #space{height:610px;border:1px solid var(--l);border-radius:10px;cursor:crosshair}.spatial-detail{padding:18px;border:1px solid #1d617f;border-radius:10px;background:linear-gradient(160deg,#0d1d31,#07101e 66%);box-shadow:inset 3px 0 0 #24e6ff;color:#bdd9ef}.spatial-detail h3{margin:0 0 10px;color:#f4fbff}.spatial-legend{display:grid;gap:7px;margin:14px 0}.spatial-legend span{display:flex;align-items:center;gap:8px}.swatch{width:12px;height:12px;border-radius:50%;display:inline-block}.swatch.pep{background:#ffcf5b}.swatch.pro{background:#4bd7ff}.swatch.selpep{background:#24e6ff}.swatch.selpro{background:#ff5a78}.spatial-detail .spatial-card{margin:10px 0;padding:10px;border:1px solid #20536f;border-radius:8px;background:#0b1828}.spatial-detail .spatial-card b{color:#ffcf5b}@media(max-width:900px){.spatial-grid{grid-template-columns:1fr}.spatial-grid #space{height:auto}.spatial-detail{min-height:180px}}",
+        1,
+    )
+    page = page.replace(
+        '<canvas id="space" width="1200" height="610"></canvas>',
+        '<div class="spatial-grid"><canvas id="space" width="1200" height="610"></canvas><aside class="spatial-detail" id="spatial-detail"></aside></div>',
+        1,
+    )
+    page = page.replace(
         "function select(id,e){",
         "function select(id,e){if(state.selected===id){state.selected=null;$('#detail').textContent='Selection cleared.';render();return}",
         1,
     )
     page = page.replace(
         "function draw(){let p=pair(),es=edges(),svg=$('#rin');",
-        "function isPeptide(id){let p=pair();return[p.left,p.right].some(c=>DATA.chains[c].type==='peptide'&&DATA.chains[c].residues.some(r=>r.label===id))}function residue(id){let p=pair();return[...DATA.chains[p.left].residues,...DATA.chains[p.right].residues].find(r=>r.label===id)}function chainCode(id){let p=pair();return DATA.chains[p.left].residues.some(r=>r.label===id)?(p.left_chain||'A'):(p.right_chain||'B')}function brief(id){let r=residue(id),tone=isPeptide(id)?'pep-txt':'pro-txt';return '<span class=\"'+tone+'\">'+esc(chainCode(id))+' · '+esc(r?.name||'?')+' '+esc(r?.number||'?')+'</span>'}function draw(){let p=pair(),es=edges(),svg=$('#rin');",
+        "function isPeptide(id){let p=pair();return[p.left,p.right].some(c=>DATA.chains[c].type==='peptide'&&DATA.chains[c].residues.some(r=>r.label===id))}function residue(id){let p=pair();return[...DATA.chains[p.left].residues,...DATA.chains[p.right].residues].find(r=>r.label===id)}function chainCode(id){let p=pair();return DATA.chains[p.left].residues.some(r=>r.label===id)?(p.left_chain||'A'):(p.right_chain||'B')}function brief(id){let r=residue(id),tone=isPeptide(id)?'pep-txt':'pro-txt';return '<span class=\"'+tone+'\">'+esc(chainCode(id))+' · '+esc(r?.name||'?')+' '+esc(r?.number||'?')+'</span>'}function typeTone(t){return/bond/i.test(t)?'#ff5578':/ionic/i.test(t)?'#c084fc':/hydrophobic/i.test(t)?'#7dff91':'#82c7ff'}function draw(){let p=pair(),es=edges(),svg=$('#rin');",
         1,
     )
     page = page.replace(
         "$('#detail').innerHTML='<b>'+esc(id)+'</b><br>'+ (ps.length?ps.map(x=>esc(x.a===id?x.b:x.a)+' · '+(x.fraction*100).toFixed(1)+'% · '+esc(x.type)).join('<br>'):'No partners under active filters.');",
-        "$('#detail').innerHTML='<div class=\"detail-kicker\">ACTIVE RESIDUE</div><div class=\"detail-title\">'+brief(id)+'</div><div class=\"detail-kicker\">CONTACTS UNDER ACTIVE FILTER</div>'+ (ps.length?ps.map(x=>'<div class=\"detail-item\">'+brief(x.a===id?x.b:x.a)+'<br><b>'+(x.fraction*100).toFixed(1)+'%</b> · '+esc(x.type)+'</div>').join(''):'<div class=\"detail-item\">No partners under active filters.</div>');",
+        "$('#detail').innerHTML='<div class=\"detail-kicker\">ACTIVE RESIDUE</div><div class=\"detail-title\">'+brief(id)+'</div><div class=\"detail-kicker\">CONTACTS UNDER ACTIVE FILTER</div>'+ (ps.length?ps.map(x=>{let t=typeTone(x.type);return '<div class=\"detail-item\" style=\"border-color:'+t+';box-shadow:inset 3px 0 0 '+t+'\">'+brief(x.a===id?x.b:x.a)+'<br><b style=\"color:'+t+'\">'+(x.fraction*100).toFixed(1)+'%</b> · <span style=\"color:'+t+'\">'+esc(x.type)+'</span></div>'}).join(''):'<div class=\"detail-item\">No partners under active filters.</div>');",
         1,
     )
     page = page.replace(
@@ -183,6 +193,11 @@ def build_interface_explorer(payload: str) -> str:
         "co=r=>r.position||[0,0,0],bounds=all.map(co),centre=bounds.reduce((sum,v)=>sum.map((x,i)=>x+v[i]),[0,0,0]).map(x=>x/Math.max(bounds.length,1)),span=Math.max(1,...bounds.flatMap(v=>v.map((x,i)=>Math.abs(x-centre[i])))),scale=Math.min(11,250/span)*state.z,pr=r=>{let[x,y,z]=co(r);x-=centre[0];y-=centre[1];z-=centre[2];let q=Math.cos(state.a),s=Math.sin(state.a);return[600+(x*q-z*s)*scale,305-y*scale+(x*s+z*q)*scale*.16]};",
         1,
     )
+    page = page.replace(
+        "c.clearRect(0,0,1200,610);edges().forEach(e=>",
+        "state.spatialPoints=all.map(r=>({r,q:pr(r)}));let pick=e=>{let box=c.canvas.getBoundingClientRect(),x=(e.clientX-box.left)*1200/box.width,y=(e.clientY-box.top)*610/box.height,hit=state.spatialPoints.map(o=>({...o,d:Math.hypot(o.q[0]-x,o.q[1]-y)})).sort((a,b)=>a.d-b.d)[0];return hit&&hit.d<18?hit:null};c.canvas.onclick=e=>{let hit=pick(e);if(hit)select(hit.r.label)};c.canvas.onmousemove=e=>{c.canvas.style.cursor=pick(e)?'pointer':'crosshair'};c.clearRect(0,0,1200,610);edges().forEach(e=>",
+        1,
+    )
     # Visually lift the peptide out of the receptor cartoon in the molecular
     # view.  The stable ID carries the PDB chain identifier.
     page = page.replace(
@@ -200,6 +215,11 @@ def build_interface_explorer(payload: str) -> str:
         1,
     )
     page = page.replace(
+        "function structureInspector(){",
+        "function spatialInspector(){let host=$('#spatial-detail'),r=residue(state.selected),pep=r&&isPeptide(state.selected),partners=state.selected?edges().filter(e=>e.a===state.selected||e.b===state.selected):[],card=r?'<div class=\"spatial-card\"><div class=\"detail-kicker\">SELECTED '+(pep?'PEPTIDE':'RECEPTOR')+' RESIDUE</div><h3>'+esc(chainCode(state.selected))+' · '+esc(r.name)+' '+esc(r.number)+'</h3><b>'+partners.length+'</b> active contact'+(partners.length===1?'':'s')+'<br><button id=\"spatial-structure\">View in 3D structure</button></div>':'<div class=\"spatial-card\">Click a point to inspect that residue and link it to the structure view.</div>';host.innerHTML='<div class=\"detail-kicker\">3D CONTACT SPACE</div><h3>Interface-focused coordinates</h3><p>Blue points are receptor contact partners; gold points retain peptide N→C context. Click any point for its identity.</p><div class=\"spatial-legend\"><span><i class=\"swatch pro\"></i>Receptor contact partner</span><span><i class=\"swatch pep\"></i>Peptide residue</span><span><i class=\"swatch selpep\"></i>Selected peptide</span><span><i class=\"swatch selpro\"></i>Selected receptor</span></div>'+card;let go=$('#spatial-structure');if(go)go.onclick=()=>{state.view='structure';$('#tabs').querySelectorAll('button[data-v]').forEach(x=>x.classList.toggle('on',x.dataset.v==='structure'));['network','structure','spatial','map','sequence'].forEach(v=>$('#'+v).classList.toggle('hidden',v!=='structure'));render()}}function structureInspector(){",
+        1,
+    )
+    page = page.replace(
         "if(viewer){viewer.setStyle({},{cartoon:{color:'#3f5b76'}});let p=pair(),pep=[DATA.chains[p.left],DATA.chains[p.right]].find(c=>c.type==='peptide'),pepChain=p.left===pep?.label?p.left_chain:p.right_chain;viewer.setStyle({chain:pepChain},{cartoon:{color:'#ffcf5b'},stick:{radius:.18,color:'#ffdf85'}});let m=String(state.selected||'').split(':').at(-1).match(/([A-Z]{3})(-?\\d+)/);if(m)viewer.setStyle({resn:m[1],resi:m[2]},{stick:{radius:.24,color:'#ffffff'}});viewer.render();return;}",
         "if(viewer){viewer.setStyle({},{cartoon:{color:'#3f5b76'}});let p=pair(),pep=[DATA.chains[p.left],DATA.chains[p.right]].find(c=>c.type==='peptide'),pepChain=p.left===pep?.label?p.left_chain:p.right_chain;viewer.setStyle({chain:pepChain},{cartoon:{color:'#ffcf5b'},stick:{radius:.18,color:'#ffdf85'}});let m=String(state.selected||'').split(':').at(-1).match(/([A-Z]{3})(-?\\d+)/);if(m)viewer.setStyle({resn:m[1],resi:m[2]},{stick:{radius:.24,color:'#ffffff'}});requestAnimationFrame(()=>{viewer.resize();viewer.render()});return;}",
         1,
@@ -207,6 +227,11 @@ def build_interface_explorer(payload: str) -> str:
     page = page.replace(
         "function render(){draw();sequence();contact();spatial();if(state.view==='structure')structure()}",
         "function render(){draw();sequence();contact();spatial();if(state.view==='structure'){structureInspector();structure()}}",
+        1,
+    )
+    page = page.replace(
+        "function render(){draw();sequence();contact();spatial();if(state.view==='structure'){structureInspector();structure()}}",
+        "function render(){draw();sequence();contact();spatial();spatialInspector();if(state.view==='structure'){structureInspector();structure()}}",
         1,
     )
     page = page.replace(
