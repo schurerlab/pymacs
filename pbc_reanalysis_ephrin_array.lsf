@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#BSUB -J "pbc_ephrin_refresh[1-33]%8"
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 10:00
+#BSUB -n 2
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/triton/home/jxs794/Pymacs/pbc_ephrin_refresh.%J.%I.out
+#BSUB -eo /projectnb/triton/home/jxs794/Pymacs/pbc_ephrin_refresh.%J.%I.err
+
+# Rebuild *derived* PBC-safe analysis coordinates and analysis products.  The
+# production trajectory (md_0_1.xtc) is read-only and never replaced.
+set -euo pipefail
+
+PYMACS=/projectnb/triton/home/jxs794/Pymacs
+ROOT=/projectnb/triton/home/jxs794/Molecular_Dynamics
+MANIFEST="$PYMACS/pbc_reanalysis_ephrin_manifest.txt"
+SYSTEM=$(grep -vE '^[[:space:]]*(#|$)' "$MANIFEST" | sed -n "${LSB_JOBINDEX}p")
+RUN="$ROOT/$SYSTEM"
+
+test -n "$SYSTEM"
+test -d "$RUN"
+test -s "$RUN/md_0_1.xtc"
+test -s "$RUN/md_0_1.tpr"
+test -s "$RUN/index.ndx"
+test -s "$RUN/atomIndex.txt"
+
+exec > >(tee -a "$RUN/pbc_reanalysis.${LSB_JOBID}.${LSB_JOBINDEX}.log") 2>&1
+echo "[$(date -Is)] Refreshing $SYSTEM"
+
+module purge
+module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export OMP_NUM_THREADS=2
+cd "$RUN"
+
+mkdir -p Analysis_Results/PBC_Preprocessing_Backup
+stamp=$(date +%Y%m%d-%H%M%S)
+for asset in Final_Trajectory.xtc Final_Trajectory.pdb; do
+  if test -s "$asset"; then
+    mv "$asset" "Analysis_Results/PBC_Preprocessing_Backup/${asset%.${asset##*.}}.pre_pbc_${stamp}.${asset##*.}"
+  fi
+done
+
+# Input selections: cluster, centre, and output.  "Protein" contains every
+# macromolecular chain in this all-protein Ephrin set.
+printf 'Protein\nProtein\nProtein\n' | gmx_mpi trjconv \
+  -s md_0_1.tpr -f md_0_1.xtc -n index.ndx \
+  -o Final_Trajectory.xtc -pbc cluster -center -ur compact
+printf 'Protein\n' | gmx_mpi trjconv \
+  -s md_0_1.tpr -f Final_Trajectory.xtc -n index.ndx \
+  -o Final_Trajectory.pdb -dump 0
+test -s Final_Trajectory.xtc
+test -s Final_Trajectory.pdb
+
+if [[ "$SYSTEM" == *-xEFN* ]]; then
+  python "$PYMACS/3C_Interface_RIN.py" \
+    --topo Final_Trajectory.pdb --traj Final_Trajectory.xtc \
+    --atomindex atomIndex.txt --outdir Analysis_Results/Interface_RIN \
+    --peptide-chains B --force-recompute --headless
+  python "$PYMACS/4D_Peptide_NETWORX.py" \
+    --interface-dir Analysis_Results/Interface_RIN --peptide-chain B \
+    --outdir Analysis_Results/Peptide_NETWORX
+else
+  python "$PYMACS/3C_Interface_RIN.py" \
+    --topo Final_Trajectory.pdb --traj Final_Trajectory.xtc \
+    --atomindex atomIndex.txt --outdir Analysis_Results/Interface_RIN \
+    --force-recompute --headless
+fi
+
+test -s Analysis_Results/Interface_RIN/Interface_RIN_Explorer.html
+python "$PYMACS/5_PyMACS_Result_Dashboard.py" --root "$RUN"
+test -s Analysis_Results/PyMACS_Result_Dashboard.html
+echo "[$(date -Is)] Complete $SYSTEM"

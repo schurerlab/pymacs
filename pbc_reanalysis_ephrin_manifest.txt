@@ -1,0 +1,36 @@
+# The 34-system Ephrin refresh scope consists of 24 peptide--protein runs and
+# these ten protein--protein references.  2wo3-xEFN4_TOPdock is deliberately
+# excluded here because it is already running as LSF job 105455.
+1kgy-xEFN1_2dock
+1kgy-xEFN1_3dock
+1kgy-xEFN1_TOPdock
+1kgy-xEFN2_2dock
+1kgy-xEFN2_3dock
+1kgy-xEFN2_TOPdock
+1kgy-xEFN3_2dock
+1kgy-xEFN3_3dock
+1kgy-xEFN3_TOPdock
+1kgy-xEFN4_2dock
+1kgy-xEFN4_3dock
+1kgy-xEFN4_TOPdock
+2wo3-xEFN1_2dock
+2wo3-xEFN1_3dock
+2wo3-xEFN1_TOPdock
+2wo3-xEFN2_2dock
+2wo3-xEFN2_3dock
+2wo3-xEFN2_TOPdock
+2wo3-xEFN3_2dock
+2wo3-xEFN3_3dock
+2wo3-xEFN3_TOPdock
+2wo3-xEFN4_2dock
+2wo3-xEFN4_3dock
+1kgy_ref
+1kgy_ref2
+1shw_ref1
+1shw_ref2
+2wo2_ref
+2wo3-ref
+2wo3_ref2
+2wo3_ref3
+4bk5_ref
+4bkf_ref

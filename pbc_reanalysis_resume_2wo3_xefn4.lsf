@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+#BSUB -J pbc_resume_2wo3_xefn4
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 10:00
+#BSUB -n 2
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/triton/home/jxs794/Molecular_Dynamics/2wo3-xEFN4_TOPdock/pbc_resume.%J.out
+#BSUB -eo /projectnb/triton/home/jxs794/Molecular_Dynamics/2wo3-xEFN4_TOPdock/pbc_resume.%J.err
+
+# Job 105455 already completed the PBC-safe trajectory conversion.  Resume
+# only the expensive downstream interface and dossier stages from that result.
+set -euo pipefail
+RUN=/projectnb/triton/home/jxs794/Molecular_Dynamics/2wo3-xEFN4_TOPdock
+PYMACS=/projectnb/triton/home/jxs794/Pymacs
+cd "$RUN"
+test -s Final_Trajectory.xtc
+test -s Final_Trajectory.pdb
+test -s atomIndex.txt
+
+module purge
+module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export OMP_NUM_THREADS=2
+
+python "$PYMACS/3C_Interface_RIN.py" \
+  --topo Final_Trajectory.pdb --traj Final_Trajectory.xtc \
+  --atomindex atomIndex.txt --outdir Analysis_Results/Interface_RIN \
+  --peptide-chains B --force-recompute --headless
+python "$PYMACS/4D_Peptide_NETWORX.py" \
+  --interface-dir Analysis_Results/Interface_RIN --peptide-chain B \
+  --outdir Analysis_Results/Peptide_NETWORX
+python "$PYMACS/5_PyMACS_Result_Dashboard.py" --root "$RUN"
+test -s Analysis_Results/Interface_RIN/Interface_RIN_Explorer.html
+test -s Analysis_Results/PyMACS_Result_Dashboard.html
