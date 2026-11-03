@@ -54,6 +54,13 @@ python "$PYMACS/3C_Interface_RIN.py" \
 test -s Analysis_Results/Interface_RIN/Interface_RIN_Explorer.html
 test ! -e Analysis_Results/Peptide_NETWORX/Peptide_NETWORX_Explorer.html
 
+# Protein--protein systems have no ligand Q(x).  Publish the matching
+# protein-fold native-contact Q from the same PBC-safe display trajectory.
+python "$PYMACS/pymacs_compute_protein_native_contact_q.py" \
+  --topology Final_Trajectory.pdb --trajectory Final_Trajectory.xtc \
+  --outdir Analysis_Results
+test -s Analysis_Results/protein_native_contact_q.csv
+
 python "$PYMACS/5_PyMACS_Result_Dashboard.py" --root "$RUN"
 test -s Analysis_Results/PyMACS_Result_Dashboard.html
 echo "[$(date -Is)] 1kgy_ref protein--protein presentation test complete"

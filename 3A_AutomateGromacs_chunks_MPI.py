@@ -2112,6 +2112,54 @@ def dispatch_to_interface_rin():
     checkpoint("chk_EINTERFACE.txt")
     print("✅ STEP E-INTERFACE complete.")
 
+
+def dispatch_to_protein_native_contact_q():
+    """Publish protein-fold Q for ligandless multi-chain trajectories.
+
+    The ordinary ligand/peptide branch calculates this metric inline during
+    Step E.  Protein--protein systems instead take the standalone interface
+    branch above, so invoke the same established calculation explicitly here
+    rather than leaving their dossier Q readout unpopulated.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pymacs_compute_protein_native_contact_q.py")
+    if not os.path.isfile(script):
+        raise SystemExit(
+            "Protein interface Q was requested, but pymacs_compute_protein_native_contact_q.py was not found beside 3A."
+        )
+
+    numerical_outputs = [
+        os.path.join(OUTPUT_DIR, "protein_native_contact_q.csv"),
+        os.path.join(OUTPUT_DIR, "protein_native_contact_q_summary.txt"),
+    ]
+    plot_outputs = [os.path.join(OUTPUT_DIR, "protein_native_contact_q.png")]
+    parameters = {
+        "contact_cutoff_A": 8.0,
+        "minimum_sequence_separation": 3,
+        "frame_step": int(args.interface_frame_step),
+    }
+    if _stage_cache_ready("EINTERFACEQ", "chk_EINTERFACE_Q.txt", numerical_outputs, plot_outputs, parameters):
+        print("⏭️ STEP E-INTERFACE-Q skipped (checkpoint found and reusable data cache is valid).")
+        return
+
+    cmd = [
+        sys.executable,
+        script,
+        "--topology", args.topo,
+        "--trajectory", args.traj,
+        "--outdir", OUTPUT_DIR,
+        "--stride", str(args.interface_frame_step),
+    ]
+    print(f"🚀 Launching protein native-contact Q with command: {' '.join(cmd)}")
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        raise SystemExit(rc)
+    if not all(os.path.isfile(path) and os.path.getsize(path) > 0 for path in numerical_outputs + plot_outputs):
+        raise SystemExit("❌ Protein native-contact Q completed but expected output files were not found.")
+
+    _record_stage_manifest("EINTERFACEQ", numerical_outputs, plot_outputs, parameters)
+    checkpoint("chk_EINTERFACE_Q.txt")
+    print("✅ STEP E-INTERFACE-Q complete.")
+
 def safe_rmsd(traj, ref, frame, atom_indices):
     """Try modern MDTraj rst syntax; fall back when unsupported."""
     try:
@@ -3209,8 +3257,10 @@ if INTERFACE_RIN_MODE and not args.skip_interface_rin:
                     dispatch_to_interface_rin()
                 else:
                     print("⏭️ STEP E-INTERFACE skipped by user choice.")
+    dispatch_to_protein_native_contact_q()
 elif INTERFACE_RIN_MODE and args.skip_interface_rin:
     print("⏭️ STEP E-INTERFACE skipped due to --skip-interface-rin.")
+    dispatch_to_protein_native_contact_q()
 elif not PARTNER_MODE:
     print("⏭️ Skipping ligand-contact/NETWORX analysis because this is apo single-chain or protein-centric mode.")
 else:
