@@ -1004,7 +1004,8 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
             temporary.replace(preview)
             preview_info = {"frames": int(len(indices)), "source_frames": int(len(universe.trajectory)), "times_ns": times_ns, "atoms": int(shown.n_atoms), "centering": "protein-backbone aligned to the first sampled frame"}
             metadata.write_text(json.dumps(preview_info, indent=2), encoding="utf-8")
-        except Exception:
+        except Exception as error:
+            print(f"Trajectory preview generation skipped: {error}")
             temporary.unlink(missing_ok=True)
     if not preview_info:
         try:
