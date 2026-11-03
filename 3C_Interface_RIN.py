@@ -1258,6 +1258,7 @@ def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_co
                 "atom_a": text(row.LigandAtomName), "atom_b": text(row.ProteinAtomName),
                 "donor": text(row.DonorAtom), "acceptor": text(row.AcceptorAtom),
                 "hydrogen": text(row.HydrogenEvidenceAtom), "frames": int(row.frames),
+                "total_frames": int(frame_count),
                 "fraction": round(float(row.frames) / max(1, frame_count), 6),
                 "distance_a": None if pd.isna(row.mean_distance) else round(float(row.mean_distance), 2),
                 "angle_deg": None if pd.isna(row.mean_angle) else round(float(row.mean_angle), 1),
