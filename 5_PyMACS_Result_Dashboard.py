@@ -990,6 +990,7 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
     # down-sampled browser preview.
     pymol_loader = asset_dir / "Open_in_PyMOL.pml"
     pymol_bundle = asset_dir / "PyMACS_PyMOL_full_trajectory_session.zip"
+    pymol_session = asset_dir / "PyMACS_centered_trajectory_session.pse"
     available_sources = [name for name in source_files if (asset_dir / name).is_file()]
     if len(available_sources) == len(source_files):
         pymol_loader.write_text(textwrap.dedent("""\
@@ -1080,6 +1081,11 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
     # 3Dmol uses an absolutely positioned canvas; anchor it to this stage
     # instead of allowing it to escape to the top of the dossier page.
     raw_links = '<style>.trajectory-stage{position:relative}</style>'
+    if pymol_session.is_file():
+        raw_links += (
+            f'<a href="{escape(pymol_session.relative_to(analysis).as_posix())}" download>'
+            'Download ready-to-open PyMOL session (.pse)</a>'
+        )
     if pymol_bundle.is_file():
         raw_links += (
             f'<a href="{escape(pymol_bundle.relative_to(analysis).as_posix())}" download>'
