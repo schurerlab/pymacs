@@ -236,21 +236,21 @@ def wrap_trajectory(env, ligand_code=None, component_group_name=None):
     if os.path.exists("index.ndx") and not index_has_group("index.ndx", group_name):
         fallback = f"Protein_{ligand_code}" if ligand_code else "Protein"
         group_name = fallback if index_has_group("index.ndx", fallback) else "Protein"
-    log(f"📦 Re-centering & wrapping trajectory → Final_Trajectory.xtc (group: {group_name})")
+    log(f"📦 Clustering, centering & compacting trajectory → Final_Trajectory.xtc (group: {group_name})")
 
     # Use index group from index.ndx (Protein + Ligand)
     if os.path.exists("index.ndx") and index_has_group("index.ndx", group_name):
         cmd = (
-            f"bash -lc \"printf '{group_name}\\n{group_name}\\n' | "
+            f"bash -lc \"printf '{group_name}\\n{group_name}\\n{group_name}\\n' | "
             "gmx trjconv -s md_0_1.tpr -f md_0_1.xtc "
-            "-o Final_Trajectory.xtc -n index.ndx -pbc mol -center\""
+            "-o Final_Trajectory.xtc -n index.ndx -pbc cluster -center -ur compact\""
         )
     else:
-        # fallback: just center on protein
+        # fallback: use GROMACS's built-in Protein group for all three roles.
         cmd = (
-            "bash -lc \"printf 'Protein\\nProtein\\n' | gmx trjconv ..."
+            "bash -lc \"printf 'Protein\\nProtein\\nProtein\\n' | "
             "gmx trjconv -s md_0_1.tpr -f md_0_1.xtc "
-            "-o Final_Trajectory.xtc -pbc mol -center\""
+            "-o Final_Trajectory.xtc -pbc cluster -center -ur compact\""
         )
 
     run(cmd, env=env, shell=True, check=True)

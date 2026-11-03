@@ -93,6 +93,15 @@ except Exception as exc:  # pragma: no cover - environment-dependent
     distance_array = None
     MDANALYSIS_IMPORT_ERROR = exc
 
+
+def current_periodic_box(universe):
+    """Use the active unit cell whenever a contact distance is evaluated."""
+    dimensions = getattr(universe.trajectory.ts, "dimensions", None)
+    if dimensions is None:
+        return None
+    values = np.asarray(dimensions, dtype=float)
+    return values if values.size >= 3 and np.all(np.isfinite(values[:3])) and np.all(values[:3] > 0) else None
+
 with suppress(ImportError):
     from tqdm.auto import tqdm  # type: ignore
 
@@ -1935,7 +1944,7 @@ def compute_residue_distance_summary(
 
     for _, frame in iter_with_progress(iter_frames, f"Pocket scan ({mode})"):
         universe.trajectory[frame]
-        dist_matrix = distance_array(ligand.positions, protein.positions)
+        dist_matrix = distance_array(ligand.positions, protein.positions, box=current_periodic_box(universe))
         residue_min = np.array(
             [float(np.min(dist_matrix[:, local_indices])) for local_indices in residue_local_indices],
             dtype=float,
@@ -3077,7 +3086,7 @@ def run_contact_analysis(
 
     for _, frame in iter_with_progress(frame_indices, "Computing ligand contacts"):
         universe.trajectory[frame]
-        dist_matrix = distance_array(ligand.positions, protein.positions)
+        dist_matrix = distance_array(ligand.positions, protein.positions, box=current_periodic_box(universe))
         residue_min_distances = np.array(
             [float(np.min(dist_matrix[:, local_indices])) for local_indices in residue_local_indices],
             dtype=float,
@@ -3657,7 +3666,8 @@ def run_water_bridge_analysis(
 
     for _, frame in iter_with_progress(frame_indices, "Computing water bridges"):
         raw_universe.trajectory[frame]
-        ligand_water_dist = distance_array(raw_ligand.positions, water_oxygens.positions)
+        box = current_periodic_box(raw_universe)
+        ligand_water_dist = distance_array(raw_ligand.positions, water_oxygens.positions, box=box)
         ligand_water_min = ligand_water_dist.min(axis=0)
         close_water_indices = np.where(ligand_water_min <= bridge_cutoff)[0]
         pocket_water_indices = np.where(ligand_water_min <= water_pocket_cutoff)[0]
@@ -3681,8 +3691,8 @@ def run_water_bridge_analysis(
             continue
 
         close_waters = water_oxygens[close_water_indices]
-        dist_wp = distance_array(close_waters.positions, raw_protein.positions)
-        ligand_pocket_dist = distance_array(raw_ligand.positions, raw_protein.positions)
+        dist_wp = distance_array(close_waters.positions, raw_protein.positions, box=box)
+        ligand_pocket_dist = distance_array(raw_ligand.positions, raw_protein.positions, box=box)
         residue_ligand_min = np.array(
             [float(np.min(ligand_pocket_dist[:, local_indices])) for local_indices in residue_local_indices],
             dtype=float,

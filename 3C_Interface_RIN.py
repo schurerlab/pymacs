@@ -64,6 +64,20 @@ except Exception:  # pragma: no cover
     distance_array = None
 
 
+def current_periodic_box(universe):
+    """Return the active unit cell for minimum-image distance calculations.
+
+    Final trajectories are exported clustered and centered, but retaining this
+    calculation-level safeguard prevents a wrapped coordinate image from being
+    mistaken for a lost peptide–protein contact.
+    """
+    dimensions = getattr(universe.trajectory.ts, "dimensions", None)
+    if dimensions is None:
+        return None
+    values = np.asarray(dimensions, dtype=float)
+    return values if values.size >= 3 and np.all(np.isfinite(values[:3])) and np.all(values[:3] > 0) else None
+
+
 if not hasattr(mpl_cbook, "iterable"):
     def _mpl_iterable_compat(obj):
         if isinstance(obj, (str, bytes)):
@@ -553,16 +567,17 @@ def scan_interface_shards(universe, chain_pairs, frame_indices, cutoff_ang, work
         for global_pos, frame_index in enumerate(frame_indices[start:stop], start):
             universe.trajectory[frame_index]
             time_ns = float(universe.trajectory.time) / 1000.0
+            box = current_periodic_box(universe)
             for left_entry, right_entry, left, right in prepared:
                 pair_label = f"{left_entry['display_label']}__{right_entry['display_label']}"
                 contacts, distances = capped_distance(left["heavy_group"].positions, right["heavy_group"].positions,
-                                                      max_cutoff=cutoff_ang, return_distances=True)
+                                                      max_cutoff=cutoff_ang, return_distances=True, box=box)
                 minima = {}
                 for (i, j), dist in zip(contacts, distances):
                     a, b = left["atom_to_residue"][i], right["atom_to_residue"][j]
                     if a >= 0 and b >= 0 and ((a, b) not in minima or dist < minima[(a, b)]):
                         minima[(a, b)] = float(dist)
-                minimum = float(np.min(distances)) if len(distances) else (float(np.min(distance_array(left["heavy_group"].positions, right["heavy_group"].positions))) if left["heavy_group"].n_atoms and right["heavy_group"].n_atoms else math.nan)
+                minimum = float(np.min(distances)) if len(distances) else (float(np.min(distance_array(left["heavy_group"].positions, right["heavy_group"].positions, box=box))) if left["heavy_group"].n_atoms and right["heavy_group"].n_atoms else math.nan)
                 for (a, b), dist in minima.items():
                     ra, rb = left["residues"][a], right["residues"][b]
                     pair_id = make_pair_id(left_entry["display_label"], right_entry["display_label"], ra["label"], rb["label"])
@@ -638,6 +653,7 @@ def analyze_chain_pair_contacts(universe, left_entry, right_entry, frame_indices
     for frame_counter, frame_index in enumerate(iterator):
         universe.trajectory[frame_index]
         analyzed_times_ns.append(float(universe.trajectory.time) / 1000.0)
+        box = current_periodic_box(universe)
         pos_left = left["heavy_group"].positions
         pos_right = right["heavy_group"].positions
 
@@ -646,6 +662,7 @@ def analyze_chain_pair_contacts(universe, left_entry, right_entry, frame_indices
             pos_right,
             max_cutoff=cutoff_ang,
             return_distances=True,
+            box=box,
         )
 
         frame_pair_min = {}
@@ -663,7 +680,7 @@ def analyze_chain_pair_contacts(universe, left_entry, right_entry, frame_indices
                 if current is None or dist < current:
                     frame_pair_min[pair_key] = float(dist)
         else:
-            full_distances = distance_array(pos_left, pos_right)
+            full_distances = distance_array(pos_left, pos_right, box=box)
             min_distance_ang = float(np.min(full_distances)) if full_distances.size else math.nan
 
         for pair_key, dist in frame_pair_min.items():

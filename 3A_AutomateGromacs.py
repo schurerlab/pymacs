@@ -1476,10 +1476,15 @@ if not (file_exists("Final_Trajectory.xtc") and file_exists("Final_Trajectory.pd
 
     print("🎞️ Creating Final_Trajectory.xtc/pdb ...")
 
+    # Build an analysis trajectory, never a new simulation trajectory.  The
+    # three selections are cluster / centre / output.  Clustering places
+    # interacting chains in their nearest periodic image before centering the
+    # complex, preventing a bound peptide or ligand appearing across a box
+    # edge in downstream calculations and viewers.
     run_cmd(
-        f"printf '{group}\n{group}\n' | "
+        f"printf '{group}\n{group}\n{group}\n' | "
         f"gmx trjconv -s md_0_1.tpr -f md_0_1.xtc "
-        f"-o Final_Trajectory.xtc -n index.ndx -pbc mol -center"
+        f"-o Final_Trajectory.xtc -n index.ndx -pbc cluster -center -ur compact"
     )
 
     run_cmd(
@@ -1763,6 +1768,7 @@ def best_hbond_between_groups(ligand_group, ligand_heavy, ligand_hydrogens, resi
     dists = distances.distance_array(
         ligand_group.atoms[ligand_heavy].positions,
         residue_group.atoms[residue_heavy].positions,
+        box=getattr(ligand_group.universe, "dimensions", None),
     )
     if dists.size == 0:
         return None
@@ -3197,7 +3203,8 @@ else:
 
                     dists = distances.distance_array(
                         ligand_positions,
-                        res_atoms.positions
+                        res_atoms.positions,
+                        box=getattr(pocket_ligand.universe, "dimensions", None),
                     )
 
                     if dists.size == 0:

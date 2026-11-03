@@ -1459,10 +1459,12 @@ if not (file_exists("Final_Trajectory.xtc") and file_exists("Final_Trajectory.pd
 
     print("🎞️ Creating Final_Trajectory.xtc/pdb ...")
 
+    # selections: cluster / centre / output; this is a PBC-safe analysis copy
+    # of the raw MD, not a modification of the simulation itself.
     run_cmd(
-        f"printf '{group}\n{group}\n' | "
+        f"printf '{group}\n{group}\n{group}\n' | "
         f"gmx trjconv -s md_0_1.tpr -f md_0_1.xtc "
-        f"-o Final_Trajectory.xtc -n index.ndx -pbc mol -center"
+        f"-o Final_Trajectory.xtc -n index.ndx -pbc cluster -center -ur compact"
     )
 
     run_cmd(
@@ -3164,7 +3166,8 @@ else:
 
                     dists = distances.distance_array(
                         ligand_positions,
-                        res_atoms.positions
+                        res_atoms.positions,
+                        box=getattr(pocket_ligand.universe, "dimensions", None),
                     )
 
                     if dists.size == 0:
