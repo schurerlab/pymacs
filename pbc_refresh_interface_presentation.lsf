@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#BSUB -J pbc_refresh_interface_presentation
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 01:00
+#BSUB -n 2
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/triton/home/jxs794/Molecular_Dynamics/2wo3-xEFN4_TOPdock/pbc_presentation.%J.out
+#BSUB -eo /projectnb/triton/home/jxs794/Molecular_Dynamics/2wo3-xEFN4_TOPdock/pbc_presentation.%J.err
+
+# Presentation-only refresh.  It reuses the completed PBC-safe trajectory
+# analysis and does not rerun MD or rescan trajectory frames.
+set -euo pipefail
+RUN=/projectnb/triton/home/jxs794/Molecular_Dynamics/2wo3-xEFN4_TOPdock
+PYMACS=/projectnb/triton/home/jxs794/Pymacs
+cd "$RUN"
+
+module purge
+module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export OMP_NUM_THREADS=2
+
+# Without --force-recompute, 3C takes its compatible cache path and only
+# rebuilds the self-contained explorer from the saved tables/events.
+python "$PYMACS/3C_Interface_RIN.py" \
+  --topo Final_Trajectory.pdb --traj Final_Trajectory.xtc \
+  --atomindex atomIndex.txt --outdir Analysis_Results/Interface_RIN \
+  --peptide-chains B --headless
+python "$PYMACS/4D_Peptide_NETWORX.py" \
+  --interface-dir Analysis_Results/Interface_RIN --peptide-chain B \
+  --outdir Analysis_Results/Peptide_NETWORX
+python "$PYMACS/5_PyMACS_Result_Dashboard.py" --root "$RUN"
+
+test -s Analysis_Results/Interface_RIN/Interface_RIN_Explorer.html
+test -s Analysis_Results/Peptide_NETWORX/Peptide_NETWORX_Explorer.html
+test -s Analysis_Results/PyMACS_Result_Dashboard.html
