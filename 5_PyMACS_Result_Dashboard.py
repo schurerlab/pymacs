@@ -417,6 +417,26 @@ GRAPH_GUIDES = {
         "Q is the fraction of reference contacts retained from the first analyzed frame. Depending on the selection, it reports a ligand/partner interface or protein-fold contact retention.",
         "Higher, sustained Q means the stated reference interface or fold is retained. Q evaluates persistence relative to that model; it does not establish experimental binding affinity.",
     ),
+    "distance_trace": (
+        "Closest peptide–protein separation over time",
+        "At every sampled frame this trace keeps only the shortest measured gap between the peptide and protein. It is a nearest-neighbour readout, not an average of all distances.",
+        "A mostly steady low band means the interface stays close. Brief tall spikes mean the closest measured gap temporarily increased; compare them with the contact timeline before calling a dissociation.",
+    ),
+    "distance_distribution": (
+        "Residue separation distributions",
+        "Each violin collects the measured gaps for one protein residue whenever that residue was recorded as contacting the peptide. Wider sections mean that distance occurred more often among those recorded events.",
+        "Look first at the middle line and box: smaller typical gaps and a compact shape suggest a consistently close partner. These are observed contact events only, not every trajectory frame.",
+    ),
+    "distance_ranking": (
+        "Persistent-contact distance ranking",
+        "This ranks protein residues using their typical measured gap, prioritizing residues that recur in the contact evidence. It condenses many individual contact events into an easy comparison.",
+        "Shorter bars mean a smaller typical observed separation. Use the hover values and contact-persistence panels to distinguish a close rare event from a close recurring partner.",
+    ),
+    "contact_episode": (
+        "Uninterrupted observed contact episodes",
+        "This measures the longest run of sampled frames in which each protein residue was recorded in contact with the peptide.",
+        "Longer bars mean a contact remained present across more consecutive sampled frames. It is a sampled-trajectory continuity measure, not a chemical residence time or binding lifetime.",
+    ),
     "generic": (
         "Analysis readout",
         "This plot is computed directly from the local trajectory analysis output shown in its axes.",
@@ -448,10 +468,10 @@ def graph_guide_key(name: str) -> str:
     return "generic"
 
 
-def guide_html(key: str) -> str:
+def guide_html(key: str, prompt: str = "ⓘ ELI5: what am I looking at?") -> str:
     title, meaning, expected = GRAPH_GUIDES.get(key, GRAPH_GUIDES["generic"])
     return (
-        '<details class="guide"><summary>ⓘ ELI5: what am I looking at?</summary>'
+        f'<details class="guide"><summary>{escape(prompt)}</summary>'
         f'<p><b>What this is:</b> {escape(title)}. {escape(meaning)}</p>'
         f'<p><b>How to read it:</b> {escape(expected)}</p>'
         '<p><b>Keep in mind:</b> One graph is a clue, not a verdict. Check the matching stability, contact, and structure panels before making a biological claim.</p></details>'
@@ -1454,7 +1474,7 @@ def distance_carousel_html(analysis: Path) -> str:
         )
         return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
-    slides: list[tuple[str, str]] = []
+    slides: list[tuple[str, str, str]] = []
     timeseries = analysis / "Interface_RIN" / "interface_contact_timeseries.csv"
     try:
         trace = pd.read_csv(timeseries)
@@ -1485,7 +1505,7 @@ def distance_carousel_html(analysis: Path) -> str:
                          xaxis={"title": "Time (ns)", "gridcolor": GRID},
                          yaxis={"title": "Closest separation (Å)", "gridcolor": GRID},
                          annotations=[{"text": f"Observed range (5th–95th percentile): {q05:.2f}–{q95:.2f} Å · no missing frame is plotted as zero", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
-    slides.append(("Closest separation", graph_div(figure)))
+    slides.append(("Closest separation", graph_div(figure), "distance_trace"))
 
     per_residue = events.groupby("Residue")["Distance"].agg(["count", "median", "mean"]).sort_values("count", ascending=False).head(12)
     selected = events[events["Residue"].isin(per_residue.index)].copy()
@@ -1502,7 +1522,7 @@ def distance_carousel_html(analysis: Path) -> str:
                          xaxis={"title": "Observed peptide–residue separation (Å)", "gridcolor": GRID},
                          yaxis={"title": "Protein residue", "gridcolor": GRID},
                          annotations=[{"text": "Violin width reflects recorded contact-event samples only; boxes show median and quartiles.", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
-    slides.append(("Residue distributions", graph_div(figure)))
+    slides.append(("Residue distributions", graph_div(figure), "distance_distribution"))
 
     frequency = next(iter(sorted(analysis.glob("*_contact_frequency_filtered.csv"))), None)
     rank = per_residue.reset_index().rename(columns={"index": "Residue"})
@@ -1527,7 +1547,7 @@ def distance_carousel_html(analysis: Path) -> str:
                          xaxis={"title": "Median observed separation (Å)", "gridcolor": GRID},
                          yaxis={"title": "Protein residue", "gridcolor": GRID},
                          annotations=[{"text": "Ranked by published geometric-contact occupancy when available; otherwise by observed event count.", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
-    slides.append(("Persistent-contact ranking", graph_div(figure)))
+    slides.append(("Persistent-contact ranking", graph_div(figure), "distance_ranking"))
 
     frame_times = np.sort(events["Time_ns"].unique())
     default_step = float(np.median(np.diff(frame_times))) if len(frame_times) > 1 else 0.0
@@ -1555,14 +1575,18 @@ def distance_carousel_html(analysis: Path) -> str:
                              xaxis={"title": "Episode duration at sampled-frame resolution (ns)", "gridcolor": GRID},
                              yaxis={"title": "Protein residue", "gridcolor": GRID},
                              annotations=[{"text": "Episodes break when a residue is absent from the recorded contact-event frame; this is not an inferred binding lifetime.", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
-        slides.append(("Contact episodes", graph_div(figure)))
+        slides.append(("Contact episodes", graph_div(figure), "contact_episode"))
     if not slides:
         return ""
-    rendered = "".join(f'<div class="distance-slide{" is-active" if index == 0 else ""}" data-distance-slide data-title="{escape(title)}">{content}</div>' for index, (title, content) in enumerate(slides))
+    rendered = "".join(
+        f'<div class="distance-slide{" is-active" if index == 0 else ""}" data-distance-slide data-title="{escape(title)}">'
+        f'{content}{guide_html(guide, "ⓘ Explain this graph")}</div>'
+        for index, (title, content, guide) in enumerate(slides)
+    )
     return f'''<style>.distance-carousel{{border-radius:21px;padding:20px;margin-top:18px;background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.distance-carousel-controls{{display:flex;align-items:center;gap:10px;justify-content:center;margin:0 0 12px;flex-wrap:wrap}}.distance-carousel-controls button{{border:1px solid #285a79;border-radius:10px;background:#0a253a;color:#cfe8ff;padding:9px 12px;font:800 .82rem inherit;cursor:pointer}}.distance-carousel-controls button:hover{{background:#116887;color:#fff;border-color:#35d0ff}}.distance-carousel-controls span{{min-width:205px;text-align:center;color:#7aa6d9;font-size:.88rem;font-weight:700}}.distance-carousel-stage{{border:1px solid rgba(53,208,255,.28);border-radius:16px;background:#070b14;overflow:hidden}}.distance-slide{{display:none;margin:0;padding:7px}}.distance-slide.is-active{{display:block}}.distance-evidence{{margin:12px 3px 3px;color:#a9c1dc;font-size:.84rem;line-height:1.45}}</style><section class="distance-carousel" aria-label="Peptide–protein distance analysis">
 <div class="section-head"><div><div class="eyebrow">Distance evidence · observed events only</div><h2>Peptide–protein distance analysis</h2><p>Four complementary views make separation, persistence, residue specificity, and contact continuity readable without treating a missing contact as a zero-distance measurement.</p></div></div>
 <div class="distance-carousel-controls"><button type="button" data-distance-prev aria-label="Previous distance view">← Previous</button><span data-distance-status></span><button type="button" data-distance-next aria-label="Next distance view">Next →</button></div>
-<div class="distance-carousel-stage">{rendered}</div><p class="distance-evidence">All summaries are derived from <code>{escape(events_path.name)}</code>{" and " + escape(timeseries.name) if timeseries.is_file() else ""}. Use the exact source files in the report downloads for full-resolution values.</p>{guide_html("contact_frequency")}</section><script>(()=>{{const root=document.currentScript.previousElementSibling,slides=[...root.querySelectorAll('[data-distance-slide]')],status=root.querySelector('[data-distance-status]');let index=0;const render=()=>{{slides.forEach((slide,i)=>slide.classList.toggle('is-active',i===index));status.textContent=`${{index+1}} / ${{slides.length}} · ${{slides[index].dataset.title}}`;requestAnimationFrame(()=>slides[index].querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot)))}};root.querySelector('[data-distance-prev]').addEventListener('click',()=>{{index=(index-1+slides.length)%slides.length;render()}});root.querySelector('[data-distance-next]').addEventListener('click',()=>{{index=(index+1)%slides.length;render()}});render()}})();</script>'''
+<div class="distance-carousel-stage">{rendered}</div><p class="distance-evidence">All summaries are derived from <code>{escape(events_path.name)}</code>{" and " + escape(timeseries.name) if timeseries.is_file() else ""}. Use the exact source files in the report downloads for full-resolution values.</p></section><script>(()=>{{const root=document.currentScript.previousElementSibling,slides=[...root.querySelectorAll('[data-distance-slide]')],status=root.querySelector('[data-distance-status]');let index=0;const render=()=>{{slides.forEach((slide,i)=>slide.classList.toggle('is-active',i===index));status.textContent=`${{index+1}} / ${{slides.length}} · ${{slides[index].dataset.title}}`;requestAnimationFrame(()=>slides[index].querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot)))}};root.querySelector('[data-distance-prev]').addEventListener('click',()=>{{index=(index-1+slides.length)%slides.length;render()}});root.querySelector('[data-distance-next]').addEventListener('click',()=>{{index=(index+1)%slides.length;render()}});render()}})();</script>'''
 
 
 def contact_events_plot(csv_file: Path, title: str, distance_mode: bool = False) -> str | None:
