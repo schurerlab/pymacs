@@ -1015,7 +1015,9 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
     if not preview.is_file():
         return '<section class="trajectory-card"><div class="eyebrow">Trajectory playback</div><h2>Trajectory preview preparation did not complete</h2><p>The original PDB/XTC files are retained, but the browser preview could not be generated on this host.</p></section>'
     preview_href = preview.relative_to(analysis).as_posix()
-    raw_links = "".join(
+    # 3Dmol uses an absolutely positioned canvas; anchor it to this stage
+    # instead of allowing it to escape to the top of the dossier page.
+    raw_links = '<style>.trajectory-stage{position:relative}</style>' + "".join(
         f'<a href="{escape((asset_dir / name).relative_to(analysis).as_posix())}" download>Download {escape(name)}</a>'
         for name in source_files if (asset_dir / name).is_file()
     )
