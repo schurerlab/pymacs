@@ -13,6 +13,7 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
 import subprocess
 import textwrap
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ MAX_RENDER_POINTS = 2000
 MAX_HEATMAP_TIMEPOINTS = 250
 MAX_EVENT_POINTS = 12000
 MAX_TABLE_ROWS = 50000
+TRAJECTORY_PREVIEW_FRAMES = 151
 
 # The analysis pipeline intentionally writes both general-purpose calculations
 # and specialised diagnostics.  Some of their traces describe essentially the
@@ -933,6 +935,95 @@ def representative_snapshots_html(root: Path, analysis: Path) -> str:
         for label, path in available
     )
     return f'''<style>.snapshot-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px;margin-top:14px}}.snapshot-link{{display:block;text-decoration:none;border:1px solid #27476a;border-radius:12px;padding:12px;background:#0b1524;color:#cfe8ff}}.snapshot-link:hover{{border-color:#35d0ff;background:#102945}}.snapshot-link b,.snapshot-link span{{display:block}}.snapshot-link span{{color:#7aa6d9;font-size:.82rem;margin-top:4px}}</style><section class="snapshot-grid" aria-label="Representative trajectory snapshots">{cards}</section>'''
+
+
+def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext) -> str:
+    """Publish a lazy browser-preview trajectory plus its original local assets.
+
+    The full XTC is retained as a downloadable research asset.  Browsers load
+    only a centered, solvent-free, evenly sampled multi-model PDB after an
+    explicit click, so opening an ordinary dossier never downloads trajectory
+    coordinates or allocates WebGL memory for them.
+    """
+    topology, trajectory = root / "Final_Trajectory.pdb", root / "Final_Trajectory.xtc"
+    if not (topology.is_file() and trajectory.is_file()):
+        return (
+            '<section class="trajectory-card"><div class="eyebrow">Trajectory playback</div>'
+            '<h2>Interactive simulation playback is not available yet</h2>'
+            '<p>The final topology PDB and XTC must both be published for this run. The ordinary Structure tab remains available.</p></section>'
+        )
+    asset_dir = analysis / "Trajectory_Playback"
+    preview = asset_dir / "centered_trajectory_preview.pdb"
+    metadata = asset_dir / "preview_metadata.json"
+    source_files = ("Final_Trajectory.pdb", "Final_Trajectory.xtc", "binding_pocket_only.pdb", "binding_pocket_only.xtc")
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    # Keep the exact source files close to the published report.  A hard link
+    # avoids duplicate storage on Triton; copy2 is the portable fallback.
+    for name in source_files:
+        source, target = root / name, asset_dir / name
+        if not source.is_file():
+            continue
+        try:
+            if target.exists() and target.stat().st_size == source.stat().st_size:
+                continue
+            target.unlink(missing_ok=True)
+            try:
+                os.link(source, target)
+            except OSError:
+                shutil.copy2(source, target)
+        except OSError:
+            pass
+
+    preview_info: dict[str, object] = {}
+    needs_preview = not preview.is_file() or preview.stat().st_mtime < max(topology.stat().st_mtime, trajectory.stat().st_mtime)
+    if needs_preview:
+        temporary = preview.with_suffix(".pdb.partial")
+        try:
+            import MDAnalysis as mda
+            from MDAnalysis.analysis import align
+
+            universe = mda.Universe(str(topology), str(trajectory))
+            shown = universe.select_atoms("protein")
+            backbone = universe.select_atoms("protein and backbone")
+            if not shown.n_atoms or not backbone.n_atoms or not len(universe.trajectory):
+                raise ValueError("no protein/peptide atoms available for trajectory preview")
+            universe.trajectory[0]
+            reference = backbone.positions.copy()
+            reference_center = reference.mean(axis=0)
+            indices = np.unique(np.linspace(0, len(universe.trajectory) - 1, min(TRAJECTORY_PREVIEW_FRAMES, len(universe.trajectory)), dtype=int))
+            times_ns: list[float] = []
+            with mda.coordinates.PDB.PDBWriter(str(temporary), multiframe=True) as writer:
+                for frame_index in indices:
+                    universe.trajectory[int(frame_index)]
+                    moving = backbone.positions.copy()
+                    moving_center = moving.mean(axis=0)
+                    rotation, _ = align.rotation_matrix(moving - moving_center, reference - reference_center)
+                    shown.positions = (shown.positions - moving_center) @ rotation.T + reference_center
+                    writer.write(shown)
+                    times_ns.append(float(universe.trajectory.time) / 1000.0)
+            temporary.replace(preview)
+            preview_info = {"frames": int(len(indices)), "source_frames": int(len(universe.trajectory)), "times_ns": times_ns, "atoms": int(shown.n_atoms), "centering": "protein-backbone aligned to the first sampled frame"}
+            metadata.write_text(json.dumps(preview_info, indent=2), encoding="utf-8")
+        except Exception:
+            temporary.unlink(missing_ok=True)
+    if not preview_info:
+        try:
+            preview_info = json.loads(metadata.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            preview_info = {}
+    if not preview.is_file():
+        return '<section class="trajectory-card"><div class="eyebrow">Trajectory playback</div><h2>Trajectory preview preparation did not complete</h2><p>The original PDB/XTC files are retained, but the browser preview could not be generated on this host.</p></section>'
+    preview_href = preview.relative_to(analysis).as_posix()
+    raw_links = "".join(
+        f'<a href="{escape((asset_dir / name).relative_to(analysis).as_posix())}" download>Download {escape(name)}</a>'
+        for name in source_files if (asset_dir / name).is_file()
+    )
+    peptide_chains = ",".join(context.partner_chain_ids) if context.partner_kind == "peptide" else ""
+    frame_count = int(preview_info.get("frames", 0))
+    source_frame_count = int(preview_info.get("source_frames", frame_count))
+    time_values = preview_info.get("times_ns", [])
+    last_time = float(time_values[-1]) if isinstance(time_values, list) and time_values else 0.0
+    return f'''<style>.trajectory-card{{border-radius:21px;padding:20px;margin-top:18px;background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.trajectory-toolbar{{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:14px 0 10px}}.trajectory-toolbar button{{border:1px solid #285a79;border-radius:10px;background:#0a253a;color:#dff5ff;padding:9px 12px;font:800 .82rem inherit;cursor:pointer}}.trajectory-toolbar button:hover:not(:disabled){{background:#116887;border-color:#35d0ff}}.trajectory-toolbar button:disabled{{opacity:.46;cursor:not-allowed}}.trajectory-toolbar input{{accent-color:#35d0ff;min-width:min(430px,60vw);flex:1}}.trajectory-stage{{height:min(62vw,650px);min-height:410px;border:1px solid rgba(53,208,255,.30);border-radius:17px;background:#05060a;overflow:hidden}}.trajectory-stage:empty:before{{content:'Load playback to view the centered trajectory';display:grid;place-items:center;height:100%;color:#7aa6d9}}.trajectory-status{{color:#9cb6d0;font-size:.86rem;font-weight:800}}.trajectory-downloads{{display:flex;flex-wrap:wrap;gap:8px;margin-top:13px}}.trajectory-downloads a{{color:#35d0ff;border:1px solid #285a79;border-radius:9px;padding:7px 9px;text-decoration:none;font-size:.78rem;font-weight:800}}</style><section class="trajectory-card" data-trajectory-preview="{escape(preview_href)}" data-peptide-chains="{escape(peptide_chains)}" data-frame-times="{escape(json.dumps(time_values, separators=(',', ':')))}"><div class="section-head"><div><div class="eyebrow">Trajectory playback · on demand</div><h2>Watch the centered simulation, frame by frame</h2><p>This is a solvent-free, {frame_count}-frame preview spanning 0–{last_time:.2f} ns. It is centered and backbone-aligned to the first sampled frame so the complex moves—not the camera. It does not load until you press the button.</p></div></div><div class="trajectory-toolbar"><button type="button" data-trajectory-load>Load interactive playback</button><button type="button" data-trajectory-play disabled>▶ Play</button><button type="button" data-trajectory-reset disabled>Reset view</button><input type="range" min="0" max="{max(0, frame_count - 1)}" value="0" step="1" aria-label="Trajectory frame" data-trajectory-frame disabled><span class="trajectory-status" data-trajectory-status>Not loaded · ordinary dossier load remains fast</span></div><div class="trajectory-stage" data-trajectory-stage></div><details class="guide"><summary>ⓘ ELI5: what am I watching?</summary><p><b>What this is:</b> a deliberately lightweight set of evenly spaced frames from the final MD trajectory. The protein backbone is aligned to frame 1 so ordinary drifting through the simulation box does not look like biological movement.</p><p><b>How to read it:</b> use play for an overview, then pause and drag/zoom to inspect a frame. Gold is the peptide; slate is the protein. Compare apparent motion with the stability and contact plots instead of treating an animation as a binding measurement.</p><p><b>Keep in mind:</b> this is a visual preview, not all {25001:,} raw frames. The exact final and pocket PDB/XTC files are available below.</p></details><div class="trajectory-downloads">{raw_links}</div></section><script>(()=>{{const root=document.currentScript.previousElementSibling,load=root.querySelector('[data-trajectory-load]'),play=root.querySelector('[data-trajectory-play]'),reset=root.querySelector('[data-trajectory-reset]'),slider=root.querySelector('[data-trajectory-frame]'),status=root.querySelector('[data-trajectory-status]'),stage=root.querySelector('[data-trajectory-stage]'),times=JSON.parse(root.dataset.frameTimes||'[]');let viewer,model,frame=0,timer=null;const label=()=>{{let time=Number(times[frame]??0);status.textContent=`Frame ${{frame+1}} / ${{Number(slider.max)+1}} · ${{time.toFixed(2)}} ns`}};const show=next=>{{frame=Math.max(0,Math.min(Number(slider.max),Number(next)));slider.value=frame;viewer.setFrame(frame);viewer.render();label()}};const stop=()=>{{if(timer){{clearInterval(timer);timer=null}}play.textContent='▶ Play'}};load.addEventListener('click',async()=>{{if(!window.$3Dmol){{status.textContent='Local 3D viewer library is unavailable.';return}}load.disabled=true;status.textContent='Loading centered trajectory preview…';try{{const response=await fetch(root.dataset.trajectoryPreview);if(!response.ok)throw new Error('preview fetch failed');const pdb=await response.text();viewer=$3Dmol.createViewer(stage,{{backgroundColor:'#05060a',antialias:true}});model=viewer.addModelsAsFrames(pdb,'pdb');model.setStyle({{}},{{cartoon:{{color:'#496985'}}}});root.dataset.peptideChains.split(',').filter(Boolean).forEach(chain=>model.setStyle({{chain}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.16,color:'#ffdf85'}}}}));viewer.zoomTo();viewer.render();slider.disabled=play.disabled=reset.disabled=false;show(0);addEventListener('resize',()=>viewer&&viewer.resize())}}catch(error){{status.textContent='Could not load the trajectory preview. The exact PDB/XTC files remain downloadable.';load.disabled=false}}}});slider.addEventListener('input',()=>{{if(viewer){{stop();show(slider.value)}}}});play.addEventListener('click',()=>{{if(!viewer)return;if(timer){{stop();return}}play.textContent='❚❚ Pause';timer=setInterval(()=>{{let next=frame>=Number(slider.max)?0:frame+1;show(next)}},115)}});reset.addEventListener('click',()=>{{if(viewer){{viewer.zoomTo();viewer.render()}}}})}})();</script>'''
 
 
 def final_structure_html(root: Path, context: PartnerContext) -> str:
@@ -2476,6 +2567,7 @@ def main() -> None:
     peptide_topology = peptide_networx_html(analysis, peptide_expected=context.partner_kind == "peptide")
     interface_evidence = interface_evidence_html(analysis, context, interface_rin)
     structure_panel = final_structure_html(root, context)
+    trajectory_panel = trajectory_playback_html(root, analysis, context)
     stability = section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"])
     flexibility = section_html("Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"])
     secondary = section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"])
@@ -2496,6 +2588,7 @@ def main() -> None:
         ("interfaces", "Protein interfaces", "" if context.partner_kind == "protein_chain" else interface_rin["protein_detail"]),
         ("peptide-interfaces", "Peptide interfaces", "" if context.partner_kind == "peptide" else interface_rin["peptide_detail"]),
         ("structure", "Structure", structure_panel),
+        ("trajectory", "Trajectory playback", trajectory_panel),
     ])
     html = build_document(system_name, context, cards, dashboard)
     output.write_text(html, encoding="utf-8")
