@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import textwrap
+import zipfile
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
@@ -974,6 +975,55 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
         except OSError:
             pass
 
+    # A .pse serialises every loaded XTC frame and can easily become several
+    # gigabytes.  Instead publish a portable PyMOL *session bundle*: opening
+    # this small startup script from the extracted bundle loads the four exact
+    # source files, preserves their identities, and starts with the duplicate
+    # pocket object hidden.  This gives researchers an immediately usable
+    # PyMOL workspace without silently replacing the full trajectories with a
+    # down-sampled browser preview.
+    pymol_loader = asset_dir / "Open_in_PyMOL.pml"
+    pymol_bundle = asset_dir / "PyMACS_PyMOL_full_trajectory_session.zip"
+    available_sources = [name for name in source_files if (asset_dir / name).is_file()]
+    if len(available_sources) == len(source_files):
+        pymol_loader.write_text(textwrap.dedent("""\
+            # PyMACS full-trajectory session
+            # Keep this file beside the four bundled source files, then open it
+            # in PyMOL.  Both trajectories are loaded; the pocket copy starts
+            # hidden because it can be identical to the final trajectory.
+            reinitialize
+            load Final_Trajectory.pdb, final_complex
+            load_traj Final_Trajectory.xtc, final_complex, state=1
+            load binding_pocket_only.pdb, binding_pocket_only
+            load_traj binding_pocket_only.xtc, binding_pocket_only, state=1
+            hide everything
+            show cartoon, final_complex
+            color marine, final_complex and chain A
+            color tv_yellow, final_complex and chain B
+            show sticks, final_complex and chain B
+            set stick_radius, 0.16, final_complex and chain B
+            set all_states, on
+            set cache_frames, 1
+            set movie_auto_interpolate, off
+            disable binding_pocket_only
+            group PyMACS_trajectories, final_complex binding_pocket_only
+            zoom final_complex
+            frame 1
+        """), encoding="utf-8")
+        try:
+            bundle_is_current = pymol_bundle.is_file() and pymol_bundle.stat().st_mtime >= max(
+                (asset_dir / name).stat().st_mtime for name in available_sources
+            ) and pymol_bundle.stat().st_mtime >= pymol_loader.stat().st_mtime
+            if not bundle_is_current:
+                temporary_bundle = pymol_bundle.with_suffix(".zip.partial")
+                with zipfile.ZipFile(temporary_bundle, "w", compression=zipfile.ZIP_STORED) as archive:
+                    archive.write(pymol_loader, pymol_loader.name)
+                    for name in source_files:
+                        archive.write(asset_dir / name, name)
+                temporary_bundle.replace(pymol_bundle)
+        except (OSError, zipfile.BadZipFile) as error:
+            print(f"PyMOL session bundle generation skipped: {error}")
+
     preview_info: dict[str, object] = {}
     needs_preview = not preview.is_file() or preview.stat().st_mtime < max(topology.stat().st_mtime, trajectory.stat().st_mtime)
     if needs_preview:
@@ -1017,7 +1067,13 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
     preview_href = preview.relative_to(analysis).as_posix()
     # 3Dmol uses an absolutely positioned canvas; anchor it to this stage
     # instead of allowing it to escape to the top of the dossier page.
-    raw_links = '<style>.trajectory-stage{position:relative}</style>' + "".join(
+    raw_links = '<style>.trajectory-stage{position:relative}</style>'
+    if pymol_bundle.is_file():
+        raw_links += (
+            f'<a href="{escape(pymol_bundle.relative_to(analysis).as_posix())}" download>'
+            'Download PyMOL full-session bundle (.zip)</a>'
+        )
+    raw_links += "".join(
         f'<a href="{escape((asset_dir / name).relative_to(analysis).as_posix())}" download>Download {escape(name)}</a>'
         for name in source_files if (asset_dir / name).is_file()
     )
