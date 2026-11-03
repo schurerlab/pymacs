@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#BSUB -J "pbc_pp_refresh[1-9]%4"
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 10:00
+#BSUB -n 2
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/triton/home/jxs794/Molecular_Dynamics/pbc_pp_refresh.%I.%J.out
+#BSUB -eo /projectnb/triton/home/jxs794/Molecular_Dynamics/pbc_pp_refresh.%I.%J.err
+
+# Protein--protein PBC display refresh.  This deliberately preserves raw MD
+# trajectories and historical RMSD/RMSF outputs; it replaces only derived
+# display coordinates and current interface/Q/dashboard artifacts.
+set -euo pipefail
+
+SYSTEMS=(
+  1kgy_ref2
+  1shw_ref1
+  1shw_ref2
+  2wo2_ref
+  2wo3-ref
+  2wo3_ref2
+  2wo3_ref3
+  4bk5_ref
+  4bkf_ref
+)
+SYSTEM="${SYSTEMS[$((LSB_JOBINDEX - 1))]}"
+RUN="/projectnb/triton/home/jxs794/Molecular_Dynamics/${SYSTEM}"
+PYMACS="/projectnb/triton/home/jxs794/Pymacs-pp-q"
+
+cd "$RUN"
+test -s md_0_1.xtc
+test -s md_0_1.tpr
+test -s index.ndx
+test -s atomIndex.txt
+test -f "$PYMACS/3C_Interface_RIN.py"
+test -f "$PYMACS/pymacs_compute_protein_native_contact_q.py"
+
+module purge
+module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export OMP_NUM_THREADS=2
+
+mkdir -p Analysis_Results/PBC_Preprocessing_Backup
+stamp=$(date +%Y%m%d-%H%M%S)
+for asset in Final_Trajectory.xtc Final_Trajectory.pdb; do
+  if test -s "$asset"; then
+    mv "$asset" "Analysis_Results/PBC_Preprocessing_Backup/${asset%.${asset##*.}}.pre_pbc_${stamp}.${asset##*.}"
+  fi
+done
+
+# Both atomIndex components are proteins.  Deliberately omit --peptide-chains
+# and do not produce Peptide NETWORX assets.
+printf 'Protein\nProtein\nProtein\n' | gmx_mpi trjconv \
+  -s md_0_1.tpr -f md_0_1.xtc -n index.ndx \
+  -o Final_Trajectory.xtc -pbc cluster -center -ur compact
+printf 'Protein\n' | gmx_mpi trjconv \
+  -s md_0_1.tpr -f Final_Trajectory.xtc -n index.ndx \
+  -o Final_Trajectory.pdb -dump 0
+test -s Final_Trajectory.xtc
+test -s Final_Trajectory.pdb
+
+python "$PYMACS/3C_Interface_RIN.py" \
+  --topo Final_Trajectory.pdb --traj Final_Trajectory.xtc \
+  --atomindex atomIndex.txt --outdir Analysis_Results/Interface_RIN \
+  --force-recompute --headless
+test -s Analysis_Results/Interface_RIN/Interface_RIN_Explorer.html
+test ! -e Analysis_Results/Peptide_NETWORX/Peptide_NETWORX_Explorer.html
+
+python "$PYMACS/pymacs_compute_protein_native_contact_q.py" \
+  --topology Final_Trajectory.pdb --trajectory Final_Trajectory.xtc \
+  --outdir Analysis_Results
+test -s Analysis_Results/protein_native_contact_q.csv
+
+python "$PYMACS/5_PyMACS_Result_Dashboard.py" --root "$RUN"
+test -s Analysis_Results/PyMACS_Result_Dashboard.html
+echo "[$(date -Is)] ${SYSTEM} protein--protein PBC/Q/dashboard refresh complete"
