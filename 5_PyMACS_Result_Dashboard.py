@@ -1072,7 +1072,11 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
             preview_info = {}
     if not preview.is_file():
         return '<section class="trajectory-card"><div class="eyebrow">Trajectory playback</div><h2>Trajectory preview preparation did not complete</h2><p>The original PDB/XTC files are retained, but the browser preview could not be generated on this host.</p></section>'
-    preview_href = preview.relative_to(analysis).as_posix()
+    # Prefer the GROMACS PBC-repaired coordinates whenever they are present;
+    # otherwise retain compatibility with historical dossiers that only have
+    # the alignment-only preview.
+    browser_preview = pbc_preview if pbc_preview.is_file() else preview
+    preview_href = browser_preview.relative_to(analysis).as_posix()
     # 3Dmol uses an absolutely positioned canvas; anchor it to this stage
     # instead of allowing it to escape to the top of the dossier page.
     raw_links = '<style>.trajectory-stage{position:relative}</style>'
