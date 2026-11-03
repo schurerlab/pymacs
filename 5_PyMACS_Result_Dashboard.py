@@ -955,6 +955,11 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
         )
     asset_dir = analysis / "Trajectory_Playback"
     preview = asset_dir / "centered_trajectory_preview.pdb"
+    # A PBC-repaired preview, when made during analysis, is the only
+    # trajectory that should be opened by default in an interactive viewer.
+    # The raw XTC remains downloadable but can show a molecule on opposite
+    # sides of the periodic box (a display artifact, not a dissociation).
+    pbc_preview = asset_dir / "PyMACS_centered_pbc_preview.pdb"
     metadata = asset_dir / "preview_metadata.json"
     source_files = ("Final_Trajectory.pdb", "Final_Trajectory.xtc", "binding_pocket_only.pdb", "binding_pocket_only.xtc")
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -975,6 +980,7 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
         except OSError:
             pass
 
+    visualization_source = pbc_preview if pbc_preview.is_file() else preview
     # A .pse serialises every loaded XTC frame and can easily become several
     # gigabytes.  Instead publish a portable PyMOL *session bundle*: opening
     # this small startup script from the extracted bundle loads the four exact
@@ -988,36 +994,38 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
     if len(available_sources) == len(source_files):
         pymol_loader.write_text(textwrap.dedent("""\
             # PyMACS full-trajectory session
-            # Keep this file beside the four bundled source files, then open it
-            # in PyMOL.  Both trajectories are loaded; the pocket copy starts
-            # hidden because it can be identical to the final trajectory.
+            # Keep this file beside the bundled files, then open it in PyMOL.
+            # The PBC-repaired preview is the default visual because raw XTC
+            # coordinates can wrap a bound partner across the simulation box.
+            # The four exact raw source files are retained in this bundle.
             reinitialize
-            load Final_Trajectory.pdb, final_complex
-            load_traj Final_Trajectory.xtc, final_complex, state=1
-            load binding_pocket_only.pdb, binding_pocket_only
-            load_traj binding_pocket_only.xtc, binding_pocket_only, state=1
+            load {visualization_name}, pbc_centered_visualization
+            load Final_Trajectory.pdb, raw_final_topology
+            load binding_pocket_only.pdb, raw_binding_pocket_topology
             hide everything
-            show cartoon, final_complex
-            color marine, final_complex and chain A
-            color tv_yellow, final_complex and chain B
-            show sticks, final_complex and chain B
-            set stick_radius, 0.16, final_complex and chain B
+            show cartoon, pbc_centered_visualization
+            color marine, pbc_centered_visualization and chain A
+            color tv_yellow, pbc_centered_visualization and chain B
+            show sticks, pbc_centered_visualization and chain B
+            set stick_radius, 0.16, pbc_centered_visualization and chain B
             set all_states, on
             set cache_frames, 1
             set movie_auto_interpolate, off
-            disable binding_pocket_only
-            group PyMACS_trajectories, final_complex binding_pocket_only
-            zoom final_complex
+            disable raw_final_topology
+            disable raw_binding_pocket_topology
+            group PyMACS_trajectories, pbc_centered_visualization raw_final_topology raw_binding_pocket_topology
+            zoom pbc_centered_visualization
             frame 1
-        """), encoding="utf-8")
+        """.format(visualization_name=visualization_source.name)), encoding="utf-8")
         try:
             bundle_is_current = pymol_bundle.is_file() and pymol_bundle.stat().st_mtime >= max(
-                (asset_dir / name).stat().st_mtime for name in available_sources
+                *((asset_dir / name).stat().st_mtime for name in available_sources), visualization_source.stat().st_mtime
             ) and pymol_bundle.stat().st_mtime >= pymol_loader.stat().st_mtime
             if not bundle_is_current:
                 temporary_bundle = pymol_bundle.with_suffix(".zip.partial")
                 with zipfile.ZipFile(temporary_bundle, "w", compression=zipfile.ZIP_STORED) as archive:
                     archive.write(pymol_loader, pymol_loader.name)
+                    archive.write(visualization_source, visualization_source.name)
                     for name in source_files:
                         archive.write(asset_dir / name, name)
                 temporary_bundle.replace(pymol_bundle)
