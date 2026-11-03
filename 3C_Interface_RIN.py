@@ -1195,23 +1195,28 @@ def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_co
     outdir = Path(outdir)
     sequences = interface_chain_sequences(universe, chain_pairs)
     records = []
+    # Keep a small, evidence-backed atom-level summary for each displayed
+    # residue edge.  Embedding every framewise event would make the standalone
+    # explorer unnecessarily large, so each edge receives its most frequent
+    # atom pairs plus geometry summaries instead.
+    evidence_by_edge = {}
     if events_df is not None and not events_df.empty:
-        valid = events_df[events_df.get("ValidationStatus", "") == "validated"].copy()
+        event_source = events_df.copy()
         # Interface-RIN-native events already carry both residue labels.  The
         # validated interaction-event table used by older peptide runs instead
         # stores the protein residue in ``Partner`` and the peptide residue in
         # ``Residue``/``ChainID``.  Normalise both schemas before aggregation so
         # validated H-bond, ionic and hydrophobic classes are not discarded.
-        if {"InterfaceResidueA", "InterfaceResidueB"}.issubset(valid.columns):
-            typed_source = valid.rename(columns={"InterfaceResidueA": "a", "InterfaceResidueB": "b"})
-        elif {"Partner", "Residue", "ChainID"}.issubset(valid.columns):
+        if {"InterfaceResidueA", "InterfaceResidueB"}.issubset(event_source.columns):
+            typed_source = event_source.rename(columns={"InterfaceResidueA": "a", "InterfaceResidueB": "b"})
+        elif {"Partner", "Residue", "ChainID"}.issubset(event_source.columns):
             chain_labels = {}
             for left, right in chain_pairs:
                 for entry in (left, right):
                     for key in (entry.get("current_chain"), entry.get("source_chain"), entry.get("label")):
                         if key:
                             chain_labels[str(key)] = str(entry["display_label"])
-            typed_source = valid.copy()
+            typed_source = event_source.copy()
             typed_source["a"] = typed_source["Partner"].astype(str)
             typed_source["b"] = [
                 f"{chain_labels.get(str(chain_id), str(chain_id))}:{residue}"
@@ -1222,13 +1227,44 @@ def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_co
         for col in ("a", "b", "InteractionClass", "Frame"):
             if col not in typed_source:
                 typed_source[col] = pd.Series(dtype=object)
-        typed = (typed_source.dropna(subset=["a", "b"])
+        typed_source = typed_source.dropna(subset=["a", "b"]).copy()
+        typed_source["display_type"] = typed_source["InteractionClass"].replace({"Other Contact": "Other contact"})
+        validated_mask = (typed_source["ValidationStatus"].eq("validated")
+                          if "ValidationStatus" in typed_source
+                          else pd.Series(False, index=typed_source.index))
+        typed = (typed_source[validated_mask]
                  .drop_duplicates(["a", "b", "InteractionClass", "Frame"])
                  .groupby(["a", "b", "InteractionClass"], as_index=False)["Frame"].nunique()
                  .rename(columns={"InteractionClass": "type", "Frame": "frames"}))
         for row in typed.itertuples(index=False):
             records.append({"a": row.a, "b": row.b, "type": row.type,
                             "fraction": round(float(row.frames) / max(1, frame_count), 6)})
+
+        evidence_columns = [
+            "a", "b", "display_type", "LigandAtomName", "ProteinAtomName",
+            "DonorAtom", "AcceptorAtom", "HydrogenEvidenceAtom", "Distance", "Angle", "Frame",
+        ]
+        for column in evidence_columns:
+            if column not in typed_source:
+                typed_source[column] = np.nan
+        grouped_evidence = (typed_source.groupby(
+            ["a", "b", "display_type", "LigandAtomName", "ProteinAtomName", "DonorAtom", "AcceptorAtom", "HydrogenEvidenceAtom"],
+            dropna=False,
+        ).agg(frames=("Frame", "nunique"), mean_distance=("Distance", "mean"), mean_angle=("Angle", "mean")).reset_index())
+        for row in grouped_evidence.itertuples(index=False):
+            def text(value):
+                return "" if pd.isna(value) else str(value)
+            item = {
+                "atom_a": text(row.LigandAtomName), "atom_b": text(row.ProteinAtomName),
+                "donor": text(row.DonorAtom), "acceptor": text(row.AcceptorAtom),
+                "hydrogen": text(row.HydrogenEvidenceAtom), "frames": int(row.frames),
+                "fraction": round(float(row.frames) / max(1, frame_count), 6),
+                "distance_a": None if pd.isna(row.mean_distance) else round(float(row.mean_distance), 2),
+                "angle_deg": None if pd.isna(row.mean_angle) else round(float(row.mean_angle), 1),
+            }
+            evidence_by_edge.setdefault((str(row.a), str(row.b), str(row.display_type)), []).append(item)
+        for items in evidence_by_edge.values():
+            items.sort(key=lambda item: (-item["frames"], item["atom_a"], item["atom_b"]))
     # Preserve every observed interface edge, including contacts whose exact
     # chemistry is deliberately reported only as proximity evidence.
     typed_pairs = {(edge["a"], edge["b"]) for edge in records}
@@ -1251,6 +1287,10 @@ def write_interactive_interface_rin_html(outdir, residue_df, events_df, frame_co
     records = [record for record in records
                if str(record.get("a", "")) in valid_labels
                and str(record.get("b", "")) in valid_labels]
+    for record in records:
+        record["evidence"] = evidence_by_edge.get(
+            (str(record["a"]), str(record["b"]), str(record["type"])), []
+        )[:5]
 
     pair_options = [
         {"id": f"{left['display_label']}__{right['display_label']}", "left": left["display_label"], "right": right["display_label"],
