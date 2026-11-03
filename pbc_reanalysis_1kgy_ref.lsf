@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+#BSUB -J pbc_pp_1kgy_ref
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 10:00
+#BSUB -n 2
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/triton/home/jxs794/Molecular_Dynamics/1kgy_ref/pbc_pp.%J.out
+#BSUB -eo /projectnb/triton/home/jxs794/Molecular_Dynamics/1kgy_ref/pbc_pp.%J.err
+
+# Single, unsubmitted protein--protein presentation test.  It creates only
+# derived PBC-safe display coordinates and 3C/dashboard products; the raw MD
+# trajectory and historical RMSD/RMSF outputs remain untouched.
+set -euo pipefail
+
+RUN=/projectnb/triton/home/jxs794/Molecular_Dynamics/1kgy_ref
+PYMACS=/projectnb/triton/home/jxs794/Pymacs
+cd "$RUN"
+test -s md_0_1.xtc
+test -s md_0_1.tpr
+test -s index.ndx
+test -s atomIndex.txt
+
+module purge
+module load gromacs/2025.1-gcc-13.4.0-6vq7xfo
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+export OMP_NUM_THREADS=2
+
+mkdir -p Analysis_Results/PBC_Preprocessing_Backup
+stamp=$(date +%Y%m%d-%H%M%S)
+for asset in Final_Trajectory.xtc Final_Trajectory.pdb; do
+  if test -s "$asset"; then
+    mv "$asset" "Analysis_Results/PBC_Preprocessing_Backup/${asset%.${asset##*.}}.pre_pbc_${stamp}.${asset##*.}"
+  fi
+done
+
+# Both atomIndex components are proteins; intentionally omit --peptide-chains
+# and do not render 4D_Peptide_NETWORX.
+printf 'Protein\nProtein\nProtein\n' | gmx_mpi trjconv \
+  -s md_0_1.tpr -f md_0_1.xtc -n index.ndx \
+  -o Final_Trajectory.xtc -pbc cluster -center -ur compact
+printf 'Protein\n' | gmx_mpi trjconv \
+  -s md_0_1.tpr -f Final_Trajectory.xtc -n index.ndx \
+  -o Final_Trajectory.pdb -dump 0
+test -s Final_Trajectory.xtc
+test -s Final_Trajectory.pdb
+
+python "$PYMACS/3C_Interface_RIN.py" \
+  --topo Final_Trajectory.pdb --traj Final_Trajectory.xtc \
+  --atomindex atomIndex.txt --outdir Analysis_Results/Interface_RIN \
+  --force-recompute --headless
+test -s Analysis_Results/Interface_RIN/Interface_RIN_Explorer.html
+test ! -e Analysis_Results/Peptide_NETWORX/Peptide_NETWORX_Explorer.html
+
+python "$PYMACS/5_PyMACS_Result_Dashboard.py" --root "$RUN"
+test -s Analysis_Results/PyMACS_Result_Dashboard.html
+echo "[$(date -Is)] 1kgy_ref protein--protein presentation test complete"

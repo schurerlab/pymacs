@@ -329,6 +329,16 @@ def build_interface_explorer(payload: str) -> str:
         "c.fillStyle=isSpatialSelected(r.label)?(isPep?'#a78bfa':'#ff5a78'):(isPep?'#ffcf5b':'#4bd7ff');c.beginPath();c.arc(x,y,isSpatialSelected(r.label)?9:5,0,7);c.fill();if(isPep||isSpatialSelected(r.label))",
         1,
     )
+    # Protein-only interfaces have no peptide selection.  Keep the same
+    # controls while making the selector safe and replacing peptide-specific
+    # presentation text at render time.
+    page = page.replace(
+        "pep=left.type==='peptide'?left:right,protein=left.type==='peptide'?right:left,",
+        "pep=left.type==='peptide'?left:(right.type==='peptide'?right:left),protein=left.type==='peptide'?right:(right.type==='peptide'?left:right),",
+        1,
+    )
+    protein_only_presentation = r'''<script>(()=>{const proteinOnly=Object.values(DATA.chains||{}).length>0&&Object.values(DATA.chains||{}).every(chain=>chain.type!=='peptide');if(!proteinOnly)return;document.querySelector('.ey').textContent='PYMACS · PROTEIN–PROTEIN INTERACTION EXPLORER';document.querySelector('[data-v="sequence"]').textContent='Chain Sequences';document.querySelector('#mol')?.setAttribute('aria-label','3D protein–protein structure');const replaceVocabulary=root=>{const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);for(let node=walker.nextNode();node;node=walker.nextNode()){node.nodeValue=node.nodeValue.replaceAll('Peptide Sequence','Chain Sequences').replaceAll('Peptide · N→C','Protein chain').replaceAll('Peptide residue','Protein residue').replaceAll('Selected peptide','Selected protein').replaceAll('RECEPTOR','PROTEIN').replaceAll('receptor contact partners','protein contact partners').replaceAll('peptide N→C context','selected-chain context').replaceAll('peptide N→C order','chain sequence order').replaceAll('Rows preserve peptide N→C order when a peptide is the left selected chain. ','');}};replaceVocabulary(document.body);new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(node=>{if(node.nodeType===Node.ELEMENT_NODE)replaceVocabulary(node)}))).observe(document.body,{childList:true,subtree:true});})();</script>'''
+    page = page.replace("</html>", protein_only_presentation + "</html>", 1)
     return page
 
 

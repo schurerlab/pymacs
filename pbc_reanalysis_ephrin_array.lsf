@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#BSUB -J "pbc_ephrin_refresh[1-33]%8"
+#BSUB -J "pbc_ephrin_refresh[1-23]%8"
 #BSUB -L /bin/bash
 #BSUB -q normal
 #BSUB -P brd

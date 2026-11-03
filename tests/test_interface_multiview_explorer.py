@@ -174,6 +174,19 @@ class InterfaceMultiviewExplorerTests(unittest.TestCase):
         self.assertIn('str(record.get("a", "")) in valid_labels', source)
         self.assertIn('all(label in valid_labels for label in key.split("\\u001f", 1))', source)
 
+    def test_protein_only_payload_installs_protein_protein_presentation(self):
+        page = build_cytoscape_interface_explorer(json.dumps({
+            "pairs": [{"id": "p", "left": "1kgy", "right": "ref",
+                       "left_chain": "A", "right_chain": "B"}],
+            "chains": {"1kgy": {"type": "protein", "residues": []},
+                       "ref": {"type": "protein", "residues": []}},
+            "edges": [], "presence": {"available": True, "times_ns": [], "rows": {}},
+        }))
+        self.assertIn("PYMACS · PROTEIN–PROTEIN INTERACTION EXPLORER", page)
+        self.assertIn("textContent='Chain Sequences'", page)
+        self.assertIn("3D protein–protein structure", page)
+        self.assertIn("right.type==='peptide'?right:left", page)
+
 
 if __name__ == "__main__":
     unittest.main()
