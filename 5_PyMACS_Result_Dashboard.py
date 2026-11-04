@@ -1106,6 +1106,11 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
             f'<a href="{escape(pymol_session.relative_to(analysis).as_posix())}" download>'
             'Download ready-to-open PyMOL session (.pse)</a>'
         )
+    if pymol_loader.is_file():
+        raw_links += (
+            f'<a href="{escape(pymol_loader.relative_to(analysis).as_posix())}" download>'
+            'Download PyMOL loader (.pml)</a>'
+        )
     if pymol_bundle.is_file():
         raw_links += (
             f'<a href="{escape(pymol_bundle.relative_to(analysis).as_posix())}" download>'
