@@ -2443,6 +2443,27 @@ if not _stage_cache_ready("D3", "chk_D3.txt", _d3_num, _d3_plot, _d3_params):
             )
             continue
 
+        # The all-atom range is retained above for backwards-compatible raw
+        # output, but a chain's scientific RMSD must be fit and measured on a
+        # stable, one-per-residue anchor selection.  For proteins this is Cα;
+        # for nucleic acids it is the documented phosphate/sugar fallback.
+        # This prevents different chains from being silently pooled.
+        rmsd = safe_rmsd(traj, traj, 0, atom_indices=anchor_indices) * 10.0
+        pd.DataFrame({
+            "Time_ps": traj.time,
+            "RMSD_Å": rmsd,
+            "Chain_Component": chain,
+            "Atom_Selection": f"{anchor_name} (one per residue)",
+            "Reference_Frame": 0,
+        }).to_csv(os.path.join(OUTPUT_DIR, f"RMSD_{chain}.csv"), index=False)
+        plt.figure(figsize=(9, 5))
+        plt.plot(traj.time / 1000.0, rmsd, color=MIAMI_ORANGE, lw=1.8)
+        plt.title(f"{chain} RMSD ({anchor_name} anchors)")
+        plt.xlabel("Time (ns)")
+        plt.ylabel("RMSD (Å)")
+        savefig(os.path.join(OUTPUT_DIR, f"RMSD_{chain}.png"))
+        plt.close()
+
         mean_ca = traj.xyz[:, anchor_indices, :].mean(axis=0)
         rmsf_res = np.sqrt(
             ((traj.xyz[:, anchor_indices, :] - mean_ca) ** 2)
@@ -2452,7 +2473,10 @@ if not _stage_cache_ready("D3", "chk_D3.txt", _d3_num, _d3_plot, _d3_params):
 
         pd.DataFrame({
             "Residue": res_ids,
-            "RMSF_Å": rmsf_res
+            "Original_Residue": res_ids,
+            "RMSF_Å": rmsf_res,
+            "Chain_Component": chain,
+            "Anchor_Atom": anchor_name,
         }).to_csv(
             os.path.join(OUTPUT_DIR, f"RMSF_{chain}_per_residue.csv"),
             index=False
