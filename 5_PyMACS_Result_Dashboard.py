@@ -2591,6 +2591,8 @@ def main() -> None:
     if chain_rmsd_sources:
         add("stability", chain_rmsd_plot(chain_rmsd_sources), "Chain-resolved RMSD", chain_rmsd_sources[0],
             note="Each trace is measured after alignment on that component's declared anchor selection (Cα for proteins). Colors identify components: first = Miami orange, second = neon Miami green.")
+        add("overview", chain_rmsd_plot(chain_rmsd_sources), "Chain-resolved RMSD", chain_rmsd_sources[0],
+            note="Start with this: each color is one component, fitted and measured on its own Cα anchors.")
     for source in sorted(analysis.glob("*_Ligand_RMSD.csv")):
         partner_rmsd = "Peptide RMSD" if context.partner_kind == "peptide" else "Ligand RMSD"
         add("stability", multiseries_plot(source, partner_rmsd, "Time_ps", ["Ligand_RMSD"], "RMSD (Å)", colors=[ORANGE]), partner_rmsd, source)
@@ -2611,6 +2613,8 @@ def main() -> None:
     if chain_rmsf_sources:
         add("flexibility", chain_rmsf_plot(chain_rmsf_sources), "Chain-resolved residue RMSF", chain_rmsf_sources[0],
             note="Traces use chain-local x positions so unrelated chains are never connected or renumbered together. Hover reports the original residue ID and the anchor atom used for RMSF.")
+        add("overview", chain_rmsf_plot(chain_rmsf_sources), "Chain-resolved residue RMSF", chain_rmsf_sources[0],
+            note="Every chain begins at its own local position 1; hover preserves the source residue identifier.")
     for source in sorted(analysis.glob("RMSF_*.csv")):
         if source.name.endswith("_per_residue.csv"): continue
         add("flexibility", categorical_bar_plot(source, f"{protein_name} backbone-atom RMSF", "Atom_Index", ["RMSF_Å"], "RMSF (Å)", colors=[GREEN]), f"{protein_name} backbone-atom RMSF", source, note="This is the atom-resolved backbone selection used by the analysis; use the adjacent residue plot for residue-level interpretation.")
