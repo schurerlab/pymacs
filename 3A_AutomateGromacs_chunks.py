@@ -2472,11 +2472,33 @@ if not _stage_cache_ready("D3", "chk_D3.txt", _d3_num, _d3_plot, _d3_params):
             )
             continue
 
+        # Replace the legacy all-atom component RMSD with a chain-resolved
+        # anchor RMSD (Cα for proteins).  It preserves one physical component
+        # per trace and records the selection for the dossier.
+        time_ps, rmsd = chunked_rmsd(anchor_indices, label=f"{chain} anchor RMSD")
+        pd.DataFrame({
+            "Time_ps": time_ps,
+            "RMSD_Å": rmsd,
+            "Chain_Component": chain,
+            "Atom_Selection": f"{anchor_name} (one per residue)",
+            "Reference_Frame": 0,
+        }).to_csv(os.path.join(OUTPUT_DIR, f"RMSD_{chain}.csv"), index=False)
+        plt.figure(figsize=(9, 5))
+        plt.plot(time_ps / 1000.0, rmsd, color=MIAMI_ORANGE, lw=1.8)
+        plt.title(f"{chain} RMSD ({anchor_name} anchors)")
+        plt.xlabel("Time (ns)")
+        plt.ylabel("RMSD (Å)")
+        savefig(os.path.join(OUTPUT_DIR, f"RMSD_{chain}.png"))
+        plt.close()
+
         rmsf_res, n_frames = chunked_rmsf(anchor_indices, label=f"{chain} residue RMSF")
 
         pd.DataFrame({
             "Residue": res_ids,
-            "RMSF_Å": rmsf_res
+            "Original_Residue": res_ids,
+            "RMSF_Å": rmsf_res,
+            "Chain_Component": chain,
+            "Anchor_Atom": anchor_name,
         }).to_csv(
             os.path.join(OUTPUT_DIR, f"RMSF_{chain}_per_residue.csv"),
             index=False
