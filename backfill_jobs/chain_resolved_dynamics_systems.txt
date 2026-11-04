@@ -1,0 +1,2 @@
+1kgy_ref
+ALPHAFOLD_IE1_H2B_H2A
