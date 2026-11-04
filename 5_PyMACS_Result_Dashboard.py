@@ -992,17 +992,32 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
     pymol_bundle = asset_dir / "PyMACS_PyMOL_full_trajectory_session.zip"
     pymol_session = asset_dir / "PyMACS_centered_trajectory_session.pse"
     available_sources = [name for name in source_files if (asset_dir / name).is_file()]
-    if len(available_sources) == len(source_files):
+    has_final_trajectory = all((asset_dir / name).is_file() for name in ("Final_Trajectory.pdb", "Final_Trajectory.xtc"))
+    if has_final_trajectory and visualization_source.is_file():
+        # Binding-pocket coordinates are useful when present, but must not
+        # prevent a protein--protein trajectory from receiving a portable
+        # PyMOL loader.  The final PDB/XTC pair is the required full session.
+        optional_pocket = []
+        optional_objects = []
+        if (asset_dir / "binding_pocket_only.pdb").is_file():
+            optional_pocket.extend([
+                "load binding_pocket_only.pdb, raw_binding_pocket_topology",
+                "disable raw_binding_pocket_topology",
+            ])
+            optional_objects.append("raw_binding_pocket_topology")
+            if (asset_dir / "binding_pocket_only.xtc").is_file():
+                optional_pocket.append("load_traj binding_pocket_only.xtc, raw_binding_pocket_topology")
+        session_objects = " ".join(["pbc_centered_visualization", "raw_final_topology", *optional_objects])
         pymol_loader.write_text(textwrap.dedent("""\
             # PyMACS full-trajectory session
             # Keep this file beside the bundled files, then open it in PyMOL.
-            # The PBC-repaired preview is the default visual because raw XTC
-            # coordinates can wrap a bound partner across the simulation box.
-            # The four exact raw source files are retained in this bundle.
+            # The centered preview is the default visual.  The exact full XTC
+            # is loaded locally into raw_final_topology for full-frame access.
             reinitialize
             load {visualization_name}, pbc_centered_visualization
             load Final_Trajectory.pdb, raw_final_topology
-            load binding_pocket_only.pdb, raw_binding_pocket_topology
+            load_traj Final_Trajectory.xtc, raw_final_topology
+            {optional_pocket}
             hide everything
             show cartoon, pbc_centered_visualization
             color marine, pbc_centered_visualization and chain A
@@ -1013,11 +1028,14 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
             set cache_frames, 1
             set movie_auto_interpolate, off
             disable raw_final_topology
-            disable raw_binding_pocket_topology
-            group PyMACS_trajectories, pbc_centered_visualization raw_final_topology raw_binding_pocket_topology
+            group PyMACS_trajectories, {session_objects}
             zoom pbc_centered_visualization
             frame 1
-        """.format(visualization_name=visualization_source.name)), encoding="utf-8")
+        """.format(
+            visualization_name=visualization_source.name,
+            optional_pocket="\n".join(optional_pocket),
+            session_objects=session_objects,
+        )), encoding="utf-8")
         try:
             bundle_is_current = pymol_bundle.is_file() and pymol_bundle.stat().st_mtime >= max(
                 *((asset_dir / name).stat().st_mtime for name in available_sources), visualization_source.stat().st_mtime
@@ -1028,7 +1046,9 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
                     archive.write(pymol_loader, pymol_loader.name)
                     archive.write(visualization_source, visualization_source.name)
                     for name in source_files:
-                        archive.write(asset_dir / name, name)
+                        source = asset_dir / name
+                        if source.is_file() and source.name != visualization_source.name:
+                            archive.write(source, name)
                 temporary_bundle.replace(pymol_bundle)
         except (OSError, zipfile.BadZipFile) as error:
             print(f"PyMOL session bundle generation skipped: {error}")
