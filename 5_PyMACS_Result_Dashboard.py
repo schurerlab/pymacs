@@ -1357,10 +1357,12 @@ def _chain_label_from_metric(source: Path, prefix: str, suffix: str = ".csv") ->
     return name[len(prefix):-len(suffix)] if name.startswith(prefix) and name.endswith(suffix) else source.stem
 
 
-def chain_rmsd_plot(sources: list[Path]) -> str | None:
+def chain_rmsd_plot(sources: list[Path], *, title: str = "Chain-resolved RMSD",
+                    colors: list[str] | None = None) -> str | None:
     """Overlay one explicitly aligned anchor trace per polymer component."""
     figure = go.Figure()
-    for index, source in enumerate(sources):
+    palette = colors or CHAIN_COLORS
+    for source in sources:
         table = _read_table(source)
         if table is None or not {"Time_ps", "RMSD_Å"}.issubset(table.columns):
             continue
@@ -1372,21 +1374,23 @@ def chain_rmsd_plot(sources: list[Path]) -> str | None:
             continue
         label = _chain_label_from_metric(source, "RMSD_")
         selection = str(table.get("Atom_Selection", pd.Series(["per-chain atoms"])).iloc[0])
+        visible_index = len(figure.data)
         figure.add_trace(go.Scatter(
             x=table["Time_ps"] / 1000.0, y=table["RMSD_Å"], mode="lines", name=f"{label} ({selection})",
-            line={"color": CHAIN_COLORS[index % len(CHAIN_COLORS)], "width": 2.5},
+            line={"color": palette[visible_index % len(palette)], "width": 2.5},
             hovertemplate=f"Chain/component={escape(label)}<br>Time=%{{x:.3f}} ns<br>RMSD=%{{y:.3f}} Å<br>Selection={escape(selection)}<extra></extra>",
         ))
     if not figure.data:
         return None
-    figure.update_layout(title="Chain-resolved RMSD", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+    figure.update_layout(title=title, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 120},
         hovermode="x unified", height=400, xaxis={"title": "Time (ns)", "gridcolor": GRID},
         yaxis={"title": "RMSD (Å)", "gridcolor": GRID}, legend=LEGEND_BELOW)
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
-def chain_rmsf_plot(sources: list[Path]) -> str | None:
+def chain_rmsf_plot(sources: list[Path], *, title: str = "Chain-resolved residue RMSF",
+                    colors: list[str] | None = None) -> str | None:
     """Plot chain-local positions while exposing the source residue numbers on hover.
 
     Different chains often have independent numbering (or non-1 starts).  A
@@ -1395,7 +1399,8 @@ def chain_rmsf_plot(sources: list[Path]) -> str | None:
     hover always reports the deposited/source residue identifier.
     """
     figure = go.Figure()
-    for index, source in enumerate(sources):
+    palette = colors or CHAIN_COLORS
+    for source in sources:
         table = _read_table(source)
         if table is None or not {"Residue", "RMSF_Å"}.issubset(table.columns):
             continue
@@ -1407,15 +1412,16 @@ def chain_rmsf_plot(sources: list[Path]) -> str | None:
         label = _chain_label_from_metric(source, "RMSF_", "_per_residue.csv")
         selection = str(table.get("Anchor_Atom", pd.Series(["residue anchor"])).iloc[0])
         original_residue = table.get("Original_Residue", table["Residue"]).astype(str)
+        visible_index = len(figure.data)
         figure.add_trace(go.Scatter(
             x=np.arange(1, len(table) + 1), y=table["RMSF_Å"], mode="lines+markers", name=f"{label} ({selection})",
             customdata=np.column_stack([original_residue]),
-            line={"color": CHAIN_COLORS[index % len(CHAIN_COLORS)], "width": 2.5}, marker={"size": 4},
+            line={"color": palette[visible_index % len(palette)], "width": 2.5}, marker={"size": 4},
             hovertemplate=f"Chain/component={escape(label)}<br>Chain-local position=%{{x}}<br>Original residue=%{{customdata[0]}}<br>RMSF=%{{y:.3f}} Å<br>Anchor={escape(selection)}<extra></extra>",
         ))
     if not figure.data:
         return None
-    figure.update_layout(title="Chain-resolved residue RMSF", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+    figure.update_layout(title=title, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 120},
         hovermode="closest", height=420, xaxis={"title": "Chain-local residue position (see hover for original residue)", "gridcolor": GRID},
         yaxis={"title": "RMSF (Å)", "gridcolor": GRID}, legend=LEGEND_BELOW)
@@ -2725,12 +2731,20 @@ def main() -> None:
             if rg_source.is_file():
                 add("stability", rmsd_rg_scatter_plot(overlay_source, rg_source), "Protein RMSD versus compactness", rg_source, note="Points are sampled frames colored by time; coherent clusters indicate recurring structural regimes.")
 
-    chain_rmsf_sources = sorted(analysis.glob("RMSF_*_per_residue.csv"))
+    # RMSF_Protein_per_residue.csv is a legacy pooled trace.  It must never
+    # claim a component palette slot or be presented beside chain-local data.
+    chain_rmsf_sources = sorted(
+        source for source in analysis.glob("RMSF_*_per_residue.csv")
+        if source.name != "RMSF_Protein_per_residue.csv"
+    )
     if chain_rmsf_sources:
-        add("flexibility", chain_rmsf_plot(chain_rmsf_sources), "Chain-resolved residue RMSF", chain_rmsf_sources[0],
-            note="Traces use chain-local x positions so unrelated chains are never connected or renumbered together. Hover reports the original residue ID and the anchor atom used for RMSF.")
+        for component_index, source in enumerate(chain_rmsf_sources):
+            label = _chain_label_from_metric(source, "RMSF_", "_per_residue.csv")
+            add("flexibility", chain_rmsf_plot([source], title=f"Component {component_index + 1}: {label} residue RMSF", colors=[CHAIN_COLORS[component_index % len(CHAIN_COLORS)]]),
+                f"Component {component_index + 1}: {label} residue RMSF", source,
+                note="This component is plotted independently with its own chain-local residue positions. Hover reports the original residue ID and anchor atom used for RMSF.")
         add("overview", chain_rmsf_plot(chain_rmsf_sources), "Chain-resolved residue RMSF", chain_rmsf_sources[0],
-            note="Every chain begins at its own local position 1; hover preserves the source residue identifier.")
+            note="Comparison only: each color is an independent component beginning at local position 1; hover preserves the source residue identifier.")
     for source in sorted(analysis.glob("RMSF_*.csv")):
         if source.name.endswith("_per_residue.csv"): continue
         add("flexibility", categorical_bar_plot(source, f"{protein_name} backbone-atom RMSF", "Atom_Index", ["RMSF_Å"], "RMSF (Å)", colors=[GREEN]), f"{protein_name} backbone-atom RMSF", source, note="This is the atom-resolved backbone selection used by the analysis; use the adjacent residue plot for residue-level interpretation.")
