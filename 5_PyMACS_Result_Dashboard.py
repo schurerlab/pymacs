@@ -1689,7 +1689,12 @@ def _ppi_pair_table(analysis: Path) -> tuple[pd.DataFrame, Path]:
 
 def _residue_token(value: object) -> str:
     """Match deposited chain-qualified labels to RMSF residue identifiers."""
-    return str(value).rsplit(":", 1)[-1].strip().upper()
+    token = str(value).rsplit(":", 1)[-1].strip().upper()
+    # Historical RMSF exports may preserve only ``77`` while interface RIN
+    # records preserve ``ARG77``.  Their residue index is the common, stable
+    # key; preserve an insertion suffix when one exists.
+    matched = re.search(r"(-?\d+[A-Z]?)$", token)
+    return matched.group(1) if matched else token
 
 
 def _ppi_component_label(source: Path, prefix: str) -> str:
