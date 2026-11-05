@@ -1673,6 +1673,225 @@ def coupled_rewiring_plot(analysis: Path) -> str | None:
     return _coupled_figure(fig, "Interface contact rewiring", height=690)
 
 
+def _ppi_pair_table(analysis: Path) -> tuple[pd.DataFrame, Path]:
+    """Return canonical persistent residue-pair contacts, or an empty table."""
+    source = analysis / "Interface_RIN" / "interface_residue_pair_contacts.csv"
+    table = _read_table(source)
+    needed = {"ChainA_Label", "ChainB_Label", "ResidueA", "ResidueB", "ContactFraction"}
+    if table is None or not needed.issubset(table.columns):
+        return pd.DataFrame(), source
+    table = table.copy()
+    for column in ("ContactFraction", "MeanMinDistance_A", "MinObservedDistance_A"):
+        if column in table:
+            table[column] = pd.to_numeric(table[column], errors="coerce")
+    return table.dropna(subset=["ContactFraction"]), source
+
+
+def _residue_token(value: object) -> str:
+    """Match deposited chain-qualified labels to RMSF residue identifiers."""
+    return str(value).rsplit(":", 1)[-1].strip().upper()
+
+
+def _ppi_component_label(source: Path, prefix: str) -> str:
+    return source.stem.removeprefix(prefix)
+
+
+def ppi_rmsd_distribution_plot(analysis: Path) -> str | None:
+    """Compare the sampled RMSD distributions of independent components."""
+    fig = go.Figure()
+    for index, source in enumerate(sorted(analysis.glob("RMSD_*.csv"))):
+        if source.name in {"RMSD_Protein.csv", "FullComplex_RMSD.csv"}:
+            continue
+        table = _read_table(source)
+        if table is None or "RMSD_Å" not in table:
+            continue
+        values = pd.to_numeric(table["RMSD_Å"], errors="coerce").dropna()
+        if len(values) < 2:
+            continue
+        label = _ppi_component_label(source, "RMSD_")
+        color = CHAIN_COLORS[index % len(CHAIN_COLORS)]
+        fig.add_trace(go.Violin(y=values, name=label, box_visible=True, meanline_visible=True,
+                                points="outliers", line={"color": color}, fillcolor=color,
+                                opacity=.62, hovertemplate=f"Component={escape(label)}<br>RMSD=%{{y:.3f}} Å<extra></extra>"))
+    if not fig.data:
+        return None
+    fig.update_layout(title="Component RMSD distributions", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                      font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
+                      margin={"l": 64, "r": 24, "t": 65, "b": 70}, height=420,
+                      showlegend=False, yaxis={"title": "RMSD (Å)", "gridcolor": GRID},
+                      xaxis={"title": "Independently aligned component", "gridcolor": GRID})
+    return plot(fig, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def ppi_q_vs_rmsd_plot(analysis: Path) -> str | None:
+    """Relate the shared fold-retention score to each component's motion."""
+    q_source = analysis / "protein_native_contact_q.csv"
+    q = _read_table(q_source)
+    if q is None or not {"Time_ns", "Q_protein_native_contact_fraction"}.issubset(q.columns):
+        return None
+    q = q[["Time_ns", "Q_protein_native_contact_fraction"]].copy()
+    q["Time_ns"] = pd.to_numeric(q["Time_ns"], errors="coerce")
+    q["Q_protein_native_contact_fraction"] = pd.to_numeric(q["Q_protein_native_contact_fraction"], errors="coerce")
+    q = q.dropna().sort_values("Time_ns")
+    fig = go.Figure()
+    for index, source in enumerate(sorted(analysis.glob("RMSD_*.csv"))):
+        if source.name in {"RMSD_Protein.csv", "FullComplex_RMSD.csv"}:
+            continue
+        table = _read_table(source)
+        if table is None or not {"Time_ns", "RMSD_Å"}.issubset(table.columns):
+            continue
+        table = table[["Time_ns", "RMSD_Å"]].copy()
+        table["Time_ns"] = pd.to_numeric(table["Time_ns"], errors="coerce")
+        table["RMSD_Å"] = pd.to_numeric(table["RMSD_Å"], errors="coerce")
+        merged = pd.merge_asof(q, table.dropna().sort_values("Time_ns"), on="Time_ns", direction="nearest")
+        merged = _sample_table(merged.dropna())
+        if merged.empty:
+            continue
+        label = _ppi_component_label(source, "RMSD_")
+        fig.add_trace(go.Scattergl(x=merged["RMSD_Å"], y=merged["Q_protein_native_contact_fraction"], mode="markers",
+                                   name=label, marker={"color": CHAIN_COLORS[index % len(CHAIN_COLORS)], "size": 6, "opacity": .48},
+                                   hovertemplate=f"Component={escape(label)}<br>RMSD=%{{x:.3f}} Å<br>Native-contact Q=%{{y:.3f}}<extra></extra>"))
+    if not fig.data:
+        return None
+    fig.update_layout(title="Fold retention Q versus component RMSD", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                      font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 64, "r": 24, "t": 65, "b": 115}, height=430,
+                      legend=LEGEND_BELOW, xaxis={"title": "Component RMSD (Å)", "gridcolor": GRID},
+                      yaxis={"title": "Shared native-contact Q", "range": [0, 1.05], "gridcolor": GRID})
+    return plot(fig, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def ppi_interface_phase_plot(analysis: Path) -> str | None:
+    """Show the shared contact-count / closest-gap regime, colored by time."""
+    table, _ = _interface_time_data(analysis)
+    table = _sample_table(table)
+    if len(table) < 2:
+        return None
+    fig = go.Figure(go.Scattergl(x=table["ContactCount"], y=table["MinDistance_A"], mode="markers",
+        marker={"color": table["Time_ns"], "colorscale": [[0, "#0d637a"], [1, CYAN]], "size": 6, "opacity": .62,
+                "colorbar": {"title": "Time (ns)", "tickfont": {"color": TEXT}}},
+        hovertemplate="Time=%{marker.color:.3f} ns<br>Interface contacts=%{x:.0f}<br>Closest gap=%{y:.3f} Å<extra></extra>"))
+    fig.update_layout(title="Shared interface engagement phase space", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                      font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 64, "r": 80, "t": 65, "b": 70}, height=430,
+                      xaxis={"title": "Residue-pair contacts", "gridcolor": GRID}, yaxis={"title": "Closest interface gap (Å)", "gridcolor": GRID})
+    return plot(fig, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def ppi_stability_snapshot_html(analysis: Path) -> str:
+    """Compact early-versus-late medians; does not manufacture a stability score."""
+    def summary(source: Path, value: str) -> tuple[float, float] | None:
+        table = _read_table(source)
+        if table is None or value not in table:
+            return None
+        values = pd.to_numeric(table[value], errors="coerce").dropna().to_numpy()
+        if len(values) < 4:
+            return None
+        window = max(1, len(values) // 10)
+        return float(np.median(values[:window])), float(np.median(values[-window:]))
+    tiles: list[str] = []
+    shared = [("Interface contacts", analysis / "Interface_RIN" / "interface_contact_timeseries.csv", "ContactCount", "", CYAN),
+              ("Closest gap", analysis / "Interface_RIN" / "interface_contact_timeseries.csv", "MinDistance_A", " Å", CYAN),
+              ("Native-contact Q", analysis / "protein_native_contact_q.csv", "Q_protein_native_contact_fraction", "", CYAN)]
+    for label, source, column, unit, color in shared:
+        value = summary(source, column)
+        if value:
+            early, late = value
+            tiles.append(f'<div class="metric-tile" style="border-color:{color}"><strong style="color:{color}">SHARED · {escape(label)}</strong><span>{early:.3g}{unit} → {late:.3g}{unit}</span><small>early 10% → late 10% median</small></div>')
+    for index, source in enumerate(sorted(analysis.glob("RMSD_*.csv"))):
+        if source.name in {"RMSD_Protein.csv", "FullComplex_RMSD.csv"}:
+            continue
+        value = summary(source, "RMSD_Å")
+        if value:
+            early, late = value; label = _ppi_component_label(source, "RMSD_"); color = CHAIN_COLORS[index % len(CHAIN_COLORS)]
+            tiles.append(f'<div class="metric-tile" style="border-color:{color}"><strong style="color:{color}">COMPONENT {index + 1} · {escape(label)} RMSD</strong><span>{early:.3g} Å → {late:.3g} Å</span><small>early 10% → late 10% median</small></div>')
+    for index, source in enumerate(sorted(analysis.glob("Radius_of_Gyration_*.csv"))):
+        if source.name.startswith("Radius_of_Gyration_Protein"):
+            continue
+        value = summary(source, "Rg_Component_Å")
+        if value:
+            early, late = value; label = _ppi_component_label(source, "Radius_of_Gyration_"); color = CHAIN_COLORS[index % len(CHAIN_COLORS)]
+            tiles.append(f'<div class="metric-tile" style="border-color:{color}"><strong style="color:{color}">COMPONENT {index + 1} · {escape(label)} Rg</strong><span>{early:.3g} Å → {late:.3g} Å</span><small>early 10% → late 10% median</small></div>')
+    if not tiles:
+        return ""
+    return '<div class="scorecard"><h3>Early → late stability snapshot</h3><p>ELI5: compare medians from the first and last tenth of the run. This flags drift worth inspecting; it is not a pass/fail score.</p><div class="metric-grid">' + ''.join(tiles) + '</div></div>'
+
+
+def _ppi_rmsf_with_contacts(analysis: Path) -> list[tuple[str, pd.DataFrame, str]]:
+    """Join each chain-local RMSF table to its strongest saved interface partner."""
+    pairs, _ = _ppi_pair_table(analysis)
+    if pairs.empty:
+        return []
+    records: list[tuple[str, pd.DataFrame, str]] = []
+    for index, source in enumerate(sorted(analysis.glob("RMSF_*_per_residue.csv"))):
+        if source.name == "RMSF_Protein_per_residue.csv":
+            continue
+        table = _read_table(source)
+        if table is None or not {"Residue", "RMSF_Å"}.issubset(table.columns):
+            continue
+        label = _ppi_component_label(source, "RMSF_").removesuffix("_per_residue")
+        relevant = pairs[pairs["ChainA_Label"].astype(str).str.contains(label, case=False, regex=False) | pairs["ChainB_Label"].astype(str).str.contains(label, case=False, regex=False)]
+        stats: dict[str, dict[str, object]] = {}
+        for _, row in relevant.iterrows():
+            left, right = _residue_token(row["ResidueA"]), _residue_token(row["ResidueB"])
+            token = left if label.casefold() in str(row["ChainA_Label"]).casefold() else right
+            partner = right if token == left else left
+            current = stats.setdefault(token, {"Max persistence": 0.0, "Partners": []})
+            current["Max persistence"] = max(float(current["Max persistence"]), float(row["ContactFraction"]))
+            current["Partners"].append(partner)
+        frame = table[["Residue", "RMSF_Å"]].copy()
+        frame["RMSF_Å"] = pd.to_numeric(frame["RMSF_Å"], errors="coerce")
+        frame["Residue token"] = frame["Residue"].astype(str).map(_residue_token)
+        frame["Max persistence"] = frame["Residue token"].map(lambda value: float(stats.get(value, {}).get("Max persistence", 0.0)))
+        frame["Partners"] = frame["Residue token"].map(lambda value: ", ".join(sorted(set(stats.get(value, {}).get("Partners", [])))))
+        records.append((label, frame.dropna(subset=["RMSF_Å"]), CHAIN_COLORS[index % len(CHAIN_COLORS)]))
+    return records
+
+
+def ppi_rmsf_interface_status_plot(analysis: Path) -> str | None:
+    fig = go.Figure()
+    for label, table, color in _ppi_rmsf_with_contacts(analysis):
+        for status, subset, shade in (("interface residues", table[table["Max persistence"] > 0], color), ("non-interface residues", table[table["Max persistence"] <= 0], "#52627c")):
+            if subset.empty:
+                continue
+            fig.add_trace(go.Box(y=subset["RMSF_Å"], name=f"{label} · {status}", marker_color=shade, boxpoints="outliers", jitter=.25,
+                                 hovertemplate=f"Component={escape(label)}<br>Status={status}<br>RMSF=%{{y:.3f}} Å<extra></extra>"))
+    if not fig.data:
+        return None
+    fig.update_layout(title="Interface residues versus the rest of each component", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                      font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 64, "r": 24, "t": 65, "b": 125}, height=430,
+                      legend=LEGEND_BELOW, yaxis={"title": "Residue RMSF (Å)", "gridcolor": GRID}, xaxis={"gridcolor": GRID})
+    return plot(fig, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def ppi_rmsf_persistence_plot(analysis: Path) -> str | None:
+    fig = go.Figure()
+    for label, table, color in _ppi_rmsf_with_contacts(analysis):
+        subset = table[table["Max persistence"] > 0]
+        if subset.empty:
+            continue
+        fig.add_trace(go.Scatter(x=subset["RMSF_Å"], y=subset["Max persistence"], mode="markers", name=label,
+            customdata=np.column_stack([subset["Residue"].astype(str), subset["Partners"].astype(str)]), marker={"color": color, "size": 9, "opacity": .76},
+            hovertemplate=f"Component={escape(label)}<br>Residue=%{{customdata[0]}}<br>RMSF=%{{x:.3f}} Å<br>Strongest partner persistence=%{{y:.1%}}<br>Partners=%{{customdata[1]}}<extra></extra>"))
+    if not fig.data:
+        return None
+    fig.update_layout(title="Interface mobility versus strongest contact persistence", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                      font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 64, "r": 24, "t": 65, "b": 115}, height=430,
+                      legend=LEGEND_BELOW, xaxis={"title": "Residue RMSF (Å)", "gridcolor": GRID}, yaxis={"title": "Strongest persistent partner", "tickformat": ".0%", "gridcolor": GRID})
+    return plot(fig, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def ppi_flexible_anchor_html(analysis: Path) -> str:
+    lanes = []
+    for index, (label, table, color) in enumerate(_ppi_rmsf_with_contacts(analysis), start=1):
+        anchors = table[table["Max persistence"] > 0].nlargest(8, "RMSF_Å")
+        if anchors.empty:
+            continue
+        rows = ''.join(f"<tr><td>{escape(str(row.Residue))}</td><td>{row.RMSF_Å:.2f} Å</td><td>{row['Max persistence']:.0%}</td><td>{escape(str(row.Partners))}</td></tr>" for _, row in anchors.iterrows())
+        lanes.append(f'<section class="component-lane" style="border-color:{color}"><div class="lane-label" style="color:{color}">COMPONENT {index} · {escape(label)}</div><h3>Most mobile persistent interface residues</h3><table class="summary-table"><thead><tr><th>Residue</th><th>RMSF</th><th>Strongest contact</th><th>Persistent partners</th></tr></thead><tbody>{rows}</tbody></table></section>')
+    if not lanes:
+        return ""
+    return '<div class="scorecard"><h3>Flexible interface anchors</h3><p>ELI5: these residues remain part of the interface but move the most. A mobile anchor can be adaptive rather than weak—read its RMSF beside partner persistence.</p>' + ''.join(lanes) + '</div>'
+
+
 def coupled_sse_binding_plot(sse_source: Path, interface: pd.DataFrame, component_label: str, color: str) -> str | None:
     """Give one component a local SSE lane while retaining the shared contact reference."""
     table = _read_table(sse_source)
@@ -3392,6 +3611,27 @@ def main() -> None:
             note="Each trace is measured after alignment on that component's declared anchor selection (Cα for proteins). Colors identify components: first = Miami orange, second = neon Miami green.")
         add("overview", chain_rmsd_plot(chain_rmsd_sources), "Chain-resolved RMSD", chain_rmsd_sources[0],
             note="Start with this: each color is one component, fitted and measured on its own Cα anchors.")
+    if is_multichain_system:
+        # Keep component distributions and shared interface phase space in the
+        # Stability tab: these are complementary summaries, not duplicate
+        # time-series panels from Coupled dynamics.
+        interface_time_source = analysis / "Interface_RIN" / "interface_contact_timeseries.csv"
+        rmsd_distribution = ppi_rmsd_distribution_plot(analysis)
+        if rmsd_distribution and chain_rmsd_sources:
+            add("stability", rmsd_distribution, "Component RMSD distributions", chain_rmsd_sources[0],
+                note="ELI5: this shows the range each independently aligned component actually explored. A broad orange or green shape means that component sampled more structural variation; it is not an affinity score.")
+        q_motion = ppi_q_vs_rmsd_plot(analysis)
+        q_source = analysis / "protein_native_contact_q.csv"
+        if q_motion and q_source.is_file():
+            add("stability", q_motion, "Fold retention Q versus component RMSD", q_source,
+                note="ELI5: each point is one sampled moment. Compare the orange and green clouds: lower Q with higher RMSD flags moments where the starting fold is less retained.")
+        phase = ppi_interface_phase_plot(analysis)
+        if phase and interface_time_source.is_file():
+            add("stability", phase, "Shared interface engagement phase space", interface_time_source,
+                note="ELI5: cyan is a whole-interface view. Right means more residue-pair contacts; lower means closer approach. The time colour reveals whether the interface moves into a different regime later in the run.")
+        snapshot = ppi_stability_snapshot_html(analysis)
+        if snapshot:
+            groups["stability"].insert(0, snapshot)
     for source in sorted(analysis.glob("*_Ligand_RMSD.csv")):
         partner_rmsd = "Peptide RMSD" if context.partner_kind == "peptide" else "Ligand RMSD"
         add("stability", multiseries_plot(source, partner_rmsd, "Time_ps", ["Ligand_RMSD"], "RMSD (Å)", colors=[ORANGE]), partner_rmsd, source)
@@ -3422,6 +3662,19 @@ def main() -> None:
                 note="This component is plotted independently with its own chain-local residue positions. Hover reports the original residue ID and anchor atom used for RMSF.", component=component_index + 1)
         add("overview", chain_rmsf_plot(chain_rmsf_sources), "Chain-resolved residue RMSF", chain_rmsf_sources[0],
             note="Comparison only: each color is an independent component beginning at local position 1; hover preserves the source residue identifier.")
+    if is_multichain_system:
+        pair_source = analysis / "Interface_RIN" / "interface_residue_pair_contacts.csv"
+        interface_rmsf = ppi_rmsf_interface_status_plot(analysis)
+        if interface_rmsf and pair_source.is_file():
+            add("flexibility", interface_rmsf, "Interface residues versus component background", pair_source,
+                note="ELI5: orange and green interface residues are compared with the rest of the same component. This asks whether the contact surface is locally steadier or more mobile than its own protein background.")
+        rmsf_persistence = ppi_rmsf_persistence_plot(analysis)
+        if rmsf_persistence and pair_source.is_file():
+            add("flexibility", rmsf_persistence, "Interface mobility versus strongest contact persistence", pair_source,
+                note="ELI5: high on this graph means a residue keeps at least one partner for much of the run; far right means it is mobile. Hover gives the original residue ID and persistent partners.")
+        flexible_anchors = ppi_flexible_anchor_html(analysis)
+        if flexible_anchors:
+            groups["flexibility"].append(flexible_anchors)
     for source in sorted(analysis.glob("RMSF_*.csv")):
         if source.name.endswith("_per_residue.csv"): continue
         add("flexibility", categorical_bar_plot(source, f"{protein_name} backbone-atom RMSF", "Atom_Index", ["RMSF_Å"], "RMSF (Å)", colors=[GREEN]), f"{protein_name} backbone-atom RMSF", source, note="This is the atom-resolved backbone selection used by the analysis; use the adjacent residue plot for residue-level interpretation.")
