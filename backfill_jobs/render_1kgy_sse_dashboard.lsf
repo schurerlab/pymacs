@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#BSUB -J pymacs-1kgy-sse-dashboard
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 01:00
+#BSUB -n 2
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/triton/home/jxs794/Pymacs/backfill_staging/render_1kgy_sse_dashboard.%J.out
+#BSUB -eo /projectnb/triton/home/jxs794/Pymacs/backfill_staging/render_1kgy_sse_dashboard.%J.err
+
+set -euo pipefail
+readonly ROOT=/projectnb/triton/home/jxs794/Molecular_Dynamics/1kgy_ref
+readonly STAGE=/projectnb/triton/home/jxs794/Pymacs/backfill_staging/chain_resolved_dynamics_d976611
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+python "$STAGE/5_PyMACS_Result_Dashboard.py" --root "$ROOT"
+test -s "$ROOT/Analysis_Results/PyMACS_Result_Dashboard.html"

@@ -1221,10 +1221,10 @@ def numeric_plot(csv_file: Path, color: str) -> str | None:
             ))
         figure.update_layout(
             title=csv_file.stem.replace("_", " "), paper_bgcolor=PANEL, plot_bgcolor=PANEL,
-            font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 55, "r": 20, "t": 55, "b": 48},
+            font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 55, "r": 20, "t": 100, "b": 48},
             xaxis={"title": "Time (ns)", "gridcolor": GRID, "zerolinecolor": GRID},
             yaxis={"title": "Fraction of residues", "range": [0, 1], "gridcolor": GRID, "zerolinecolor": GRID},
-            hovermode="x unified", height=360, legend={"orientation": "h", "y": 1.13},
+            hovermode="x unified", height=360, legend={"orientation": "h", "y": 1.18, "yanchor": "bottom"},
         )
         return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
     numeric = [column for column in frame.columns if pd.api.types.is_numeric_dtype(frame[column])]
@@ -1312,10 +1312,10 @@ def multiseries_plot(csv_file: Path, title: str, x_column: str, y_columns: list[
     figure.update_layout(
         title=title, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
-        margin={"l": 60, "r": 20, "t": 55, "b": 52}, hovermode="x unified", height=380,
+        margin={"l": 60, "r": 20, "t": 100, "b": 52}, hovermode="x unified", height=380,
         xaxis={"title": x_column.replace("_", " "), "gridcolor": GRID},
         yaxis={"title": y_title, "gridcolor": GRID},
-        legend={"orientation": "h", "y": 1.13},
+        legend={"orientation": "h", "y": 1.18, "yanchor": "bottom"},
     )
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
@@ -1349,9 +1349,9 @@ def chain_rmsd_plot(sources: list[Path]) -> str | None:
     if not figure.data:
         return None
     figure.update_layout(title="Chain-resolved RMSD", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
-        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52},
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 100, "b": 52},
         hovermode="x unified", height=400, xaxis={"title": "Time (ns)", "gridcolor": GRID},
-        yaxis={"title": "RMSD (Å)", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.15})
+        yaxis={"title": "RMSD (Å)", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.18, "yanchor": "bottom"})
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
@@ -1385,9 +1385,9 @@ def chain_rmsf_plot(sources: list[Path]) -> str | None:
     if not figure.data:
         return None
     figure.update_layout(title="Chain-resolved residue RMSF", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
-        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52},
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 100, "b": 52},
         hovermode="closest", height=420, xaxis={"title": "Chain-local residue position (see hover for original residue)", "gridcolor": GRID},
-        yaxis={"title": "RMSF (Å)", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.15})
+        yaxis={"title": "RMSF (Å)", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.18, "yanchor": "bottom"})
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
@@ -2221,7 +2221,7 @@ def sampled_indices(length: int, maximum: int = MAX_HEATMAP_TIMEPOINTS) -> np.nd
     return np.linspace(0, length - 1, maximum, dtype=int)
 
 
-def heatmap_plot(csv_file: Path, kind: str) -> str | None:
+def heatmap_plot(csv_file: Path, kind: str, title_override: str | None = None) -> str | None:
     """Render the scientifically meaningful matrix outputs as dedicated heatmaps."""
     try:
         frame = pd.read_csv(csv_file)
@@ -2316,6 +2316,8 @@ def heatmap_plot(csv_file: Path, kind: str) -> str | None:
         title, x_title, y_title = "Ligand interaction type over time", "Time (ns; 2 ns bins)", "Protein residue"
     else:
         return None
+    if title_override:
+        title = title_override
     figure.update_layout(
         title=title, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 75, "r": 25, "t": 55, "b": 48},
@@ -2503,6 +2505,7 @@ def main() -> None:
     gallery_csvs: set[Path] = set()
     colours = [CYAN, GREEN, MAGENTA, ORANGE]
     heatmap_cards = []
+    secondary_heatmap_cards = []
     groups: dict[str, list[str]] = {"overview": [], "stability": [], "flexibility": [], "secondary": [], "contacts": [], "chemistry": [], "distances": [], "coupled": [], "structure": []}
     def add(group: str, graph: str | None, title: str, source: Path, label: str = "Download exact source CSV", note: str = "") -> None:
         if graph:
@@ -2514,7 +2517,19 @@ def main() -> None:
     if dssp_file.is_file():
         graph = heatmap_plot(dssp_file, "dssp")
         if graph:
-            heatmap_cards.append(dashboard_card(graph, dssp_file.stem, dssp_file.relative_to(output.parent).as_posix(), "Download full SSE matrix CSV"))
+            secondary_heatmap_cards.append(dashboard_card(graph, dssp_file.stem, dssp_file.relative_to(output.parent).as_posix(), "Download full SSE matrix CSV"))
+    # Protein-complex chains have independent residue numbering.  Publish a
+    # heatmap for each chain rather than letting a single pooled matrix imply
+    # that the final residue of one component neighbours the first of another.
+    for source in sorted(analysis.glob("DSSP_chain_*.csv")):
+        chain_label = source.stem.removeprefix("DSSP_chain_")
+        graph = heatmap_plot(source, "dssp", f"Chain {chain_label} secondary-structure evolution")
+        if graph:
+            secondary_heatmap_cards.append(dashboard_card(
+                graph, f"Chain {chain_label} SSE evolution",
+                source.relative_to(output.parent).as_posix(), "Download chain SSE matrix CSV",
+                "This map is chain-local: residue positions do not continue into another protein chain.",
+            ))
     interaction_file = analysis / "InteractionTypes_Framewise.csv"
     if interaction_file.is_file():
         graph = heatmap_plot(interaction_file, "interactions")
@@ -2706,8 +2721,8 @@ def main() -> None:
     # Matrix outputs are the fastest way to understand whether a ligand keeps
     # the starting pocket chemistry and whether the protein retains its fold,
     # so they deliberately lead the report instead of being buried in exports.
-    groups["secondary"] = heatmap_cards[:1] + groups["secondary"]
-    groups["contacts"] = heatmap_cards[1:] + groups["contacts"]
+    groups["secondary"] = secondary_heatmap_cards + groups["secondary"]
+    groups["contacts"] = heatmap_cards + groups["contacts"]
     cards = [card for values in groups.values() for card in values]
     if not cards and not has_interface_rin:
         cards.append('<article class="card"><h2>Analysis data is still being written</h2><p>No tabular analysis output was available when this report was generated. Re-run this report after 3A finishes.</p></article>')
