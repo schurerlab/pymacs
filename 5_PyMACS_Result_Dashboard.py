@@ -1741,6 +1741,312 @@ def interface_rin_plots(analysis: Path) -> list[tuple[str, str, Path, str]]:
     return results
 
 
+def _ppi_chemistry_sources(analysis: Path) -> tuple[Path, Path, Path]:
+    """Return the compact PPI chemistry products written by the RIN stage."""
+    interface = analysis / "Interface_RIN"
+    return (
+        interface / "ValidatedInterfaceInteractionOccupancy.csv",
+        interface / "ValidatedInterfaceInteractionEvents.csv",
+        interface / "interface_node_summary.csv",
+    )
+
+
+def _ppi_occupancy_table(analysis: Path) -> pd.DataFrame:
+    """Read the small, exact occupancy summary rather than raw event rows."""
+    occupancy, _, _ = _ppi_chemistry_sources(analysis)
+    try:
+        table = pd.read_csv(occupancy)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return pd.DataFrame()
+    for column in ("Occupancy", "FrameCount", "MeanDistance", "MinDistance", "Angle"):
+        if column in table:
+            table[column] = pd.to_numeric(table[column], errors="coerce")
+    return table
+
+
+def _plotly_div(figure: go.Figure) -> str:
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def ppi_chemistry_composition_plot(analysis: Path) -> str | None:
+    """Show validated chemical occupancy by component without pooling chemistry."""
+    table = _ppi_occupancy_table(analysis)
+    required = {"Component", "InteractionClass", "Occupancy"}
+    if table.empty or not required.issubset(table.columns):
+        return None
+    summary = table.groupby(["Component", "InteractionClass"], dropna=False)["Occupancy"].sum().reset_index()
+    if summary.empty:
+        return None
+    figure = go.Figure()
+    components = list(dict.fromkeys(summary["Component"].astype(str)))
+    for index, component in enumerate(components):
+        block = summary[summary["Component"].astype(str) == component]
+        figure.add_trace(go.Bar(
+            x=block["InteractionClass"].astype(str), y=block["Occupancy"], name=component,
+            marker_color=CHAIN_COLORS[index % len(CHAIN_COLORS)],
+            hovertemplate=f"Component={escape(component)}<br>Chemistry=%{{x}}<br>Summed occupancy=%{{y:.2f}}<extra></extra>",
+        ))
+    figure.update_layout(
+        title="Validated interface chemistry by component", barmode="group", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 65, "r": 20, "t": 60, "b": 120},
+        height=420, legend=LEGEND_BELOW, xaxis={"title": "Validated interaction class", "gridcolor": GRID},
+        yaxis={"title": "Summed occupancy (residue/atom events)", "gridcolor": GRID},
+    )
+    return _plotly_div(figure)
+
+
+def ppi_chemistry_leaderboard_plot(analysis: Path) -> str | None:
+    """Rank the strongest chemically classified PPI contacts with exact values."""
+    table = _ppi_occupancy_table(analysis)
+    needed = {"InteractionClass", "Occupancy"}
+    if table.empty or not needed.issubset(table.columns):
+        return None
+    label_columns = [column for column in ("Component", "Residue", "Partner") if column in table]
+    if not label_columns:
+        return None
+    table = table.sort_values("Occupancy", ascending=False).head(30).copy()
+    label = table[label_columns].fillna("").astype(str).agg(" · ".join, axis=1)
+    custom = np.stack([
+        table.get("FrameCount", pd.Series(np.nan, index=table.index)),
+        table.get("MeanDistance", pd.Series(np.nan, index=table.index)),
+        table.get("MinDistance", pd.Series(np.nan, index=table.index)),
+    ], axis=1)
+    colors = {"H-bond": CYAN, "Ionic": MAGENTA, "Hydrophobic": ORANGE}
+    figure = go.Figure(go.Bar(
+        y=label, x=table["Occupancy"], orientation="h",
+        marker_color=[colors.get(str(value), GREEN) for value in table["InteractionClass"]],
+        customdata=custom,
+        hovertemplate="Contact=%{y}<br>Occupancy=%{x:.1%}<br>Frames=%{customdata[0]:.0f}<br>Mean distance=%{customdata[1]:.2f} Å<br>Closest distance=%{customdata[2]:.2f} Å<extra></extra>",
+    ))
+    figure.update_layout(
+        title="Persistent chemistry leaderboard", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 210, "r": 20, "t": 60, "b": 55},
+        height=max(430, len(table) * 24), xaxis={"title": "Validated interaction occupancy", "range": [0, 1], "gridcolor": GRID},
+        yaxis={"title": "Residue / partner / component", "gridcolor": GRID},
+    )
+    return _plotly_div(figure)
+
+
+def ppi_chemistry_fingerprint_plot(analysis: Path) -> str | None:
+    """A compact residue × chemistry fingerprint; never joins chain numbering."""
+    table = _ppi_occupancy_table(analysis)
+    required = {"Component", "Residue", "InteractionClass", "Occupancy"}
+    if table.empty or not required.issubset(table.columns):
+        return None
+    table = table.copy()
+    table["Residue key"] = table["Component"].astype(str) + " · " + table["Residue"].astype(str)
+    ranked = table.groupby("Residue key")["Occupancy"].sum().nlargest(36).index
+    matrix = table[table["Residue key"].isin(ranked)].pivot_table(
+        index="Residue key", columns="InteractionClass", values="Occupancy", aggfunc="sum", fill_value=0,
+    )
+    if matrix.empty:
+        return None
+    matrix = matrix.loc[matrix.sum(axis=1).sort_values().index]
+    figure = go.Figure(go.Heatmap(
+        z=matrix.to_numpy(), x=matrix.columns.astype(str), y=matrix.index.astype(str), colorscale=[[0, "#07111e"], [.45, "#176b8d"], [1, CYAN]],
+        colorbar={"title": "Occupancy"}, hovertemplate="Residue=%{y}<br>Chemistry=%{x}<br>Summed occupancy=%{z:.2f}<extra></extra>",
+    ))
+    figure.update_layout(
+        title="Residue chemical fingerprints", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 165, "r": 85, "t": 60, "b": 55}, height=max(450, len(matrix) * 20),
+        xaxis={"title": "Validated interaction class", "gridcolor": GRID}, yaxis={"title": "Chain-local residue", "gridcolor": GRID},
+    )
+    return _plotly_div(figure)
+
+
+def ppi_chemistry_geometry_plot(analysis: Path) -> str | None:
+    """Use the atom-level event file for distance/angle distributions, not fake geometry."""
+    _, source, _ = _ppi_chemistry_sources(analysis)
+    if not source.is_file():
+        return None
+    pieces: list[pd.DataFrame] = []
+    columns = ["InteractionClass", "Distance", "Angle"]
+    try:
+        for chunk in pd.read_csv(source, usecols=columns, chunksize=200_000):
+            chunk = chunk[chunk["InteractionClass"].isin(["H-bond", "Ionic", "Hydrophobic"])]
+            if not chunk.empty:
+                pieces.append(chunk)
+            if sum(len(piece) for piece in pieces) >= MAX_EVENT_POINTS:
+                break
+    except (OSError, ValueError, pd.errors.ParserError):
+        return None
+    if not pieces:
+        return None
+    table = pd.concat(pieces, ignore_index=True)
+    table["Distance"] = pd.to_numeric(table["Distance"], errors="coerce")
+    table["Angle"] = pd.to_numeric(table["Angle"], errors="coerce")
+    table = _sample_table(table.dropna(subset=["Distance"]), maximum=MAX_EVENT_POINTS)
+    if table.empty:
+        return None
+    figure = make_subplots(rows=1, cols=2, subplot_titles=("Validated contact distances", "Hydrogen-bond geometry only"))
+    palette = {"H-bond": CYAN, "Ionic": MAGENTA, "Hydrophobic": ORANGE}
+    for kind in ("H-bond", "Ionic", "Hydrophobic"):
+        block = table[table["InteractionClass"] == kind]
+        if block.empty:
+            continue
+        figure.add_trace(go.Box(y=block["Distance"], name=kind, marker_color=palette[kind], boxmean=True,
+                                hovertemplate=f"{kind}<br>Distance=%{{y:.2f}} Å<extra></extra>"), row=1, col=1)
+    hbond = table[(table["InteractionClass"] == "H-bond") & table["Angle"].notna()]
+    if not hbond.empty:
+        figure.add_trace(go.Violin(y=hbond["Angle"], name="H-bond angle", line_color=CYAN, fillcolor="rgba(53,208,255,.26)", box_visible=True,
+                                   hovertemplate="H-bond angle=%{y:.1f}°<extra></extra>"), row=1, col=2)
+    figure.update_layout(title="Validated interaction geometry", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 62, "r": 25, "t": 72, "b": 95}, height=450,
+                         legend=LEGEND_BELOW)
+    figure.update_yaxes(title="Distance (Å)", gridcolor=GRID, row=1, col=1)
+    figure.update_yaxes(title="Angle (degrees)", gridcolor=GRID, row=1, col=2)
+    return _plotly_div(figure)
+
+
+def ppi_chemistry_hub_plot(analysis: Path) -> str | None:
+    """Identify interface hubs using chemistry occupancy and contact-network degree."""
+    occupancy = _ppi_occupancy_table(analysis)
+    _, _, node_source = _ppi_chemistry_sources(analysis)
+    try:
+        nodes = pd.read_csv(node_source)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return None
+    required_nodes = {"Chain_Label", "Residue_Label", "WeightedDegree"}
+    required_occupancy = {"Component", "Residue", "Occupancy", "InteractionClass"}
+    if nodes.empty or occupancy.empty or not required_nodes.issubset(nodes.columns) or not required_occupancy.issubset(occupancy.columns):
+        return None
+    chemistry = occupancy.groupby(["Component", "Residue"], as_index=False).agg(
+        ChemistryOccupancy=("Occupancy", "sum"), ChemistryClasses=("InteractionClass", "nunique"),
+    )
+    merged = nodes.merge(chemistry, how="left", left_on=["Chain_Label", "Residue_Label"], right_on=["Component", "Residue"])
+    merged["ChemistryOccupancy"] = merged["ChemistryOccupancy"].fillna(0)
+    merged["ChemistryClasses"] = merged["ChemistryClasses"].fillna(0)
+    figure = go.Figure()
+    for index, (chain, block) in enumerate(merged.groupby("Chain_Label", sort=False)):
+        figure.add_trace(go.Scatter(
+            x=block["WeightedDegree"], y=block["ChemistryOccupancy"], mode="markers+text", name=str(chain),
+            text=block["Residue_Label"], textposition="top center", textfont={"size": 9},
+            marker={"color": CHAIN_COLORS[index % len(CHAIN_COLORS)], "size": 8 + 4 * np.clip(block["ChemistryClasses"], 0, 3), "opacity": .85},
+            customdata=np.column_stack([block["ChemistryClasses"]]),
+            hovertemplate=f"Component={escape(str(chain))}<br>Residue=%{{text}}<br>Weighted network degree=%{{x:.3f}}<br>Chemistry occupancy=%{{y:.2f}}<br>Interaction classes=%{{customdata[0]:.0f}}<extra></extra>",
+        ))
+    if not figure.data:
+        return None
+    figure.update_layout(title="Chemistry hubs in the interface network", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 70, "r": 25, "t": 65, "b": 115}, height=460,
+                         legend=LEGEND_BELOW)
+    figure.update_xaxes(title="Weighted interface-network degree", gridcolor=GRID)
+    figure.update_yaxes(title="Summed validated chemistry occupancy", gridcolor=GRID)
+    return _plotly_div(figure)
+
+
+def ppi_scorecard_html(analysis: Path) -> str:
+    """A transparent MD evidence scorecard, explicitly not an affinity score."""
+    interface, _ = _interface_time_data(analysis)
+    summary_path = analysis / "Interface_RIN" / "interface_chain_pair_summary.csv"
+    pairs_path = analysis / "Interface_RIN" / "interface_residue_pair_contacts.csv"
+    q_path = analysis / "protein_native_contact_q.csv"
+    cards: list[tuple[str, str, str, str]] = []
+    if not interface.empty:
+        cards.extend([
+            ("Interface contact", f"{interface['ContactCount'].mean():.1f}", "mean residue-pair contacts per sampled frame", "cyan"),
+            ("Closest separation", f"{interface['MinDistance_A'].median():.2f} Å", "median closest heavy-atom separation", "cyan"),
+        ])
+    try:
+        summary = pd.read_csv(summary_path)
+        if not summary.empty and "ContactFraction" in summary:
+            cards.append(("Interface occupancy", f"{float(summary['ContactFraction'].mean()):.1%}", "frames meeting the defined interface cutoff", "cyan"))
+    except (OSError, ValueError, pd.errors.ParserError):
+        pass
+    try:
+        pairs = pd.read_csv(pairs_path)
+        if "ContactFraction" in pairs:
+            for threshold in (.5, .75, .9):
+                cards.append((f"Persistent pairs ≥{threshold:.0%}", str(int((pd.to_numeric(pairs['ContactFraction'], errors='coerce') >= threshold).sum())), "unique residue pairs", "cyan"))
+    except (OSError, ValueError, pd.errors.ParserError):
+        pass
+    occupancy = _ppi_occupancy_table(analysis)
+    if not occupancy.empty and {"InteractionClass", "Occupancy"}.issubset(occupancy.columns):
+        for kind, color in (("H-bond", "blue"), ("Ionic", "pink"), ("Hydrophobic", "orange")):
+            persistent = occupancy[(occupancy["InteractionClass"] == kind) & (occupancy["Occupancy"] >= .5)]
+            cards.append((f"Persistent {kind}", str(len(persistent)), "validated residue/atom events at ≥50% occupancy", color))
+    try:
+        q = pd.read_csv(q_path)
+        if "Q_protein_native_contact_fraction" in q:
+            cards.append(("Fold retention Q", f"{pd.to_numeric(q['Q_protein_native_contact_fraction'], errors='coerce').mean():.2f}", "mean native-contact fraction", "cyan"))
+    except (OSError, ValueError, pd.errors.ParserError):
+        pass
+    # Keep the scorecard faithful to every component.  These are deliberately
+    # descriptive trajectory summaries, not thresholds or a claim that a
+    # particular RMSD/Rg value is universally "good".
+    for index, source in enumerate(sorted(analysis.glob("RMSD_*.csv"))):
+        if source.name in {"RMSD_Protein.csv", "FullComplex_RMSD.csv"}:
+            continue
+        table = _read_table(source)
+        if table is None or "RMSD_Å" not in table:
+            continue
+        values = pd.to_numeric(table["RMSD_Å"], errors="coerce").dropna()
+        if not values.empty:
+            label = _chain_label_from_metric(source, "RMSD_")
+            cards.append((f"{label} RMSD", f"{values.mean():.2f} Å", "mean component Cα RMSD", f"component{index + 1}"))
+    for index, source in enumerate(sorted(analysis.glob("Radius_of_Gyration_*.csv"))):
+        if source.name in {"Radius_of_Gyration_Protein.csv", "Radius_of_Gyration_Protein_Ligand_Complex.csv"}:
+            continue
+        table = _read_table(source)
+        if table is None or "Rg_Component_Å" not in table:
+            continue
+        values = pd.to_numeric(table["Rg_Component_Å"], errors="coerce").dropna()
+        if not values.empty:
+            label = source.stem.removeprefix("Radius_of_Gyration_")
+            drift = values.iloc[-1] - values.iloc[0]
+            cards.append((f"{label} compactness", f"{values.median():.2f} Å", f"median Rg; end-to-start Δ {drift:+.2f} Å", f"component{index + 1}"))
+    for index, source in enumerate(sorted(analysis.glob("RMSF_*_per_residue.csv"))):
+        if source.name == "RMSF_Protein_per_residue.csv":
+            continue
+        table = _read_table(source)
+        if table is None or "RMSF_Å" not in table:
+            continue
+        values = pd.to_numeric(table["RMSF_Å"], errors="coerce").dropna()
+        if not values.empty:
+            label = _chain_label_from_metric(source, "RMSF_", "_per_residue.csv")
+            cards.append((f"{label} flexible sites", f"{values.quantile(.95):.2f} Å", "95th-percentile residue RMSF", f"component{index + 1}"))
+    for index, source in enumerate(sorted(analysis.glob("SSE_chain_*_fractions.csv"))):
+        table = _read_table(source)
+        if table is None or not {"Helix", "Sheet"}.issubset(table.columns):
+            continue
+        structure = pd.to_numeric(table["Helix"], errors="coerce") + pd.to_numeric(table["Sheet"], errors="coerce")
+        structure = structure.dropna()
+        if not structure.empty:
+            label = source.stem.removeprefix("SSE_chain_").removesuffix("_fractions")
+            cards.append((f"{label} structured", f"{structure.mean():.0%}", "mean helix + sheet fraction", f"component{index + 1}"))
+    frame_path = analysis / "Interface_RIN" / "interface_frame_index.csv"
+    try:
+        frames = pd.read_csv(frame_path)
+        if "Time_ns" in frames and not frames.empty:
+            cards.append(("Simulation coverage", f"{pd.to_numeric(frames['Time_ns'], errors='coerce').max():.1f} ns", f"{len(frames):,} analyzed frames", "cyan"))
+    except (OSError, ValueError, pd.errors.ParserError):
+        pass
+    if not cards:
+        return ""
+    blocks = "".join(f'<article class="evidence-score evidence-score--{color}"><span>{escape(label)}</span><strong>{escape(value)}</strong><small>{escape(detail)}</small></article>' for label, value, detail, color in cards)
+    style = '<style>.md-evidence-scorecard{grid-column:1/-1;margin:0 0 18px;border:1px solid #285a79;border-radius:18px;padding:18px;background:linear-gradient(135deg,#081a29,#080b14 58%)}.md-evidence-scorecard header{border-left:4px solid #35d0ff;padding-left:12px;margin-bottom:15px}.md-evidence-scorecard header p{margin:.35rem 0 0;color:#7aa6d9;max-width:980px}.evidence-score-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:10px}.evidence-score{border:1px solid #285a79;border-top:4px solid #35d0ff;border-radius:13px;padding:12px;background:#07111e}.evidence-score--orange,.evidence-score--component1{border-top-color:#ff8a3d}.evidence-score--green,.evidence-score--component2{border-top-color:#12f28a}.evidence-score--component3{border-top-color:#ae65ff}.evidence-score--component4{border-top-color:#ff4fb8}.evidence-score--component5{border-top-color:#ffd44d}.evidence-score--blue{border-top-color:#35d0ff}.evidence-score--pink{border-top-color:#ff2bd6}.evidence-score--cyan{border-top-color:#35d0ff}.evidence-score span,.evidence-score small{display:block}.evidence-score span{font-size:.77rem;font-weight:850;color:#cfe8ff}.evidence-score strong{display:block;color:#fff;font-size:1.55rem;margin:6px 0}.evidence-score small{color:#7aa6d9;line-height:1.35}</style>'
+    return (style + '<section class="md-evidence-scorecard"><header><div class="eyebrow">MD evidence scorecard</div><h2>Interface, fold, and component behavior at a glance</h2>'
+            '<p>ELI5: these are measurements from this trajectory, arranged as a reading checklist. They summarize persistence and structure; they are not a binding-affinity, safety, or experimental-activity score.</p></header>'
+            f'<div class="evidence-score-grid">{blocks}</div></section>')
+
+
+def data_provenance_html(analysis: Path, output: Path) -> str:
+    """Account for every published analysis asset without making every CSV a plot."""
+    files = sorted(path for path in analysis.rglob("*") if path.is_file() and path.name != RESULTS_MANIFEST_NAME)
+    if not files:
+        return ""
+    rendered_tokens = ("rmsd", "rmsf", "radius", "dssp", "sse", "contact", "interaction", "interface", "native_contact", "trajectory")
+    rendered, source = [], []
+    for path in files:
+        rel = path.relative_to(output.parent).as_posix()
+        item = f'<li><a href="{escape(rel)}" download>{escape(path.relative_to(analysis).as_posix())}</a><small>{path.stat().st_size / 1024:.1f} KB</small></li>'
+        (rendered if any(token in path.name.lower() for token in rendered_tokens) else source).append(item)
+    style = '<style>.provenance-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}.provenance-block{border:1px solid #285a79;border-radius:15px;padding:14px;background:#08111e}.provenance-block h3{margin:0 0 6px}.provenance-block p{margin:0 0 10px;color:#7aa6d9;font-size:.86rem}.provenance-block ul{max-height:420px;overflow:auto;margin:0;padding-left:18px}.provenance-block li{padding:4px 0;color:#cfe8ff;display:flex;justify-content:space-between;gap:10px}.provenance-block a{color:#35d0ff;overflow-wrap:anywhere}.provenance-block small{color:#7aa6d9;white-space:nowrap}</style>'
+    return (style + '<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Data & provenance</div><h2>Every saved analysis asset, accounted for</h2><p>ELI5: the dashboard leads with interpretable charts, while this inventory keeps every published CSV, matrix, structure, and raw evidence file reachable. A file can be rendered in a panel and still remain available exactly as saved.</p></div></div><div class="provenance-grid">'
+            f'<article class="provenance-block"><h3>Visualized and downloadable analysis</h3><p>Tables/matrices used by the guided dossier or a closely related drilldown.</p><ul>{"".join(rendered)}</ul></article>'
+            f'<article class="provenance-block"><h3>Supplementary raw and provenance assets</h3><p>Supporting coordinates, manifests, explorers, and source products retained for reproducibility.</p><ul>{"".join(source) or "<li>No additional files.</li>"}</ul></article></div></section>')
+
+
 def categorical_bar_plot(csv_file: Path, title: str, category: str, values: list[str],
                          y_title: str, stacked: bool = False,
                          colors: list[str] | None = None) -> str | None:
@@ -3016,6 +3322,10 @@ def main() -> None:
         if scorecard:
             source = analysis / "Protein_RMSD.csv"
             groups["overview"].append(dashboard_card(scorecard, "Binding scorecard", source.relative_to(output.parent).as_posix() if source.is_file() else "", note="Read this as a trajectory summary, then use the stability, contacts, chemistry, and distance tabs for the supporting evidence."))
+    if is_multichain_system:
+        scorecard = ppi_scorecard_html(analysis)
+        if scorecard:
+            groups["overview"].append(scorecard)
     if context.partner_kind == "peptide":
         interface_scorecard = interface_scorecard_html(analysis)
         if interface_scorecard:
@@ -3182,6 +3492,24 @@ def main() -> None:
             add("chemistry", chemistry_composition_plot(interaction_file), "Interaction chemistry composition over time", interaction_file, note="Counts are binned event observations, so use the persistent interaction explorer for exact residue–atom occupancy.")
             add("chemistry", residue_chemistry_heatmap(interaction_file), "Residue × interaction chemistry occupancy", interaction_file, note="Each row is normalized within that residue's observed interaction events.")
 
+    # Protein–protein chemistry is written by the Interface_RIN stage in a
+    # separate validated event bundle.  Surface it directly instead of
+    # borrowing ligand-only tables or leaving the chemistry tab as a network
+    # degree chart alone.
+    if is_multichain_system:
+        occupancy_source, event_source, node_source = _ppi_chemistry_sources(analysis)
+        add("chemistry", ppi_chemistry_composition_plot(analysis), "Validated interface chemistry by component", occupancy_source,
+            note="ELI5: each bar adds the validated chemistry observed for the named component. Orange/green identify components; chemistry classes remain distinct so one type never masquerades as another.")
+        add("chemistry", ppi_chemistry_leaderboard_plot(analysis), "Persistent chemistry leaderboard", occupancy_source,
+            note="ELI5: these are the most repeatedly observed atom-level contacts. Read occupancy with distance and interaction class; this is evidence from this trajectory, not a measured affinity.")
+        add("chemistry", ppi_chemistry_fingerprint_plot(analysis), "Residue chemical fingerprints", occupancy_source,
+            note="ELI5: each row is a chain-local residue and each column is a kind of molecular glue. Brighter cells mean more validated evidence for that residue/type combination.")
+        add("chemistry", ppi_chemistry_geometry_plot(analysis), "Validated interaction geometry", event_source,
+            label="Download exact validated interaction events",
+            note="ELI5: distances are shown for validated atom-level events. Angles are displayed only for hydrogen bonds, where the angle has a defined geometric meaning.")
+        add("chemistry", ppi_chemistry_hub_plot(analysis), "Chemistry hubs in the interface network", node_source,
+            note="ELI5: residues farther right repeatedly contact more partners; higher residues contribute more validated chemistry. The marker size shows how many chemistry classes support that residue.")
+
     # Distance evidence is intentionally consolidated in the four-view
     # carousel below.  Keeping one evidence-first reading path prevents the
     # same contact table from becoming a noisy wall of near-duplicate plots.
@@ -3279,6 +3607,7 @@ def main() -> None:
     interface_evidence = interface_evidence_html(analysis, context, interface_rin)
     structure_panel = final_structure_html(root, context)
     trajectory_panel = trajectory_playback_html(root, analysis, context)
+    provenance_panel = data_provenance_html(analysis, output)
     component_key = component_key_html(root) if is_multichain_system else ""
     stability = component_key + (component_lanes_section_html(root, "Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends. Cyan denotes whole-complex observables; orange and neon green denote the individual components.", groups["stability"], component_cards["stability"])
                                if is_multichain_system else section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"]))
@@ -3302,6 +3631,7 @@ def main() -> None:
         ("chemistry", "Contact chemistry", chemistry),
         ("distances", "Distances", distances),
         ("coupled", "Coupled dynamics", coupled),
+        ("provenance", "Data & provenance", provenance_panel),
         ("interface-evidence", "Interface maps", interface_evidence),
         ("interfaces", "Protein interfaces", "" if context.partner_kind == "protein_chain" else interface_rin["protein_detail"]),
         ("peptide-interfaces", "Peptide interfaces", "" if context.partner_kind == "peptide" else interface_rin["peptide_detail"]),
