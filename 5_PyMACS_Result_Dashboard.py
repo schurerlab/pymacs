@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.offline import plot
+from plotly.subplots import make_subplots
 
 
 BG, PANEL, GRID, TEXT, MUTED = "#05060a", "#0b1020", "#1c2a4a", "#cfe8ff", "#7aa6d9"
@@ -1500,6 +1501,198 @@ def chain_rmsf_plot(sources: list[Path], *, title: str = "Chain-resolved residue
         hovermode="closest", height=420, xaxis={"title": "Chain-local residue position (see hover for original residue)", "gridcolor": GRID},
         yaxis={"title": "RMSF (Å)", "gridcolor": GRID}, legend=LEGEND_BELOW)
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def _interface_time_data(analysis: Path) -> tuple[pd.DataFrame, Path]:
+    """Load the canonical pair-level interface timeline without inventing zeros."""
+    source = analysis / "Interface_RIN" / "interface_contact_timeseries.csv"
+    try:
+        table = pd.read_csv(source)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return pd.DataFrame(), source
+    required = {"Time_ns", "ContactCount", "MinDistance_A"}
+    if not required.issubset(table.columns):
+        return pd.DataFrame(), source
+    table = table.copy()
+    for column in required:
+        table[column] = pd.to_numeric(table[column], errors="coerce")
+    table = table.dropna(subset=list(required)).sort_values("Time_ns")
+    return table, source
+
+
+def _coupled_figure(figure: go.Figure, title: str, *, height: int = 720) -> str:
+    """Apply one spacious, legible style to the coupled-dynamics panels."""
+    figure.update_layout(
+        title=title, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
+        margin={"l": 72, "r": 68, "t": 78, "b": 82}, height=height,
+        legend=LEGEND_BELOW, hovermode="x unified",
+    )
+    figure.update_xaxes(gridcolor=GRID, title="Time (ns)")
+    figure.update_yaxes(gridcolor=GRID)
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def coupled_engagement_plot(analysis: Path) -> str | None:
+    """Show interface contact count, closest gap, and native-fold retention together."""
+    interface, _ = _interface_time_data(analysis)
+    q_source = analysis / "protein_native_contact_q.csv"
+    if interface.empty or not q_source.is_file():
+        return None
+    q_data = _read_table(q_source)
+    if q_data is None or not {"Time_ns", "Q_protein_native_contact_fraction"}.issubset(q_data.columns):
+        return None
+    q_data = q_data.copy()
+    q_data["Time_ns"] = pd.to_numeric(q_data["Time_ns"], errors="coerce")
+    q_data["Q_protein_native_contact_fraction"] = pd.to_numeric(q_data["Q_protein_native_contact_fraction"], errors="coerce")
+    q_data = q_data.dropna().sort_values("Time_ns")
+    interface, q_data = _sample_table(interface), _sample_table(q_data)
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=.08,
+                        subplot_titles=("Interface contacts", "Closest interface separation", "Protein native-contact retention (Q)"))
+    fig.add_trace(go.Scattergl(x=interface["Time_ns"], y=interface["ContactCount"], mode="lines", name="Interface contacts", line={"color": CYAN, "width": 2}, hovertemplate="Time=%{x:.3f} ns<br>Residue-pair contacts=%{y:.0f}<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Scattergl(x=interface["Time_ns"], y=interface["MinDistance_A"], mode="lines", name="Closest gap", line={"color": CYAN, "width": 2}, hovertemplate="Time=%{x:.3f} ns<br>Closest interface gap=%{y:.3f} Å<extra></extra>"), row=2, col=1)
+    fig.add_trace(go.Scattergl(x=q_data["Time_ns"], y=q_data["Q_protein_native_contact_fraction"], mode="lines", name="Native-contact Q", line={"color": CYAN, "width": 2}, hovertemplate="Time=%{x:.3f} ns<br>Native-contact Q=%{y:.3f}<extra></extra>"), row=3, col=1)
+    fig.update_yaxes(title="Contacts", row=1, col=1)
+    fig.update_yaxes(title="Gap (Å)", row=2, col=1)
+    fig.update_yaxes(title="Q fraction", range=[0, 1.05], row=3, col=1)
+    return _coupled_figure(fig, "Shared interface engagement and fold retention", height=790)
+
+
+def coupled_motion_binding_plot(analysis: Path) -> str | None:
+    """Relate shared interface contacts to each component's compactness and motion."""
+    interface, _ = _interface_time_data(analysis)
+    if interface.empty:
+        return None
+    interface = interface[["Time_ns", "ContactCount"]].sort_values("Time_ns")
+    traces: list[tuple[str, pd.DataFrame, str, str]] = []
+    for index, source in enumerate(sorted(analysis.glob("Radius_of_Gyration_*.csv"))):
+        if source.name == "Radius_of_Gyration_Protein.csv":
+            continue
+        table = _read_table(source)
+        if table is None or not {"Time_ns", "Rg_Component_Å"}.issubset(table.columns):
+            continue
+        label = source.stem.removeprefix("Radius_of_Gyration_")
+        table = table[["Time_ns", "Rg_Component_Å"]].copy()
+        table["Time_ns"] = pd.to_numeric(table["Time_ns"], errors="coerce")
+        table["Rg_Component_Å"] = pd.to_numeric(table["Rg_Component_Å"], errors="coerce")
+        traces.append((label, table.dropna().sort_values("Time_ns"), "Rg_Component_Å", CHAIN_COLORS[index % len(CHAIN_COLORS)]))
+    rmsd_sources = sorted(source for source in analysis.glob("RMSD_*.csv") if source.name != "RMSD_Protein.csv")
+    for index, source in enumerate(rmsd_sources):
+        table = _read_table(source)
+        if table is None or not {"Time_ns", "RMSD_Å"}.issubset(table.columns):
+            continue
+        label = source.stem.removeprefix("RMSD_")
+        table = table[["Time_ns", "RMSD_Å"]].copy()
+        table["Time_ns"] = pd.to_numeric(table["Time_ns"], errors="coerce")
+        table["RMSD_Å"] = pd.to_numeric(table["RMSD_Å"], errors="coerce")
+        traces.append((label, table.dropna().sort_values("Time_ns"), "RMSD_Å", CHAIN_COLORS[index % len(CHAIN_COLORS)]))
+    if not traces:
+        return None
+    fig = make_subplots(rows=2, cols=1, vertical_spacing=.12,
+                        subplot_titles=("Component compactness versus interface contacts", "Component RMSD versus interface contacts"))
+    for label, table, metric, color in traces:
+        row = 1 if metric == "Rg_Component_Å" else 2
+        merged = pd.merge_asof(interface, table, on="Time_ns", direction="nearest")
+        merged = _sample_table(merged.dropna(subset=[metric]))
+        if merged.empty:
+            continue
+        fig.add_trace(go.Scattergl(x=merged["ContactCount"], y=merged[metric], mode="markers", name=f"{label} {'Rg' if row == 1 else 'RMSD'}", marker={"color": color, "size": 5, "opacity": .42}, hovertemplate=f"Component={escape(label)}<br>Interface contacts=%{{x:.0f}}<br>{'Rg' if row == 1 else 'RMSD'}=%{{y:.3f}} Å<extra></extra>"), row=row, col=1)
+    fig.update_xaxes(title="Interface residue-pair contacts", row=1, col=1)
+    fig.update_xaxes(title="Interface residue-pair contacts", row=2, col=1)
+    fig.update_yaxes(title="Radius of gyration (Å)", row=1, col=1)
+    fig.update_yaxes(title="RMSD (Å)", row=2, col=1)
+    fig.update_layout(title="Component motion versus interface engagement", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 72, "r": 32, "t": 78, "b": 120}, height=700, legend=LEGEND_BELOW)
+    fig.update_xaxes(gridcolor=GRID); fig.update_yaxes(gridcolor=GRID)
+    return plot(fig, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def coupled_chemistry_plot(analysis: Path) -> str | None:
+    """Bin validated atom-level chemistry into a readable time-resolved signal."""
+    source = analysis / "Interface_RIN" / "ValidatedInterfaceInteractionEvents.csv"
+    if not source.is_file():
+        return None
+    pieces = []
+    try:
+        for chunk in pd.read_csv(source, usecols=["Frame", "Time_ns", "InteractionClass"], chunksize=200_000):
+            chunk = chunk[chunk["InteractionClass"].isin(["H-bond", "Ionic", "Hydrophobic"])].copy()
+            if not chunk.empty:
+                chunk["Time_ns"] = pd.to_numeric(chunk["Time_ns"], errors="coerce")
+                chunk["Frame"] = pd.to_numeric(chunk["Frame"], errors="coerce")
+                pieces.append(chunk.dropna())
+    except (OSError, ValueError, pd.errors.ParserError):
+        return None
+    if not pieces:
+        return None
+    events = pd.concat(pieces, ignore_index=True)
+    events["Time bin (ns)"] = np.floor(events["Time_ns"] / 2.0) * 2.0
+    counts = events.groupby(["Time bin (ns)", "InteractionClass"])["Frame"].nunique().unstack(fill_value=0).sort_index()
+    if counts.empty:
+        return None
+    fig = go.Figure()
+    for kind, color in (("H-bond", CYAN), ("Ionic", MAGENTA), ("Hydrophobic", ORANGE)):
+        if kind in counts:
+            fig.add_trace(go.Scatter(x=counts.index, y=counts[kind], stackgroup="chemistry", mode="lines", name=kind, line={"color": color, "width": 1.6}, hovertemplate=f"Time bin=%{{x:.1f}} ns<br>{kind} frames=%{{y:.0f}}<extra></extra>"))
+    fig.update_layout(title="Validated interface chemistry through time", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 68, "r": 30, "t": 65, "b": 110}, height=450, legend=LEGEND_BELOW, hovermode="x unified", xaxis={"title": "Time (ns; 2 ns bins)", "gridcolor": GRID}, yaxis={"title": "Frames with validated chemistry", "gridcolor": GRID})
+    return plot(fig, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def coupled_rewiring_plot(analysis: Path) -> str | None:
+    """Quantify whether the same residue-pair network survives from frame to frame."""
+    source = analysis / "Interface_RIN" / "interface_residue_pair_framewise.csv.gz"
+    if not source.is_file():
+        return None
+    frames: dict[int, tuple[float, set[str]]] = {}
+    try:
+        for chunk in pd.read_csv(source, compression="gzip", usecols=["Frame", "Time_ns", "Pair_ID"], chunksize=200_000):
+            chunk["Frame"] = pd.to_numeric(chunk["Frame"], errors="coerce")
+            chunk["Time_ns"] = pd.to_numeric(chunk["Time_ns"], errors="coerce")
+            for frame, block in chunk.dropna().groupby("Frame", sort=False):
+                frame_id = int(frame)
+                prior = frames.get(frame_id)
+                pairs = set(block["Pair_ID"].astype(str))
+                frames[frame_id] = (float(block["Time_ns"].iloc[0]), pairs if prior is None else prior[1] | pairs)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return None
+    if len(frames) < 2:
+        return None
+    rows = []
+    previous: set[str] | None = None
+    for _, (time, pairs) in sorted(frames.items()):
+        shared = len(pairs & previous) if previous is not None else 0
+        union = len(pairs | previous) if previous is not None else 0
+        rows.append((time, len(pairs), shared / union if union else np.nan, len(pairs - (previous or set())), len((previous or set()) - pairs)))
+        previous = pairs
+    table = pd.DataFrame(rows, columns=["Time_ns", "Active pairs", "Pair retention", "New pairs", "Lost pairs"])
+    table = _sample_table(table)
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.11, subplot_titles=("Active residue-pair contacts", "Frame-to-frame interface rewiring"))
+    fig.add_trace(go.Scattergl(x=table["Time_ns"], y=table["Active pairs"], mode="lines", name="Active pairs", line={"color": CYAN, "width": 2}, hovertemplate="Time=%{x:.3f} ns<br>Active residue pairs=%{y:.0f}<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Scattergl(x=table["Time_ns"], y=table["Pair retention"], mode="lines", name="Pair retention", line={"color": CYAN, "width": 2}, hovertemplate="Time=%{x:.3f} ns<br>Shared pair retention=%{y:.1%}<extra></extra>"), row=2, col=1)
+    fig.add_trace(go.Scattergl(x=table["Time_ns"], y=table["New pairs"], mode="lines", name="New pairs", line={"color": GREEN, "width": 1.4}, hovertemplate="Time=%{x:.3f} ns<br>New pairs=%{y:.0f}<extra></extra>"), row=2, col=1)
+    fig.add_trace(go.Scattergl(x=table["Time_ns"], y=table["Lost pairs"], mode="lines", name="Lost pairs", line={"color": ORANGE, "width": 1.4}, hovertemplate="Time=%{x:.3f} ns<br>Lost pairs=%{y:.0f}<extra></extra>"), row=2, col=1)
+    fig.update_yaxes(title="Pairs", row=1, col=1); fig.update_yaxes(title="Retention / pair count", row=2, col=1)
+    return _coupled_figure(fig, "Interface contact rewiring", height=690)
+
+
+def coupled_sse_binding_plot(sse_source: Path, interface: pd.DataFrame, component_label: str, color: str) -> str | None:
+    """Give one component a local SSE lane while retaining the shared contact reference."""
+    table = _read_table(sse_source)
+    required = {"Time_ns", "Helix", "Sheet", "Coil"}
+    if table is None or interface.empty or not required.issubset(table.columns):
+        return None
+    table = table[list(required)].copy()
+    for column in required:
+        table[column] = pd.to_numeric(table[column], errors="coerce")
+    table = _sample_table(table.dropna().sort_values("Time_ns"))
+    interface = _sample_table(interface[["Time_ns", "ContactCount"]].dropna().sort_values("Time_ns"))
+    if len(table) < 2:
+        return None
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    for column, line_color in (("Helix", CYAN), ("Sheet", GREEN), ("Coil", MAGENTA)):
+        fig.add_trace(go.Scattergl(x=table["Time_ns"], y=table[column], mode="lines", name=column, line={"color": line_color, "width": 1.8}, hovertemplate=f"Component={escape(component_label)}<br>Time=%{{x:.3f}} ns<br>{column} fraction=%{{y:.3f}}<extra></extra>"), secondary_y=False)
+    fig.add_trace(go.Scattergl(x=interface["Time_ns"], y=interface["ContactCount"], mode="lines", name="Interface contacts", line={"color": color, "width": 2.5, "dash": "dot"}, hovertemplate="Time=%{x:.3f} ns<br>Interface contacts=%{y:.0f}<extra></extra>"), secondary_y=True)
+    fig.update_layout(title=f"{component_label}: secondary structure versus interface engagement", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 68, "r": 68, "t": 65, "b": 110}, height=450, legend=LEGEND_BELOW, hovermode="x unified")
+    fig.update_xaxes(title="Time (ns)", gridcolor=GRID); fig.update_yaxes(title="SSE fraction", range=[0, 1.05], gridcolor=GRID, secondary_y=False); fig.update_yaxes(title="Interface contacts", gridcolor=GRID, secondary_y=True)
+    return plot(fig, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
 def interface_rin_plots(analysis: Path) -> list[tuple[str, str, Path, str]]:
@@ -3000,6 +3193,39 @@ def main() -> None:
         add("coupled", multiseries_plot(coupling, "Rolling correlation", "Time_ns", ["Rolling_Corr_Contacts_vs_Sheet"], "Correlation"), "Rolling correlation", coupling)
     changepoints = analysis / "LIG_ChangePoint_Summary.csv"
     if changepoints.is_file(): add("coupled", categorical_bar_plot(changepoints, "Change-point segments", "Segment", ["MeanContacts", "MeanHelix", "MeanSheet", "MeanCoil"], "Mean value"), "Change-point segments", changepoints, note="Hover the bars to compare the average contact and secondary-structure values for each detected trajectory segment.")
+    # Protein complexes preserve a different, richer coupling bundle than
+    # peptide/ligand jobs.  These graphs deliberately reuse saved analysis
+    # products rather than requiring an MD rerun: interface geometry, native
+    # fold retention, component Rg/RMSD, validated chemistry, and exact
+    # residue-pair framewise presence.
+    if is_multichain_system:
+        interface_time, interface_time_source = _interface_time_data(analysis)
+        q_source = analysis / "protein_native_contact_q.csv"
+        graph = coupled_engagement_plot(analysis)
+        if graph and q_source.is_file():
+            add("coupled", graph, "Shared interface engagement and fold retention", interface_time_source,
+                note="ELI5: read this as the complex's handshake monitor. Contacts show how many residue pairs touch, the gap shows how close the proteins get, and Q shows how much of the original protein fold remains. These are shared cyan measurements, not a single-chain result.")
+        graph = coupled_motion_binding_plot(analysis)
+        if graph:
+            add("coupled", graph, "Component motion versus interface engagement", interface_time_source,
+                note="ELI5: each dot is one sampled moment. If a component's orange or green cloud shifts as the cyan interface-contact count changes, its shape or motion is coupled to binding; a diffuse cloud means there is no simple one-to-one relationship.")
+        chemistry_source = analysis / "Interface_RIN" / "ValidatedInterfaceInteractionEvents.csv"
+        graph = coupled_chemistry_plot(analysis)
+        if graph and chemistry_source.is_file():
+            add("coupled", graph, "Validated interface chemistry through time", chemistry_source,
+                note="ELI5: this shows which molecular glue is present over time. Hydrogen bonds, ionic interactions, and hydrophobic contacts are counted from validated atom-level events in 2 ns windows; taller colored areas mean that kind of glue was found in more frames.")
+        rewiring_source = analysis / "Interface_RIN" / "interface_residue_pair_framewise.csv.gz"
+        graph = coupled_rewiring_plot(analysis)
+        if graph and rewiring_source.is_file():
+            add("coupled", graph, "Interface contact rewiring", rewiring_source,
+                label="Download exact framewise residue-pair contacts",
+                note="ELI5: a stable interface keeps many of the same residue pairs from one frame to the next. Retention near 1 means the contact network is being reused; spikes in new or lost pairs mean the interface is rearranging.")
+        if not interface_time.empty:
+            for component_index, source in enumerate(sorted(analysis.glob("SSE_chain_*_fractions.csv")), start=1):
+                label = source.stem.removeprefix("SSE_chain_").removesuffix("_fractions")
+                graph = coupled_sse_binding_plot(source, interface_time, f"Component {component_index}: {label}", CHAIN_COLORS[(component_index - 1) % len(CHAIN_COLORS)])
+                add("coupled", graph, f"Component {component_index}: {label} SSE versus interface engagement", source,
+                    note="ELI5: this component's helix, sheet, and coil fractions are compared with the shared interface-contact line. Look for sustained changes that happen together, rather than a single noisy frame.", component=component_index)
     for group, title, source, graph in interface_rin_plots(analysis):
         add(group, graph, title, source, note="This panel is isolated to the labelled chain or chain pair; it is not pooled across unrelated interfaces.")
     for index, csv_file in enumerate(csv_files):
