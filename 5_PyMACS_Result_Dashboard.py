@@ -1957,12 +1957,161 @@ def interface_rin_plots(analysis: Path) -> list[tuple[str, str, Path, str]]:
     except (OSError, ValueError, pd.errors.ParserError):
         nodes = pd.DataFrame()
     if {"Chain_Label", "Residue_Label", "WeightedDegree"}.issubset(nodes.columns):
-        for chain, table in nodes.groupby("Chain_Label", sort=False):
+        for chain_index, (chain, table) in enumerate(nodes.groupby("Chain_Label", sort=False)):
             table = table.nlargest(30, "WeightedDegree").sort_values("WeightedDegree")
-            figure = go.Figure(go.Bar(y=table["Residue_Label"], x=table["WeightedDegree"], orientation="h", marker_color=MAGENTA, hovertemplate="Residue=%{y}<br>Weighted interface degree=%{x:.3f}<extra></extra>"))
+            figure = go.Figure(go.Bar(y=table["Residue_Label"], x=table["WeightedDegree"], orientation="h", marker_color=CHAIN_COLORS[chain_index % len(CHAIN_COLORS)], hovertemplate="Residue=%{y}<br>Weighted interface degree=%{x:.3f}<extra></extra>"))
             figure.update_layout(title=f"{chain}: interface-residue importance", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 130, "r": 20, "t": 55, "b": 52}, height=max(360, 30 * len(table)), xaxis={"title": "Weighted interface degree", "gridcolor": GRID}, yaxis={"title": "Residue", "gridcolor": GRID})
             results.append(("chemistry", f"{chain}: interface-residue importance", node_path, plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})))
     return results
+
+
+def _ppi_presence_matrix(analysis: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, Path] | None:
+    """Load the compact residue-pair presence product written by Interface_RIN.
+
+    This is deliberately the authoritative matrix for time-resolved PPI contact
+    displays.  It avoids re-parsing the potentially much larger framewise CSV
+    when the exact boolean contact matrix has already been saved by 3C.
+    """
+    source = analysis / "Interface_RIN" / "interface_residue_pair_presence.npz"
+    if not source.is_file():
+        return None
+    try:
+        with np.load(source, allow_pickle=False) as archive:
+            keys = set(archive.files)
+            matrix_key = next((key for key in ("contact_matrix", "presence", "matrix") if key in keys), None)
+            pair_key = next((key for key in ("pair_ids", "Pair_ID", "pairs") if key in keys), None)
+            time_key = next((key for key in ("time_ns", "times_ns", "Time_ns", "times") if key in keys), None)
+            if not (matrix_key and pair_key and time_key):
+                return None
+            matrix = np.asarray(archive[matrix_key])
+            pair_ids = np.asarray(archive[pair_key]).astype(str)
+            times = np.asarray(archive[time_key], dtype=float)
+    except (OSError, ValueError, KeyError):
+        return None
+    if matrix.ndim != 2 or not len(pair_ids) or not len(times):
+        return None
+    # Historical archives can store frame × pair; normalize to pair × frame.
+    if matrix.shape == (len(times), len(pair_ids)):
+        matrix = matrix.T
+    if matrix.shape != (len(pair_ids), len(times)):
+        return None
+    return matrix.astype(bool), pair_ids, times, source
+
+
+def ppi_pair_presence_heatmap(analysis: Path) -> str | None:
+    """Show the strongest saved residue-pair contacts frame by frame."""
+    loaded = _ppi_presence_matrix(analysis)
+    if loaded is None:
+        return None
+    matrix, pair_ids, times, _ = loaded
+    persistence = matrix.mean(axis=1)
+    keep = np.argsort(persistence)[-min(28, len(pair_ids)):]
+    keep = keep[np.argsort(persistence[keep])]
+    # Keep a responsive browser payload while retaining the exact NPZ download.
+    time_indices = np.linspace(0, len(times) - 1, min(MAX_HEATMAP_TIMEPOINTS, len(times)), dtype=int)
+    display = matrix[np.ix_(keep, time_indices)].astype(np.uint8)
+    labels = [f"{pair_ids[index]} · {persistence[index]:.0%}" for index in keep]
+    figure = go.Figure(go.Heatmap(
+        z=display, x=times[time_indices], y=labels,
+        colorscale=[[0, "#07111e"], [0.499, "#07111e"], [0.5, "#35d0ff"], [1, "#d9f7ff"]],
+        showscale=False,
+        hovertemplate="Time=%{x:.3f} ns<br>Residue pair=%{y}<br>Contact recorded=%{z}<extra></extra>",
+    ))
+    figure.update_layout(title="Persistent residue-pair contact timeline", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 195, "r": 24, "t": 65, "b": 65},
+        height=max(440, len(labels) * 21), xaxis={"title": "Time (ns)", "gridcolor": GRID},
+        yaxis={"title": "Residue pair · overall persistence", "gridcolor": GRID})
+    return _plotly_div(figure)
+
+
+def ppi_pair_dwell_plot(analysis: Path) -> str | None:
+    """Rank uninterrupted sampled contact episodes for the most persistent pairs."""
+    loaded = _ppi_presence_matrix(analysis)
+    if loaded is None:
+        return None
+    matrix, pair_ids, times, _ = loaded
+    if len(times) < 2:
+        return None
+    step = float(np.nanmedian(np.diff(np.sort(times))))
+    if not np.isfinite(step) or step <= 0:
+        return None
+    persistence = matrix.mean(axis=1)
+    rows: list[tuple[str, float, int, float]] = []
+    for index in np.argsort(persistence)[-min(24, len(pair_ids)):]:
+        active = matrix[index].astype(np.int8)
+        padded = np.pad(active, (1, 1))
+        starts = np.flatnonzero(np.diff(padded) == 1)
+        ends = np.flatnonzero(np.diff(padded) == -1)
+        lengths = ends - starts
+        if len(lengths):
+            rows.append((str(pair_ids[index]), float(lengths.max() * step), int(len(lengths)), float(persistence[index])))
+    if not rows:
+        return None
+    table = pd.DataFrame(rows, columns=["Residue pair", "Longest sampled dwell (ns)", "Episodes", "Persistence"]).sort_values("Longest sampled dwell (ns)")
+    figure = go.Figure(go.Bar(y=table["Residue pair"], x=table["Longest sampled dwell (ns)"], orientation="h", marker_color=CYAN,
+        customdata=np.column_stack([table["Episodes"], table["Persistence"]]),
+        hovertemplate="Residue pair=%{y}<br>Longest uninterrupted sampled dwell=%{x:.3f} ns<br>Episodes=%{customdata[0]:.0f}<br>Overall persistence=%{customdata[1]:.1%}<extra></extra>"))
+    figure.update_layout(title="Longest uninterrupted contact episodes", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 180, "r": 24, "t": 65, "b": 65},
+        height=max(430, len(table) * 23), xaxis={"title": "Longest sampled dwell (ns)", "gridcolor": GRID}, yaxis={"title": "Residue pair", "gridcolor": GRID})
+    return _plotly_div(figure)
+
+
+def ppi_pair_distance_persistence_plot(analysis: Path) -> str | None:
+    """Relate saved mean/closest separations to pair persistence."""
+    table, _ = _ppi_pair_table(analysis)
+    required = {"Pair_ID", "ContactFraction", "MeanMinDistance_A", "MinObservedDistance_A"}
+    if table.empty or not required.issubset(table.columns):
+        return None
+    table = table.dropna(subset=["ContactFraction", "MeanMinDistance_A", "MinObservedDistance_A"]).nlargest(300, "ContactFraction")
+    if table.empty:
+        return None
+    figure = go.Figure(go.Scattergl(
+        x=table["MeanMinDistance_A"], y=table["ContactFraction"], mode="markers", text=table["Pair_ID"].astype(str),
+        marker={"color": table["MinObservedDistance_A"], "colorscale": [[0, ORANGE], [.5, CYAN], [1, GREEN]], "size": 9, "opacity": .78,
+                "colorbar": {"title": "Closest gap (Å)", "tickfont": {"color": TEXT}}},
+        hovertemplate="Residue pair=%{text}<br>Mean closest gap=%{x:.2f} Å<br>Persistence=%{y:.1%}<br>Minimum observed gap=%{marker.color:.2f} Å<extra></extra>",
+    ))
+    figure.update_layout(title="Persistent pairs: occupancy versus separation", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 70, "r": 95, "t": 65, "b": 70}, height=450,
+        xaxis={"title": "Mean closest heavy-atom gap (Å)", "gridcolor": GRID}, yaxis={"title": "Contact persistence", "tickformat": ".0%", "gridcolor": GRID})
+    return _plotly_div(figure)
+
+
+def ppi_chemistry_time_plot(analysis: Path) -> str | None:
+    """Plot validated chemistry classes through time inside the chemistry tab."""
+    _, source, _ = _ppi_chemistry_sources(analysis)
+    if not source.is_file():
+        return None
+    pieces: list[pd.DataFrame] = []
+    try:
+        for chunk in pd.read_csv(source, usecols=["Time_ns", "InteractionClass"], chunksize=200_000):
+            pieces.append(chunk)
+            if sum(len(piece) for piece in pieces) >= MAX_EVENT_POINTS:
+                break
+    except (OSError, ValueError, pd.errors.ParserError):
+        return None
+    if not pieces:
+        return None
+    table = pd.concat(pieces, ignore_index=True)
+    table["Time_ns"] = pd.to_numeric(table["Time_ns"], errors="coerce")
+    table = table.dropna(subset=["Time_ns", "InteractionClass"])
+    if table.empty:
+        return None
+    span = max(float(table["Time_ns"].max() - table["Time_ns"].min()), 1.0)
+    width = max(span / 90.0, 0.5)
+    table["Time bin (ns)"] = np.floor(table["Time_ns"] / width) * width
+    counts = table.groupby(["Time bin (ns)", "InteractionClass"]).size().rename("Events").reset_index()
+    palette = {"H-bond": CYAN, "Ionic": MAGENTA, "Hydrophobic": ORANGE}
+    figure = go.Figure()
+    for kind, block in counts.groupby("InteractionClass", sort=False):
+        figure.add_trace(go.Scatter(x=block["Time bin (ns)"], y=block["Events"], mode="lines", stackgroup="chemistry", name=str(kind),
+            line={"color": palette.get(str(kind), GREEN), "width": 1.5},
+            hovertemplate=f"Chemistry={escape(str(kind))}<br>Time=%{{x:.3f}} ns<br>Validated events in bin=%{{y:.0f}}<extra></extra>"))
+    figure.update_layout(title="Validated interaction chemistry through time", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 70, "r": 24, "t": 65, "b": 110}, height=430,
+        legend=LEGEND_BELOW, xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Validated events per time bin", "gridcolor": GRID})
+    return _plotly_div(figure)
 
 
 def _ppi_chemistry_sources(analysis: Path) -> tuple[Path, Path, Path]:
@@ -2265,8 +2414,22 @@ def data_provenance_html(analysis: Path, output: Path) -> str:
         rel = path.relative_to(output.parent).as_posix()
         item = f'<li><a href="{escape(rel)}" download>{escape(path.relative_to(analysis).as_posix())}</a><small>{path.stat().st_size / 1024:.1f} KB</small></li>'
         (rendered if any(token in path.name.lower() for token in rendered_tokens) else source).append(item)
-    style = '<style>.provenance-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}.provenance-block{border:1px solid #285a79;border-radius:15px;padding:14px;background:#08111e}.provenance-block h3{margin:0 0 6px}.provenance-block p{margin:0 0 10px;color:#7aa6d9;font-size:.86rem}.provenance-block ul{max-height:420px;overflow:auto;margin:0;padding-left:18px}.provenance-block li{padding:4px 0;color:#cfe8ff;display:flex;justify-content:space-between;gap:10px}.provenance-block a{color:#35d0ff;overflow-wrap:anywhere}.provenance-block small{color:#7aa6d9;white-space:nowrap}</style>'
+    ppi_assets = {
+        "Saved pair-contact matrix": analysis / "Interface_RIN" / "interface_residue_pair_presence.npz",
+        "Framewise named residue-pair contacts": analysis / "Interface_RIN" / "interface_residue_pair_framewise.csv.gz",
+        "Persistent pair summary + distance evidence": analysis / "Interface_RIN" / "interface_residue_pair_contacts.csv",
+        "Per-chain interface network summary": analysis / "Interface_RIN" / "interface_node_summary.csv",
+        "Validated atom-level chemistry events": analysis / "Interface_RIN" / "ValidatedInterfaceInteractionEvents.csv",
+        "Validated chemistry occupancy summary": analysis / "Interface_RIN" / "ValidatedInterfaceInteractionOccupancy.csv",
+        "Chain-local SSE matrices": next(iter(sorted(analysis.glob("DSSP_chain_*.csv"))), analysis / "DSSP_chain_unavailable.csv"),
+    }
+    coverage_rows = ''.join(
+        f'<li><strong>{escape(label)}</strong><span class="coverage-status {"is-ready" if source.is_file() else "is-missing"}">{"interactive + download" if source.is_file() else "not written for this run"}</span></li>'
+        for label, source in ppi_assets.items()
+    )
+    style = '<style>.provenance-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}.provenance-block{border:1px solid #285a79;border-radius:15px;padding:14px;background:#08111e}.provenance-block h3{margin:0 0 6px}.provenance-block p{margin:0 0 10px;color:#7aa6d9;font-size:.86rem}.provenance-block ul{max-height:420px;overflow:auto;margin:0;padding-left:18px}.provenance-block li{padding:4px 0;color:#cfe8ff;display:flex;justify-content:space-between;gap:10px}.provenance-block a{color:#35d0ff;overflow-wrap:anywhere}.provenance-block small{color:#7aa6d9;white-space:nowrap}.coverage-status{font-size:.75rem;font-weight:800;white-space:nowrap}.coverage-status.is-ready{color:#18ff8b}.coverage-status.is-missing{color:#7aa6d9}</style>'
     return (style + '<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Data & provenance</div><h2>Every saved analysis asset, accounted for</h2><p>ELI5: the dashboard leads with interpretable charts, while this inventory keeps every published CSV, matrix, structure, and raw evidence file reachable. A file can be rendered in a panel and still remain available exactly as saved.</p></div></div><div class="provenance-grid">'
+            f'<article class="provenance-block"><h3>PPI coverage checklist</h3><p>Saved PPI evidence now surfaced as an interactive view where this run provides it; the raw product remains downloadable for reproducibility.</p><ul>{coverage_rows}</ul></article>'
             f'<article class="provenance-block"><h3>Visualized and downloadable analysis</h3><p>Tables/matrices used by the guided dossier or a closely related drilldown.</p><ul>{"".join(rendered)}</ul></article>'
             f'<article class="provenance-block"><h3>Supplementary raw and provenance assets</h3><p>Supporting coordinates, manifests, explorers, and source products retained for reproducibility.</p><ul>{"".join(source) or "<li>No additional files.</li>"}</ul></article></div></section>')
 
@@ -3767,10 +3930,32 @@ def main() -> None:
             note="ELI5: distances are shown for validated atom-level events. Angles are displayed only for hydrogen bonds, where the angle has a defined geometric meaning.")
         add("chemistry", ppi_chemistry_hub_plot(analysis), "Chemistry hubs in the interface network", node_source,
             note="ELI5: residues farther right repeatedly contact more partners; higher residues contribute more validated chemistry. The marker size shows how many chemistry classes support that residue.")
+        chemistry_time = ppi_chemistry_time_plot(analysis)
+        if chemistry_time and event_source.is_file():
+            add("chemistry", chemistry_time, "Validated interaction chemistry through time", event_source,
+                label="Download exact validated interaction events",
+                note="ELI5: this is the timeline version of the chemistry table. Each colored band counts validated atom-level events in a small time window, so it reveals whether the interface changes its molecular glue over the run.")
 
-    # Distance evidence is intentionally consolidated in the four-view
-    # carousel below.  Keeping one evidence-first reading path prevents the
-    # same contact table from becoming a noisy wall of near-duplicate plots.
+    # PPI distance and contact dynamics have dedicated source products that
+    # were historically downloadable but not visible.  These views make them
+    # first-class evidence while preserving the pair context on every hover.
+    if is_multichain_system:
+        pair_source = analysis / "Interface_RIN" / "interface_residue_pair_contacts.csv"
+        presence_source = analysis / "Interface_RIN" / "interface_residue_pair_presence.npz"
+        pair_timeline = ppi_pair_presence_heatmap(analysis)
+        if pair_timeline and presence_source.is_file():
+            add("contacts", pair_timeline, "Persistent residue-pair contact timeline", presence_source,
+                label="Download exact contact-presence matrix",
+                note="ELI5: every cyan cell is a saved contact for one named residue pair at one sampled moment. The rows are the most persistent pairs, so the map makes stable versus intermittent contacts immediately visible.")
+        dwell = ppi_pair_dwell_plot(analysis)
+        if dwell and presence_source.is_file():
+            add("contacts", dwell, "Longest uninterrupted contact episodes", presence_source,
+                label="Download exact contact-presence matrix",
+                note="ELI5: a longer bar means a residue pair stayed continuously recorded as a contact for longer. Durations are bounded by the sampled-frame spacing, so they are a persistence aid rather than atomistic kinetics.")
+        separation = ppi_pair_distance_persistence_plot(analysis)
+        if separation and pair_source.is_file():
+            add("distances", separation, "Persistent pairs: occupancy versus separation", pair_source,
+                note="ELI5: each dot is one residue pair. Higher means it contacts more often; farther left means it remains closer on average. Color reports the closest observed heavy-atom gap.")
 
     coupling = analysis / "LIG_SSE_Contact_Coupling_Timeseries.csv"
     if coupling.is_file():
