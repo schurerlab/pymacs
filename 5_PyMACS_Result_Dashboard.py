@@ -33,6 +33,10 @@ CYAN, GREEN, MAGENTA, ORANGE = "#35d0ff", "#18ff8b", "#ff2bd6", "#ff8a3d"
 # colors are the requested Miami orange and neon Miami green; later chains
 # remain deliberately high-contrast on the dark report background.
 CHAIN_COLORS = (ORANGE, GREEN, MAGENTA, CYAN, "#ffe66d", "#a78bfa")
+# Plotly positions a horizontal legend in paper coordinates.  Keeping it below
+# the plotting area is the only placement that remains reliable when a card is
+# narrow, a title is long, or legend labels wrap onto a second row.
+LEGEND_BELOW = {"orientation": "h", "x": 0, "xanchor": "left", "y": -0.22, "yanchor": "top"}
 # A browser report should open immediately even when its source CSV contains a
 # full 500 ns trajectory at sub-ps sampling.  The CSV download remains exact;
 # this only limits the points drawn in the browser.
@@ -1221,10 +1225,10 @@ def numeric_plot(csv_file: Path, color: str) -> str | None:
             ))
         figure.update_layout(
             title=csv_file.stem.replace("_", " "), paper_bgcolor=PANEL, plot_bgcolor=PANEL,
-            font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 55, "r": 20, "t": 100, "b": 48},
+            font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 55, "r": 20, "t": 55, "b": 120},
             xaxis={"title": "Time (ns)", "gridcolor": GRID, "zerolinecolor": GRID},
             yaxis={"title": "Fraction of residues", "range": [0, 1], "gridcolor": GRID, "zerolinecolor": GRID},
-            hovermode="x unified", height=360, legend={"orientation": "h", "y": 1.18, "yanchor": "bottom"},
+            hovermode="x unified", height=360, legend=LEGEND_BELOW,
         )
         return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
     numeric = [column for column in frame.columns if pd.api.types.is_numeric_dtype(frame[column])]
@@ -1312,10 +1316,10 @@ def multiseries_plot(csv_file: Path, title: str, x_column: str, y_columns: list[
     figure.update_layout(
         title=title, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
-        margin={"l": 60, "r": 20, "t": 100, "b": 52}, hovermode="x unified", height=380,
+        margin={"l": 60, "r": 20, "t": 55, "b": 120}, hovermode="x unified", height=380,
         xaxis={"title": x_column.replace("_", " "), "gridcolor": GRID},
         yaxis={"title": y_title, "gridcolor": GRID},
-        legend={"orientation": "h", "y": 1.18, "yanchor": "bottom"},
+        legend=LEGEND_BELOW,
     )
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
@@ -1349,9 +1353,9 @@ def chain_rmsd_plot(sources: list[Path]) -> str | None:
     if not figure.data:
         return None
     figure.update_layout(title="Chain-resolved RMSD", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
-        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 100, "b": 52},
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 120},
         hovermode="x unified", height=400, xaxis={"title": "Time (ns)", "gridcolor": GRID},
-        yaxis={"title": "RMSD (Å)", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.18, "yanchor": "bottom"})
+        yaxis={"title": "RMSD (Å)", "gridcolor": GRID}, legend=LEGEND_BELOW)
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
@@ -1385,9 +1389,9 @@ def chain_rmsf_plot(sources: list[Path]) -> str | None:
     if not figure.data:
         return None
     figure.update_layout(title="Chain-resolved residue RMSF", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
-        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 100, "b": 52},
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 120},
         hovermode="closest", height=420, xaxis={"title": "Chain-local residue position (see hover for original residue)", "gridcolor": GRID},
-        yaxis={"title": "RMSF (Å)", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.18, "yanchor": "bottom"})
+        yaxis={"title": "RMSF (Å)", "gridcolor": GRID}, legend=LEGEND_BELOW)
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
@@ -1460,7 +1464,7 @@ def categorical_bar_plot(csv_file: Path, title: str, category: str, values: list
         title=title, barmode="stack" if stacked else "group", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 115},
         xaxis={"title": category.replace("_", " "), "gridcolor": GRID, "tickangle": -45},
-        yaxis={"title": y_title, "gridcolor": GRID}, height=420, legend={"orientation": "h", "y": 1.13},
+        yaxis={"title": y_title, "gridcolor": GRID}, height=420, legend=LEGEND_BELOW,
     )
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
@@ -2051,7 +2055,7 @@ def rmsd_distribution_plot(overlay_file: Path) -> str | None:
         figure.add_trace(go.Histogram(x=values, name=column.replace("_", " "), opacity=.62, marker_color=color, nbinsx=45))
     if not figure.data:
         return None
-    figure.update_layout(title="RMSD distribution across the trajectory", barmode="overlay", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=380, xaxis={"title": "RMSD (Å)", "gridcolor": GRID}, yaxis={"title": "Sampled frames", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.13})
+    figure.update_layout(title="RMSD distribution across the trajectory", barmode="overlay", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 120}, height=380, xaxis={"title": "RMSD (Å)", "gridcolor": GRID}, yaxis={"title": "Sampled frames", "gridcolor": GRID}, legend=LEGEND_BELOW)
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
@@ -2100,7 +2104,7 @@ def rmsf_persistence_scatter_plot(rmsf_file: Path, frequency_file: Path, interac
     for kind in chemistry.unique():
         selected = chemistry == kind
         figure.add_trace(go.Scatter(x=merged.loc[selected, "RMSF_Å"], y=merged.loc[selected, "PercentFrames"], mode="markers+text", text=merged.loc[selected, "Residue"], textposition="top center", name=str(kind), marker={"size": 10, "color": palette.get(str(kind), GREEN)}, hovertemplate="Residue=%{text}<br>RMSF=%{x:.3f} Å<br>Contact occupancy=%{y:.1f}%<extra></extra>"))
-    figure.update_layout(title="Residue flexibility versus ligand-contact persistence", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 65, "r": 25, "t": 55, "b": 52}, height=420, xaxis={"title": "Residue RMSF (Å)", "gridcolor": GRID}, yaxis={"title": "Contact occupancy (%)", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.13})
+    figure.update_layout(title="Residue flexibility versus ligand-contact persistence", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 65, "r": 25, "t": 55, "b": 120}, height=420, xaxis={"title": "Residue RMSF (Å)", "gridcolor": GRID}, yaxis={"title": "Contact occupancy (%)", "gridcolor": GRID}, legend=LEGEND_BELOW)
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
@@ -2131,7 +2135,7 @@ def contact_lifetime_plot(events_file: Path) -> str | None:
         return None
     residues, medians, maxima = map(list, zip(*rows))
     figure = go.Figure([go.Bar(y=residues, x=medians, orientation="h", name="Median uninterrupted lifetime", marker_color=CYAN), go.Bar(y=residues, x=maxima, orientation="h", name="Longest uninterrupted lifetime", marker_color=GREEN, opacity=.58)])
-    figure.update_layout(title="Ligand-contact uninterrupted lifetimes", barmode="overlay", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 105, "r": 20, "t": 55, "b": 52}, height=max(380, 24 * len(rows)), xaxis={"title": "Lifetime (ns; sampled-frame resolution)", "gridcolor": GRID}, yaxis={"title": "Residue", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.13})
+    figure.update_layout(title="Ligand-contact uninterrupted lifetimes", barmode="overlay", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 105, "r": 20, "t": 55, "b": 120}, height=max(380, 24 * len(rows)), xaxis={"title": "Lifetime (ns; sampled-frame resolution)", "gridcolor": GRID}, yaxis={"title": "Residue", "gridcolor": GRID}, legend=LEGEND_BELOW)
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
@@ -2151,7 +2155,7 @@ def contact_turnover_plot(events_file: Path) -> str | None:
     figure = go.Figure()
     for column, color in (("Active", CYAN), ("Gained", GREEN), ("Lost", MAGENTA)):
         figure.add_trace(go.Scatter(x=frame["Time_ns"], y=frame[column], mode="lines", name=column, line={"color": color, "width": 2}, stackgroup="turnover" if column != "Active" else None))
-    figure.update_layout(title="Ligand-contact turnover over time", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=380, xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Residue contacts", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.13})
+    figure.update_layout(title="Ligand-contact turnover over time", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 120}, height=380, xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Residue contacts", "gridcolor": GRID}, legend=LEGEND_BELOW)
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
@@ -2196,7 +2200,7 @@ def chemistry_composition_plot(interaction_file: Path) -> str | None:
     colors = {"H-bond": CYAN, "Ionic": MAGENTA, "Hydrophobic": ORANGE, "Water bridge": GREEN}
     for kind in grouped.columns:
         figure.add_trace(go.Scatter(x=x, y=grouped[kind], mode="lines", stackgroup="chemistry", name=str(kind), line={"width": .8, "color": colors.get(str(kind), GREEN)}, hovertemplate="Time=%{x:.3f} ns<br>Events=%{y}<extra>" + escape(str(kind)) + "</extra>"))
-    figure.update_layout(title="Interaction chemistry composition over time", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 52}, height=390, xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Observed interaction events per time bin", "gridcolor": GRID}, legend={"orientation": "h", "y": 1.13})
+    figure.update_layout(title="Interaction chemistry composition over time", paper_bgcolor=PANEL, plot_bgcolor=PANEL, font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 60, "r": 20, "t": 55, "b": 120}, height=390, xaxis={"title": "Time (ns)", "gridcolor": GRID}, yaxis={"title": "Observed interaction events per time bin", "gridcolor": GRID}, legend=LEGEND_BELOW)
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
