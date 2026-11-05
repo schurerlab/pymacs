@@ -1321,6 +1321,14 @@ def multiseries_plot(csv_file: Path, title: str, x_column: str, y_columns: list[
         return None
     table = table.copy()
     table[x_column] = pd.to_numeric(table[x_column], errors="coerce")
+    is_picoseconds = x_column.lower() == "time_ps"
+    if is_picoseconds:
+        # Published dashboards always use nanoseconds; legacy CSVs may still
+        # retain a ps column for provenance.
+        table[x_column] = table[x_column] / 1000.0
+        x_label = "Time (ns)"
+    else:
+        x_label = x_column.replace("_", " ")
     table = table.dropna(subset=[x_column]).sort_values(x_column)
     table = _sample_table(table)
     if len(table) < 2:
@@ -1336,7 +1344,7 @@ def multiseries_plot(csv_file: Path, title: str, x_column: str, y_columns: list[
         figure.add_trace(go.Scatter(
             x=table[x_column], y=values, mode="lines", name=column.replace("_", " "),
             line={"color": palette[index % len(palette)], "width": 2},
-            hovertemplate=f"{escape(x_column)}=%{{x:.4g}}<br>{escape(column)}=%{{y:.4g}}<extra></extra>",
+            hovertemplate=f"{escape(x_label)}=%{{x:.4g}}<br>{escape(column)}=%{{y:.4g}}<extra></extra>",
         ))
     if not figure.data:
         return None
@@ -1344,7 +1352,7 @@ def multiseries_plot(csv_file: Path, title: str, x_column: str, y_columns: list[
         title=title, paper_bgcolor=PANEL, plot_bgcolor=PANEL,
         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
         margin={"l": 60, "r": 20, "t": 55, "b": 120}, hovermode="x unified", height=380,
-        xaxis={"title": x_column.replace("_", " "), "gridcolor": GRID},
+        xaxis={"title": x_label, "gridcolor": GRID},
         yaxis={"title": y_title, "gridcolor": GRID},
         legend=LEGEND_BELOW,
     )
@@ -1364,19 +1372,22 @@ def chain_rmsd_plot(sources: list[Path], *, title: str = "Chain-resolved RMSD",
     palette = colors or CHAIN_COLORS
     for source in sources:
         table = _read_table(source)
-        if table is None or not {"Time_ps", "RMSD_Å"}.issubset(table.columns):
+        if table is None or "RMSD_Å" not in table.columns:
+            continue
+        time_column = "Time_ns" if "Time_ns" in table.columns else "Time_ps" if "Time_ps" in table.columns else None
+        if time_column is None:
             continue
         table = table.copy()
-        table["Time_ps"] = pd.to_numeric(table["Time_ps"], errors="coerce")
+        table[time_column] = pd.to_numeric(table[time_column], errors="coerce")
         table["RMSD_Å"] = pd.to_numeric(table["RMSD_Å"], errors="coerce")
-        table = _sample_table(table.dropna(subset=["Time_ps", "RMSD_Å"]).sort_values("Time_ps"))
+        table = _sample_table(table.dropna(subset=[time_column, "RMSD_Å"]).sort_values(time_column))
         if len(table) < 2:
             continue
         label = _chain_label_from_metric(source, "RMSD_")
         selection = str(table.get("Atom_Selection", pd.Series(["per-chain atoms"])).iloc[0])
         visible_index = len(figure.data)
         figure.add_trace(go.Scatter(
-            x=table["Time_ps"] / 1000.0, y=table["RMSD_Å"], mode="lines", name=f"{label} ({selection})",
+            x=table[time_column] if time_column == "Time_ns" else table[time_column] / 1000.0, y=table["RMSD_Å"], mode="lines", name=f"{label} ({selection})",
             line={"color": palette[visible_index % len(palette)], "width": 2.5},
             hovertemplate=f"Chain/component={escape(label)}<br>Time=%{{x:.3f}} ns<br>RMSD=%{{y:.3f}} Å<br>Selection={escape(selection)}<extra></extra>",
         ))
@@ -2686,8 +2697,8 @@ def main() -> None:
     # Each card selects the semantic dimensions of its source rather than
     # joining arbitrary numeric columns into a generic line chart.
     stability_specs = [
-        ("Protein_RMSD.csv", "Protein RMSD", "Time_ps", ["Protein_RMSD"], "RMSD (Å)"),
-        ("Radius_of_Gyration_Protein.csv", "Protein radius of gyration", "Time_ps", ["Rg_Protein_Å"], "Radius of gyration (Å)"),
+        ("Protein_RMSD.csv", "Whole-complex RMSD", "Time_ps", ["Protein_RMSD"], "RMSD (Å)"),
+        ("Radius_of_Gyration_Protein.csv", "Whole-complex radius of gyration", "Time_ns", ["Rg_Protein_Å"], "Radius of gyration (Å)"),
         ("LIG_Complex_RMSD_Overlay.csv", "Protein–ligand RMSD overlay", "Time_ns", ["Protein_RMSD", "Ligand_RMSD"], "RMSD (Å)"),
         ("Radius_of_Gyration_Protein_Ligand_Complex.csv", "Radius of gyration", "Time_ns", ["Rg_Protein_Å", "Rg_Ligand_Å", "Rg_Complex_Å"], "Radius of gyration (Å)"),
         ("native_contact_q.csv", f"{context.relationship_label.title()} Q", "Time_ns", ["Q_native_contact_fraction"], "Contact fraction"),
@@ -2701,6 +2712,14 @@ def main() -> None:
         # neon green exclusively for the individually resolved components.
         colors = [CYAN, GREEN, MAGENTA] if "overlay" in title.lower() or "gyration" in title.lower() else [CYAN]
         if source.is_file(): add("stability", multiseries_plot(source, title.replace("Protein", protein_name), x, ys, y_title, colors=colors), title, source)
+    if is_multichain_system:
+        for component_index, source in enumerate(sorted(analysis.glob("Radius_of_Gyration_*.csv"))):
+            if source.name in {"Radius_of_Gyration_Protein.csv", "Radius_of_Gyration_Protein_Ligand_Complex.csv"}:
+                continue
+            label = source.stem.removeprefix("Radius_of_Gyration_")
+            add("stability", multiseries_plot(source, f"Component {component_index + 1}: {label} radius of gyration", "Time_ns", ["Rg_Component_Å"], "Radius of gyration (Å)", colors=[CHAIN_COLORS[component_index % len(CHAIN_COLORS)]]),
+                f"Component {component_index + 1}: {label} radius of gyration", source,
+                note="All atoms in this component are used for Rg. Compare each independent component with the whole-complex Rg rather than treating it as a backbone RMSD measure.")
     protein_rmsd = analysis / "Protein_RMSD.csv"
     if protein_rmsd.is_file():
         add("overview", multiseries_plot(protein_rmsd, f"{protein_name} RMSD", "Time_ps", ["Protein_RMSD"], "RMSD (Å)", colors=[GREEN]), f"{protein_name} RMSD", protein_rmsd)

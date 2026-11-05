@@ -67,16 +67,25 @@ def main():
     outdir.mkdir(exist_ok=True)
     for label, start, end in components(mapping):
         stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", label)
-        index, rmsd_xvg, rmsf_xvg = (outdir / f".chain_{stem}.ndx", outdir / f".chain_{stem}_rmsd.xvg", outdir / f".chain_{stem}_rmsf.xvg")
+        index, rmsd_xvg, rmsf_xvg, rg_xvg = (
+            outdir / f".chain_{stem}.ndx", outdir / f".chain_{stem}_rmsd.xvg",
+            outdir / f".chain_{stem}_rmsf.xvg", outdir / f".chain_{stem}_rg.xvg",
+        )
         # atomIndex ranges are GROMACS' one-based inclusive atom numbering.
         run([args.gmx, "select", "-s", str(tpr), "-select", f"atomnr {start} to {end} and name CA", "-on", str(index)])
-        run([args.gmx, "rms", "-s", str(tpr), "-f", str(xtc), "-n", str(index), "-o", str(rmsd_xvg), "-tu", "ps"], "0\n0\n")
+        run([args.gmx, "rms", "-s", str(tpr), "-f", str(xtc), "-n", str(index), "-o", str(rmsd_xvg), "-tu", "ns"], "0\n0\n")
         run([args.gmx, "rmsf", "-s", str(tpr), "-f", str(xtc), "-n", str(index), "-o", str(rmsf_xvg), "-res", "-fit"], "0\n")
-        write_csv(outdir / f"RMSD_{stem}.csv", ("Time_ps", "RMSD_Å", "Chain_Component", "Atom_Selection", "Reference_Frame"),
+        # All-atom component Rg complements the Cα RMSD/RMSF measures above.
+        # The atomIndex component ranges are contiguous production atom ranges.
+        run([args.gmx, "select", "-s", str(tpr), "-select", f"atomnr {start} to {end}", "-on", str(index)])
+        run([args.gmx, "gyrate", "-s", str(tpr), "-f", str(xtc), "-n", str(index), "-o", str(rg_xvg), "-tu", "ns"], "0\n")
+        write_csv(outdir / f"RMSD_{stem}.csv", ("Time_ns", "RMSD_Å", "Chain_Component", "Atom_Selection", "Reference_Frame"),
                   ((time, value * 10.0, label, "CA (one per residue)", 0) for time, value in numeric_xvg(rmsd_xvg)))
         write_csv(outdir / f"RMSF_{stem}_per_residue.csv", ("Residue", "Original_Residue", "RMSF_Å", "Chain_Component", "Anchor_Atom"),
                   ((int(residue), int(residue), value * 10.0, label, "CA") for residue, value in numeric_xvg(rmsf_xvg)))
-        for temporary in (index, rmsd_xvg, rmsf_xvg):
+        write_csv(outdir / f"Radius_of_Gyration_{stem}.csv", ("Time_ns", "Rg_Component_Å", "Chain_Component", "Atom_Selection"),
+                  ((time, value * 10.0, label, "all component atoms") for time, value in numeric_xvg(rg_xvg)))
+        for temporary in (index, rmsd_xvg, rmsf_xvg, rg_xvg):
             temporary.unlink(missing_ok=True)
         print(f"Recovered Cα dynamics for {label} ({start}-{end})")
     # Existing index.ndx has the production Protein selection.  Rg is not a
@@ -84,8 +93,8 @@ def main():
     index = run_dir / "index.ndx"
     if index.is_file():
         rg_xvg = outdir / ".protein_rg.xvg"
-        run([args.gmx, "gyrate", "-s", str(tpr), "-f", str(xtc), "-n", str(index), "-o", str(rg_xvg), "-tu", "ps"], "Protein\n")
-        write_csv(outdir / "Radius_of_Gyration_Protein.csv", ("Time_ps", "Rg_Protein_Å"),
+        run([args.gmx, "gyrate", "-s", str(tpr), "-f", str(xtc), "-n", str(index), "-o", str(rg_xvg), "-tu", "ns"], "Protein\n")
+        write_csv(outdir / "Radius_of_Gyration_Protein.csv", ("Time_ns", "Rg_Protein_Å"),
                   ((time, value * 10.0) for time, value in numeric_xvg(rg_xvg)))
         rg_xvg.unlink(missing_ok=True)
         print("Recovered protein radius of gyration")
