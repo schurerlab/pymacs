@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#BSUB -J pymacs-1kgy-chain-sse
+#BSUB -L /bin/bash
+#BSUB -q normal
+#BSUB -P brd
+#BSUB -W 02:00
+#BSUB -n 2
+#BSUB -R "span[hosts=1]"
+#BSUB -oo /projectnb/triton/home/jxs794/Pymacs/backfill_staging/recover_1kgy_chain_sse.%J.out
+#BSUB -eo /projectnb/triton/home/jxs794/Pymacs/backfill_staging/recover_1kgy_chain_sse.%J.err
+
+set -euo pipefail
+readonly ROOT=/projectnb/triton/home/jxs794/Molecular_Dynamics/1kgy_ref
+readonly STAGE=/projectnb/triton/home/jxs794/Pymacs/backfill_staging/chain_resolved_dynamics_d976611
+source /projectnb/triton/home/jxs794/miniforge3/etc/profile.d/conda.sh
+conda activate mdanalysis
+python "$STAGE/backfill_sse_dynamics.py" --run-dir "$ROOT"
+python "$STAGE/5_PyMACS_Result_Dashboard.py" --root "$ROOT"
+test -s "$ROOT/Analysis_Results/Residue_SSE_Persistence_chain_1kgy.csv"
+test -s "$ROOT/Analysis_Results/Residue_SSE_Persistence_chain_ref.csv"

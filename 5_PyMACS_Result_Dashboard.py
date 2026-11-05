@@ -1469,6 +1469,40 @@ def categorical_bar_plot(csv_file: Path, title: str, category: str, values: list
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
+def chain_sse_persistence_plot(csv_file: Path, chain_label: str) -> str | None:
+    """Render one chain-local SSE persistence profile with source IDs on hover."""
+    table = _read_table(csv_file)
+    required = {"Chain_Local_Position", "Original_Residue", "Helix_Persistence", "Sheet_Persistence", "Coil_Persistence"}
+    if table is None or not required.issubset(table.columns):
+        return None
+    table = table.copy().head(250)
+    position = pd.to_numeric(table["Chain_Local_Position"], errors="coerce")
+    table = table.loc[position.notna()].copy()
+    if table.empty:
+        return None
+    figure = go.Figure()
+    for column, color, label in (
+        ("Coil_Persistence", MAGENTA, "Coil persistence"),
+        ("Sheet_Persistence", GREEN, "Sheet persistence"),
+        ("Helix_Persistence", CYAN, "Helix persistence"),
+    ):
+        values = pd.to_numeric(table[column], errors="coerce").fillna(0)
+        figure.add_trace(go.Bar(
+            x=table["Chain_Local_Position"], y=values, name=label, marker_color=color,
+            customdata=np.column_stack([table["Original_Residue"].astype(str)]),
+            hovertemplate=f"Chain={escape(chain_label)}<br>Chain-local position=%{{x}}<br>Original residue=%{{customdata[0]}}<br>{label}=%{{y:.3f}}<extra></extra>",
+        ))
+    figure.update_layout(
+        title=f"Chain {chain_label} residue SSE persistence", barmode="stack",
+        paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
+        margin={"l": 60, "r": 20, "t": 55, "b": 120}, height=430,
+        xaxis={"title": "Chain-local residue position (see hover for original residue)", "gridcolor": GRID},
+        yaxis={"title": "Fraction", "range": [0, 1], "gridcolor": GRID}, legend=LEGEND_BELOW,
+    )
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
 def contact_persistence_plot(events_file: Path, denominator_file: Path,
                              interaction_file: Path | None, protein_name: str) -> str | None:
     """Compute residue-labelled 0–1 persistence from framewise contact events.
@@ -2490,6 +2524,14 @@ def main() -> None:
         chain, separator, label = entry.strip().partition(":")
         if chain and separator and label:
             chain_labels.append(label.strip())
+    # A complex must never present a pooled residue axis as if chains were a
+    # continuous sequence.  Metric files are a useful fallback for historical
+    # runs whose metadata did not preserve a chain map.
+    is_multichain_system = (
+        context.partner_kind == "protein_chain"
+        or len(chain_labels) > 1
+        or len(list(analysis.glob("RMSD_*.csv"))) > 1
+    )
     protein_name = (
         " / ".join(component_display_labels(root, context))
         or " / ".join(chain_labels)
@@ -2499,7 +2541,7 @@ def main() -> None:
     # Full-complex RMSD is meaningful for multiple macromolecular chains or
     # a PROTAC assembly.  A small-molecule ligand is not an extra protein
     # chain, so a one-chain ligand–protein job must not show this card.
-    is_multichain_system = context.partner_kind == "protein_chain" or len(chain_labels) > 1 or str(setup.get("mode") or "").casefold() == "protac"
+    is_multichain_system = is_multichain_system or str(setup.get("mode") or "").casefold() == "protac"
     csv_files = sorted(path for path in analysis.rglob("*.csv") if path.is_file())
     # The context resolver above promotes legacy records when their completed
     # small-molecule evidence bundle proves that they are ligand systems.
@@ -2518,7 +2560,7 @@ def main() -> None:
     # deliberately sampled along time so the report stays quick to publish and
     # open; the full matrix CSV remains downloadable from the card.
     dssp_file = analysis / "DSSP_encoded_numeric.csv"
-    if dssp_file.is_file():
+    if dssp_file.is_file() and not is_multichain_system:
         graph = heatmap_plot(dssp_file, "dssp")
         if graph:
             secondary_heatmap_cards.append(dashboard_card(graph, dssp_file.stem, dssp_file.relative_to(output.parent).as_posix(), "Download full SSE matrix CSV"))
@@ -2652,11 +2694,17 @@ def main() -> None:
             add("flexibility", rmsf_persistence_scatter_plot(rmsf_residue, frequency_for_ligand, interaction_file if interaction_file.is_file() else None), "Residue flexibility versus ligand-contact persistence", frequency_for_ligand, note="Stable anchors tend toward high contact occupancy with lower residue RMSF; this is descriptive, not an affinity score.")
 
     sse_fractions = analysis / "SSE_Fractions.csv"
-    if sse_fractions.is_file(): add("secondary", multiseries_plot(sse_fractions, "SSE fractions", "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction"), "SSE fractions", sse_fractions)
+    if sse_fractions.is_file() and not is_multichain_system:
+        add("secondary", multiseries_plot(sse_fractions, "SSE fractions", "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction"), "SSE fractions", sse_fractions)
     persistence = analysis / "Residue_SSE_Persistence.csv"
-    if persistence.is_file(): add("secondary", categorical_bar_plot(persistence, "Residue SSE persistence", "Residue_Index", ["Helix_Persistence", "Sheet_Persistence", "Coil_Persistence"], "Fraction", stacked=True), "Residue SSE persistence", persistence)
+    if persistence.is_file() and not is_multichain_system:
+        add("secondary", categorical_bar_plot(persistence, "Residue SSE persistence", "Residue_Index", ["Helix_Persistence", "Sheet_Persistence", "Coil_Persistence"], "Fraction", stacked=True), "Residue SSE persistence", persistence)
     for source in sorted(analysis.glob("SSE_chain_*_fractions.csv")):
         add("secondary", multiseries_plot(source, source.stem.replace("_", " "), "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction"), source.stem.replace("_", " "), source)
+    for source in sorted(analysis.glob("Residue_SSE_Persistence_chain_*.csv")):
+        chain_label = source.stem.removeprefix("Residue_SSE_Persistence_chain_")
+        add("secondary", chain_sse_persistence_plot(source, chain_label), f"Chain {chain_label} residue SSE persistence", source,
+            note="Bars are chain-local. Hover reports the deposited residue identifier, so no numbering is merged across chains.")
 
     frequency = frequency_for_ligand or (analysis / "LIG_contact_frequency_filtered.csv")
     if frequency.is_file(): add("contacts", categorical_bar_plot(frequency, "Ligand-contact frequency", "Residue", ["PercentFrames"], "Frames with contact (%)"), "Ligand-contact frequency", frequency)

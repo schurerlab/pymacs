@@ -99,6 +99,14 @@ def main() -> None:
         component_matrix = matrix[:, indices]
         pd.DataFrame(component_matrix).to_csv(outdir / f"DSSP_chain_{safe}.csv", index=False)
         write_fraction(outdir / f"SSE_chain_{safe}_fractions.csv", component_matrix, time_ns)
+        chain_residues = [protein_residues[index] for index in indices]
+        pd.DataFrame({
+            "Chain_Local_Position": np.arange(1, len(indices) + 1),
+            "Original_Residue": [f"{residue.name}{residue.resSeq}" for residue in chain_residues],
+            "Helix_Persistence": (component_matrix == 2).mean(axis=0),
+            "Sheet_Persistence": (component_matrix == 1).mean(axis=0),
+            "Coil_Persistence": (component_matrix == 0).mean(axis=0),
+        }).to_csv(outdir / f"Residue_SSE_Persistence_chain_{safe}.csv", index=False)
         print(f"Recovered SSE for {label}: {len(indices)} residues")
     print(f"Recovered DSSP/SSE for {matrix.shape[0]} frames and {matrix.shape[1]} protein residues")
 
