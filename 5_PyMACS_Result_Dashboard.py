@@ -121,6 +121,22 @@ def component_display_labels(root: Path, context: PartnerContext) -> list[str]:
     return labels
 
 
+def component_key_html(root: Path) -> str:
+    """Compact dossier-wide key for multi-component color semantics."""
+    entries = atomindex_components(root)
+    if len(entries) < 2:
+        return ""
+    chips = []
+    for index, entry in enumerate(entries):
+        color = CHAIN_COLORS[index % len(CHAIN_COLORS)]
+        chain = entry.get("current_chain") or entry.get("source_chain") or "?"
+        chips.append(
+            f'<span class="component-key-chip" style="--component-color:{color}"><i></i>'
+            f'Component {index + 1} · {escape(entry["label"])} <small>chain {escape(chain)}</small></span>'
+        )
+    return ('<style>.component-key{display:flex;gap:9px;flex-wrap:wrap;margin:0 0 15px}.component-key-chip{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--component-color) 52%,#285a79);border-radius:999px;background:#091423;color:#dff5ff;font-size:.79rem;font-weight:850}.component-key-chip i{width:9px;height:9px;border-radius:50%;background:var(--component-color);box-shadow:0 0 10px var(--component-color)}.component-key-chip small{color:#8daac7;font-weight:700}</style><aside class="component-key" aria-label="Component color key">' + "".join(chips) + '</aside>')
+
+
 def legacy_receptor_label(root: Path) -> str:
     """Recover a receptor name for a legacy ligand run without atomIndex.
 
@@ -910,7 +926,7 @@ def interface_evidence_html(analysis: Path, context: PartnerContext, rin: dict) 
         '<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Interface status</div>'
         f'<h2>{escape(context.relationship_label.title())} analysis was not published</h2>'
         f'<p>The run is recognized as a {escape(context.system_class.replace("_", " "))}, but its residue-node maps are absent. '
-        f'Expected analysis assets: <code>{escape(expected)}</code>. Re-run the interface RIN stage for the selected {"protein-chain pair" if context.partner_kind == "protein_chain" else "peptide/receptor chain pair"}; '
+        f'Expected analysis assets: <code>{escape(expected)}</code>. Re-run the interface RIN stage for the selected peptide/receptor chain pair; '
         'do not interpret this as evidence of no interaction.</p></div></div></section>'
     )
 
@@ -1000,32 +1016,17 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
     pymol_bundle = asset_dir / "PyMACS_PyMOL_full_trajectory_session.zip"
     pymol_session = asset_dir / "PyMACS_centered_trajectory_session.pse"
     available_sources = [name for name in source_files if (asset_dir / name).is_file()]
-    has_final_trajectory = all((asset_dir / name).is_file() for name in ("Final_Trajectory.pdb", "Final_Trajectory.xtc"))
-    if has_final_trajectory and visualization_source.is_file():
-        # Binding-pocket coordinates are useful when present, but must not
-        # prevent a protein--protein trajectory from receiving a portable
-        # PyMOL loader.  The final PDB/XTC pair is the required full session.
-        optional_pocket = []
-        optional_objects = []
-        if (asset_dir / "binding_pocket_only.pdb").is_file():
-            optional_pocket.extend([
-                "load binding_pocket_only.pdb, raw_binding_pocket_topology",
-                "disable raw_binding_pocket_topology",
-            ])
-            optional_objects.append("raw_binding_pocket_topology")
-            if (asset_dir / "binding_pocket_only.xtc").is_file():
-                optional_pocket.append("load_traj binding_pocket_only.xtc, raw_binding_pocket_topology")
-        session_objects = " ".join(["pbc_centered_visualization", "raw_final_topology", *optional_objects])
+    if len(available_sources) == len(source_files):
         pymol_loader.write_text(textwrap.dedent("""\
             # PyMACS full-trajectory session
             # Keep this file beside the bundled files, then open it in PyMOL.
-            # The centered preview is the default visual.  The exact full XTC
-            # is loaded locally into raw_final_topology for full-frame access.
+            # The PBC-repaired preview is the default visual because raw XTC
+            # coordinates can wrap a bound partner across the simulation box.
+            # The four exact raw source files are retained in this bundle.
             reinitialize
             load {visualization_name}, pbc_centered_visualization
             load Final_Trajectory.pdb, raw_final_topology
-            load_traj Final_Trajectory.xtc, raw_final_topology
-            {optional_pocket}
+            load binding_pocket_only.pdb, raw_binding_pocket_topology
             hide everything
             show cartoon, pbc_centered_visualization
             color marine, pbc_centered_visualization and chain A
@@ -1036,14 +1037,11 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
             set cache_frames, 1
             set movie_auto_interpolate, off
             disable raw_final_topology
-            group PyMACS_trajectories, {session_objects}
+            disable raw_binding_pocket_topology
+            group PyMACS_trajectories, pbc_centered_visualization raw_final_topology raw_binding_pocket_topology
             zoom pbc_centered_visualization
             frame 1
-        """.format(
-            visualization_name=visualization_source.name,
-            optional_pocket="\n".join(optional_pocket),
-            session_objects=session_objects,
-        )), encoding="utf-8")
+        """.format(visualization_name=visualization_source.name)), encoding="utf-8")
         try:
             bundle_is_current = pymol_bundle.is_file() and pymol_bundle.stat().st_mtime >= max(
                 *((asset_dir / name).stat().st_mtime for name in available_sources), visualization_source.stat().st_mtime
@@ -1054,9 +1052,7 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
                     archive.write(pymol_loader, pymol_loader.name)
                     archive.write(visualization_source, visualization_source.name)
                     for name in source_files:
-                        source = asset_dir / name
-                        if source.is_file() and source.name != visualization_source.name:
-                            archive.write(source, name)
+                        archive.write(asset_dir / name, name)
                 temporary_bundle.replace(pymol_bundle)
         except (OSError, zipfile.BadZipFile) as error:
             print(f"PyMOL session bundle generation skipped: {error}")
@@ -1108,16 +1104,11 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
     preview_href = browser_preview.relative_to(analysis).as_posix()
     # 3Dmol uses an absolutely positioned canvas; anchor it to this stage
     # instead of allowing it to escape to the top of the dossier page.
-    raw_links = '<style>.trajectory-stage{position:relative}</style>'
+    raw_links = '''<style>.trajectory-stage{position:relative}.trajectory-component-key{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 12px;color:#cfe8ff;font-size:.82rem;font-weight:800}.trajectory-component-key span{display:inline-flex;align-items:center;gap:6px}.trajectory-component-key i{width:10px;height:10px;border-radius:50%;display:inline-block}</style><div class="trajectory-component-key"><span><i style="background:#ff8a3d"></i>Component 1 · chain A</span><span><i style="background:#18ff8b"></i>Component 2 · chain B</span></div>'''
     if pymol_session.is_file():
         raw_links += (
             f'<a href="{escape(pymol_session.relative_to(analysis).as_posix())}" download>'
             'Download ready-to-open PyMOL session (.pse)</a>'
-        )
-    if pymol_loader.is_file():
-        raw_links += (
-            f'<a href="{escape(pymol_loader.relative_to(analysis).as_posix())}" download>'
-            'Download PyMOL loader (.pml)</a>'
         )
     if pymol_bundle.is_file():
         raw_links += (
@@ -1128,13 +1119,23 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
         f'<a href="{escape((asset_dir / name).relative_to(analysis).as_posix())}" download>Download {escape(name)}</a>'
         for name in source_files if (asset_dir / name).is_file()
     )
-    focus_chains = ",".join(context.partner_chain_ids if context.partner_kind == "peptide" else context.partner_chain_ids[:1])
-    focus_label = "peptide" if context.partner_kind == "peptide" else "selected protein"
+    peptide_chains = ",".join(context.partner_chain_ids) if context.partner_kind == "peptide" else ""
+    component_styles = []
+    for index, entry in enumerate(atomindex_components(root)):
+        chain = entry.get("current_chain") or entry.get("source_chain")
+        if chain:
+            component_styles.append({"chain": chain, "label": entry["label"], "color": CHAIN_COLORS[index % len(CHAIN_COLORS)]})
+    component_key = "".join(
+        f'<span><i style="background:{escape(item["color"])}"></i>{escape(item["label"])} · chain {escape(item["chain"])}</span>'
+        for item in component_styles
+    )
+    playback_note = ("Orange is the first protein component and neon green is the second; the same colors identify these components throughout this dossier."
+                     if len(component_styles) > 1 else "Component colors match the chain-resolved plots in this dossier.")
     frame_count = int(preview_info.get("frames", 0))
     source_frame_count = int(preview_info.get("source_frames", frame_count))
     time_values = preview_info.get("times_ns", [])
     last_time = float(time_values[-1]) if isinstance(time_values, list) and time_values else 0.0
-    return f'''<style>.trajectory-card{{border-radius:21px;padding:20px;margin-top:18px;background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.trajectory-toolbar{{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:14px 0 10px}}.trajectory-toolbar button{{border:1px solid #285a79;border-radius:10px;background:#0a253a;color:#dff5ff;padding:9px 12px;font:800 .82rem inherit;cursor:pointer}}.trajectory-toolbar button:hover:not(:disabled){{background:#116887;border-color:#35d0ff}}.trajectory-toolbar button:disabled{{opacity:.46;cursor:not-allowed}}.trajectory-toolbar input{{accent-color:#35d0ff;min-width:min(430px,60vw);flex:1}}.trajectory-stage{{height:min(62vw,650px);min-height:410px;border:1px solid rgba(53,208,255,.30);border-radius:17px;background:#05060a;overflow:hidden}}.trajectory-stage:empty:before{{content:'Load playback to view the centered trajectory';display:grid;place-items:center;height:100%;color:#7aa6d9}}.trajectory-status{{color:#9cb6d0;font-size:.86rem;font-weight:800}}.trajectory-downloads{{display:flex;flex-wrap:wrap;gap:8px;margin-top:13px}}.trajectory-downloads a{{color:#35d0ff;border:1px solid #285a79;border-radius:9px;padding:7px 9px;text-decoration:none;font-size:.78rem;font-weight:800}}</style><section class="trajectory-card" data-trajectory-preview="{escape(preview_href)}" data-partner-chains="{escape(focus_chains)}" data-frame-times="{escape(json.dumps(time_values, separators=(',', ':')))}"><div class="section-head"><div><div class="eyebrow">Trajectory playback · on demand</div><h2>Watch the centered simulation, frame by frame</h2><p>This is a solvent-free, {frame_count}-frame preview spanning 0–{last_time:.2f} ns. It is centered and backbone-aligned to the first sampled frame so the complex moves—not the camera. It does not load until you press the button.</p></div></div><div class="trajectory-toolbar"><button type="button" data-trajectory-load>Load interactive playback</button><button type="button" data-trajectory-play disabled>▶ Play</button><button type="button" data-trajectory-reset disabled>Reset view</button><input type="range" min="0" max="{max(0, frame_count - 1)}" value="0" step="1" aria-label="Trajectory frame" data-trajectory-frame disabled><span class="trajectory-status" data-trajectory-status>Not loaded · ordinary dossier load remains fast</span></div><div class="trajectory-stage" data-trajectory-stage></div><details class="guide"><summary>ⓘ ELI5: what am I watching?</summary><p><b>What this is:</b> a deliberately lightweight set of evenly spaced frames from the final MD trajectory. The protein backbone is aligned to frame 1 so ordinary drifting through the simulation box does not look like biological movement.</p><p><b>How to read it:</b> use play for an overview, then pause and drag/zoom to inspect a frame. Gold marks the {focus_label}; slate marks the other protein chains. Compare apparent motion with the stability and contact plots instead of treating an animation as a binding measurement.</p><p><b>Keep in mind:</b> this is a visual preview, not all {25001:,} raw frames. The exact final and pocket PDB/XTC files are available below.</p></details><div class="trajectory-downloads">{raw_links}</div></section><script>(()=>{{const root=document.currentScript.previousElementSibling,load=root.querySelector('[data-trajectory-load]'),play=root.querySelector('[data-trajectory-play]'),reset=root.querySelector('[data-trajectory-reset]'),slider=root.querySelector('[data-trajectory-frame]'),status=root.querySelector('[data-trajectory-status]'),stage=root.querySelector('[data-trajectory-stage]'),times=JSON.parse(root.dataset.frameTimes||'[]');let viewer,model,frame=0,timer=null;const label=()=>{{let time=Number(times[frame]??0);status.textContent=`Frame ${{frame+1}} / ${{Number(slider.max)+1}} · ${{time.toFixed(2)}} ns`}};const show=next=>{{frame=Math.max(0,Math.min(Number(slider.max),Number(next)));slider.value=frame;viewer.setFrame(frame);viewer.render();label()}};const stop=()=>{{if(timer){{clearInterval(timer);timer=null}}play.textContent='▶ Play'}};load.addEventListener('click',async()=>{{if(!window.$3Dmol){{status.textContent='Local 3D viewer library is unavailable.';return}}load.disabled=true;status.textContent='Loading centered trajectory preview…';try{{const response=await fetch(root.dataset.trajectoryPreview);if(!response.ok)throw new Error('preview fetch failed');const pdb=await response.text();viewer=$3Dmol.createViewer(stage,{{backgroundColor:'#05060a',antialias:true}});model=viewer.addModelsAsFrames(pdb,'pdb');model.setStyle({{}},{{cartoon:{{color:'#496985'}}}});root.dataset.partnerChains.split(',').filter(Boolean).forEach(chain=>model.setStyle({{chain}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.16,color:'#ffdf85'}}}}));viewer.zoomTo();viewer.render();slider.disabled=play.disabled=reset.disabled=false;show(0);addEventListener('resize',()=>viewer&&viewer.resize())}}catch(error){{status.textContent='Could not load the trajectory preview. The exact PDB/XTC files remain downloadable.';load.disabled=false}}}});slider.addEventListener('input',()=>{{if(viewer){{stop();show(slider.value)}}}});play.addEventListener('click',()=>{{if(!viewer)return;if(timer){{stop();return}}play.textContent='❚❚ Pause';timer=setInterval(()=>{{let next=frame>=Number(slider.max)?0:frame+1;show(next)}},115)}});reset.addEventListener('click',()=>{{if(viewer){{viewer.zoomTo();viewer.render()}}}})}})();</script>'''
+    return f'''<style>.trajectory-card{{border-radius:21px;padding:20px;margin-top:18px;background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.trajectory-toolbar{{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:14px 0 10px}}.trajectory-toolbar button{{border:1px solid #285a79;border-radius:10px;background:#0a253a;color:#dff5ff;padding:9px 12px;font:800 .82rem inherit;cursor:pointer}}.trajectory-toolbar button:hover:not(:disabled){{background:#116887;border-color:#35d0ff}}.trajectory-toolbar button:disabled{{opacity:.46;cursor:not-allowed}}.trajectory-toolbar input{{accent-color:#35d0ff;min-width:min(430px,60vw);flex:1}}.trajectory-stage{{height:min(62vw,650px);min-height:410px;border:1px solid rgba(53,208,255,.30);border-radius:17px;background:#05060a;overflow:hidden}}.trajectory-stage:empty:before{{content:'Load playback to view the centered trajectory';display:grid;place-items:center;height:100%;color:#7aa6d9}}.trajectory-status{{color:#9cb6d0;font-size:.86rem;font-weight:800}}.trajectory-downloads{{display:flex;flex-wrap:wrap;gap:8px;margin-top:13px}}.trajectory-downloads a{{color:#35d0ff;border:1px solid #285a79;border-radius:9px;padding:7px 9px;text-decoration:none;font-size:.78rem;font-weight:800}}</style><section class="trajectory-card" data-trajectory-preview="{escape(preview_href)}" data-peptide-chains="{escape(peptide_chains)}" data-frame-times="{escape(json.dumps(time_values, separators=(',', ':')))}"><div class="section-head"><div><div class="eyebrow">Trajectory playback · on demand</div><h2>Watch the centered simulation, frame by frame</h2><p>This is a solvent-free, {frame_count}-frame preview spanning 0–{last_time:.2f} ns. It is centered and backbone-aligned to the first sampled frame so the complex moves—not the camera. It does not load until you press the button.</p></div></div><div class="trajectory-toolbar"><button type="button" data-trajectory-load>Load interactive playback</button><button type="button" data-trajectory-play disabled>▶ Play</button><button type="button" data-trajectory-reset disabled>Reset view</button><input type="range" min="0" max="{max(0, frame_count - 1)}" value="0" step="1" aria-label="Trajectory frame" data-trajectory-frame disabled><span class="trajectory-status" data-trajectory-status>Not loaded · ordinary dossier load remains fast</span></div><div class="trajectory-stage" data-trajectory-stage></div><details class="guide"><summary>ⓘ ELI5: what am I watching?</summary><p><b>What this is:</b> a deliberately lightweight set of evenly spaced frames from the final MD trajectory. The protein backbone is aligned to frame 1 so ordinary drifting through the simulation box does not look like biological movement.</p><p><b>How to read it:</b> use play for an overview, then pause and drag/zoom to inspect a frame. Components use the dossier palette: chain A is Miami orange and chain B is neon green. Compare apparent motion with the stability and contact plots instead of treating an animation as a binding measurement.</p><p><b>Keep in mind:</b> this is a visual preview, not all {25001:,} raw frames. The exact final and pocket PDB/XTC files are available below.</p></details><div class="trajectory-downloads">{raw_links}</div></section><script>(()=>{{const root=document.currentScript.previousElementSibling,load=root.querySelector('[data-trajectory-load]'),play=root.querySelector('[data-trajectory-play]'),reset=root.querySelector('[data-trajectory-reset]'),slider=root.querySelector('[data-trajectory-frame]'),status=root.querySelector('[data-trajectory-status]'),stage=root.querySelector('[data-trajectory-stage]'),times=JSON.parse(root.dataset.frameTimes||'[]'),componentPalette={{A:'#ff8a3d',B:'#18ff8b',C:'#ff2bd6',D:'#35d0ff',E:'#ffe66d',F:'#a78bfa'}};let viewer,model,frame=0,timer=null;const label=()=>{{let time=Number(times[frame]??0);status.textContent=`Frame ${{frame+1}} / ${{Number(slider.max)+1}} · ${{time.toFixed(2)}} ns`}};const show=next=>{{frame=Math.max(0,Math.min(Number(slider.max),Number(next)));slider.value=frame;viewer.setFrame(frame);viewer.render();label()}};const stop=()=>{{if(timer){{clearInterval(timer);timer=null}}play.textContent='▶ Play'}};load.addEventListener('click',async()=>{{if(!window.$3Dmol){{status.textContent='Local 3D viewer library is unavailable.';return}}load.disabled=true;status.textContent='Loading centered trajectory preview…';try{{const response=await fetch(root.dataset.trajectoryPreview);if(!response.ok)throw new Error('preview fetch failed');const pdb=await response.text();viewer=$3Dmol.createViewer(stage,{{backgroundColor:'#05060a',antialias:true}});model=viewer.addModelsAsFrames(pdb,'pdb');model.setStyle({{}},{{cartoon:{{color:'#496985'}}}});Object.entries(componentPalette).forEach(([chain,color])=>model.setStyle({{chain}},{{cartoon:{{color}}}}));root.dataset.peptideChains.split(',').filter(Boolean).forEach(chain=>model.setStyle({{chain}},{{cartoon:{{color:'#ffe66d'}},stick:{{radius:.16,color:'#ffdf85'}}}}));viewer.zoomTo();viewer.render();slider.disabled=play.disabled=reset.disabled=false;show(0);addEventListener('resize',()=>viewer&&viewer.resize())}}catch(error){{status.textContent='Could not load the trajectory preview. The exact PDB/XTC files remain downloadable.';load.disabled=false}}}});slider.addEventListener('input',()=>{{if(viewer){{stop();show(slider.value)}}}});play.addEventListener('click',()=>{{if(!viewer)return;if(timer){{stop();return}}play.textContent='❚❚ Pause';timer=setInterval(()=>{{let next=frame>=Number(slider.max)?0:frame+1;show(next)}},115)}});reset.addEventListener('click',()=>{{if(viewer){{viewer.zoomTo();viewer.render()}}}})}})();</script>'''
 
 
 def final_structure_html(root: Path, context: PartnerContext) -> str:
@@ -1187,13 +1188,11 @@ def final_structure_html(root: Path, context: PartnerContext) -> str:
     else:
         focused_button = ''
     protein_label = "Protein/receptor" if context.partner_kind == "peptide" else "Protein"
-    focus_label = "Peptide" if context.partner_kind == "peptide" else "Selected protein"
-    focus_colour_label = "Peptide" if context.partner_kind == "peptide" else "Selected protein"
     bond_note = " Ligand bonds use the matching CGenFF topology." if final_ligand_payload else ""
     snapshots = representative_snapshots_html(root, root / "Analysis_Results")
     source_note = ("submitted/input complex; no final trajectory PDB was published" if fallback
                    else "final published coordinate snapshot")
-    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Structure viewer</div><h2>3D complex presentation</h2><p>Drag to rotate and scroll to zoom. This viewer is independent from the contact explorer and controls its own {focus_label.lower()}, protein, and side-chain display.{bond_note}</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure focus"><button type="button" data-structure-view="complex">Full complex</button><button type="button" data-structure-view="protein">{protein_label}</button>{chain_buttons}{focused_button}</div><div class="structure-control-grid"><label>Protein color <select data-structure-control="protein-color"><option value="slate">Slate blue</option><option value="spectrum">Spectrum</option><option value="chain">By chain</option><option value="mint">Mint</option><option value="violet">Violet</option></select></label><label>{focus_colour_label} color <select data-structure-control="peptide-color"><option value="gold">Gold</option><option value="magenta">Magenta</option><option value="cyan">Cyan</option><option value="element">By element</option></select></label><label>{focus_label} side chains <select data-structure-control="peptide-sidechains"><option value="stick">Sticks</option><option value="line">Lines</option><option value="off">Hidden</option></select></label><label>Protein side chains <select data-structure-control="protein-sidechains"><option value="off">Hidden</option><option value="line">Lines</option><option value="stick">Sticks</option></select></label></div><div class="complex-3d js-complex-3d" data-ligand="{escape(ligand)}" data-pdb-ligand="{escape(pdb_ligand_resname)}" data-final-ligand-b64="{final_ligand_payload}" data-partner-kind="{escape(context.partner_kind)}" data-partner-chains="{escape(','.join(context.partner_chain_ids))}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · {source_note}.</p>{snapshots}</section>'''
+    return f'''<section class="structure-card"><div class="section-head"><div><div class="eyebrow">Structure viewer</div><h2>3D complex presentation</h2><p>Drag to rotate and scroll to zoom. This viewer is independent from the contact explorer and controls its own peptide, protein, and side-chain display.{bond_note}</p></div></div><div class="structure-toolbar" role="group" aria-label="Structure focus"><button type="button" data-structure-view="complex">Full complex</button><button type="button" data-structure-view="protein">{protein_label}</button>{chain_buttons}{focused_button}</div><div class="structure-control-grid"><label>Protein color <select data-structure-control="protein-color"><option value="slate">Slate blue</option><option value="spectrum">Spectrum</option><option value="chain">By chain</option><option value="mint">Mint</option><option value="violet">Violet</option></select></label><label>Peptide color <select data-structure-control="peptide-color"><option value="gold">Gold</option><option value="magenta">Magenta</option><option value="cyan">Cyan</option><option value="element">By element</option></select></label><label>Peptide side chains <select data-structure-control="peptide-sidechains"><option value="stick">Sticks</option><option value="line">Lines</option><option value="off">Hidden</option></select></label><label>Protein side chains <select data-structure-control="protein-sidechains"><option value="off">Hidden</option><option value="line">Lines</option><option value="stick">Sticks</option></select></label></div><div class="complex-3d js-complex-3d" data-ligand="{escape(ligand)}" data-pdb-ligand="{escape(pdb_ligand_resname)}" data-final-ligand-b64="{final_ligand_payload}" data-partner-kind="{escape(context.partner_kind)}" data-partner-chains="{escape(','.join(context.partner_chain_ids))}" data-structure-b64="{payload}"></div><p class="asset-note">Source: {escape(structure.name)} · {source_note}.</p>{snapshots}</section>'''
 
 
 def read_metadata(root: Path) -> dict:
@@ -1609,7 +1608,7 @@ def contact_persistence_plot(events_file: Path, denominator_file: Path,
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
-def interface_scorecard_html(analysis: Path, context: PartnerContext) -> str:
+def interface_scorecard_html(analysis: Path) -> str:
     """Plain-language, five-row answer to: what holds this interface together?"""
     source = analysis / "Interface_RIN" / "interface_residue_pair_contacts.csv"
     table = _read_table(source)
@@ -1617,42 +1616,32 @@ def interface_scorecard_html(analysis: Path, context: PartnerContext) -> str:
     if table is None or not needed.issubset(table.columns):
         return ""
     table = table.copy()
-    canonical_residue = r"^(?:ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL)-?\d+$"
-    table["Residue A"] = table["ResidueA"].astype(str).str.rsplit(":", n=1).str[-1]
-    table["Residue B"] = table["ResidueB"].astype(str).str.rsplit(":", n=1).str[-1]
-    table = table[
-        table["Residue A"].str.match(canonical_residue, case=False, na=False)
-        & table["Residue B"].str.match(canonical_residue, case=False, na=False)
-    ].copy()
+    peptide_a = table["ChainA_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)
+    peptide_b = table["ChainB_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)
+    table = table[peptide_a | peptide_b].copy()
+    if table.empty:
+        return ""
+    table["Peptide position"] = pd.Series(np.where(peptide_a, table["ResidueA"], table["ResidueB"]), index=table.index).astype(str).str.rsplit(":", n=1).str[-1]
+    table["Protein partner"] = pd.Series(np.where(peptide_a, table["ResidueB"], table["ResidueA"]), index=table.index).astype(str).str.rsplit(":", n=1).str[-1]
+    # Interface source tables can retain waters/ions as peptide-chain records.
+    # They are useful provenance, but never meaningful peptide positions.
+    canonical_peptide = r"^(?:ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL)-?\d+$"
+    table = table[table["Peptide position"].str.match(canonical_peptide, case=False, na=False)].copy()
     table["ContactFraction"] = pd.to_numeric(table["ContactFraction"], errors="coerce")
     table["MeanMinDistance_A"] = pd.to_numeric(table["MeanMinDistance_A"], errors="coerce")
     table = table.dropna(subset=["ContactFraction", "MeanMinDistance_A"]).sort_values("ContactFraction", ascending=False).head(5)
     if table.empty:
         return ""
-    protein_only = context.partner_kind == "protein_chain"
-    if protein_only:
-        rows = "".join(
-            f'<tr><td>{escape(row["ChainA_Label"])}</td><td>{escape(row["Residue A"])}</td>'
-            f'<td>{escape(row["ChainB_Label"])}</td><td>{escape(row["Residue B"])}</td>'
-            f'<td>{row["ContactFraction"] * 100:.1f}%</td><td>{row["MeanMinDistance_A"]:.2f} Å</td></tr>'
-            for _, row in table.iterrows()
-        )
-        columns = "<th>Protein A</th><th>Residue</th><th>Protein B</th><th>Residue</th><th>Geometrically near</th><th>Typical closest gap</th>"
-        description = "These are the five protein–protein residue pairs that were within the 4 Å heavy-atom interface cutoff most often. This is a proximity summary, not the same filter used by the colored interaction network below."
-    else:
-        peptide_a = table["ChainA_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)
-        rows = "".join(
-            f'<tr><td>{escape(row["Residue A"] if peptide_a.loc[index] else row["Residue B"])}</td><td>{escape(row["Residue B"] if peptide_a.loc[index] else row["Residue A"])}</td>'
-            f'<td>{row["ContactFraction"] * 100:.1f}%</td><td>{row["MeanMinDistance_A"]:.2f} Å</td></tr>'
-            for index, row in table.iterrows()
-        )
-        columns = "<th>Peptide</th><th>Protein partner</th><th>Geometrically near</th><th>Typical closest gap</th>"
-        description = "These are the five peptide–protein pairs that were within the 4 Å heavy-atom interface cutoff most often. This is a proximity summary, not the same filter used by the colored interaction network below."
+    rows = "".join(
+        f'<tr><td>{escape(row["Peptide position"])}</td><td>{escape(row["Protein partner"])}</td>'
+        f'<td>{row["ContactFraction"] * 100:.1f}%</td><td>{row["MeanMinDistance_A"]:.2f} Å</td></tr>'
+        for _, row in table.iterrows()
+    )
     metric_note = ('<details class="guide"><summary>ⓘ Why can this table and the colored network disagree?</summary>'
-                   f'<p><b>This table uses geometric proximity:</b> it counts a pair whenever any {"protein/protein" if protein_only else "peptide/protein"} heavy atoms are within the 4 Å interface cutoff.</p>'
+                   '<p><b>This table uses geometric proximity:</b> it counts a pair whenever any peptide/protein heavy atoms are within the 4 Å interface cutoff.</p>'
                    '<p><b>The interactive network is stricter:</b> it shows a specific classified interaction (hydrogen bond, ionic, hydrophobic, or other) only when that interaction passes its current occupancy filter. A pair can stay physically close in every frame but form a particular hydrogen bond in fewer than 50% of frames.</p>'
                    '<p>So a row here is an interface-nearness clue. The network answers the narrower question: which <em>specific interaction type</em> remains persistent at the selected threshold?</p></details>')
-    return f'''<style>.interface-scorecard,.representative-frames{{margin:0 0 18px;padding:18px;border:1px solid rgba(24,255,139,.32);border-radius:17px;background:linear-gradient(145deg,#0d2130,#08101c)}}.interface-scorecard h2,.representative-frames h2{{margin:.2rem 0 .35rem}}.interface-scorecard p,.representative-frames p{{color:#9cb6d0;margin:.25rem 0 .8rem;max-width:900px}}.interface-table{{overflow:auto}}.interface-table table{{width:100%;border-collapse:collapse;font-size:.9rem}}.interface-table th{{color:#7aa6d9;text-align:left;text-transform:uppercase;font-size:.7rem;letter-spacing:.06em}}.interface-table td,.interface-table th{{padding:9px;border-bottom:1px solid #203653;white-space:nowrap}}.interface-table td:first-child{{color:#ffe66d;font-weight:900}}</style><section class="interface-scorecard"><div><div class="eyebrow">Start here · geometric interface anchors</div><h2>Which residue pairs stay physically near each other?</h2><p>{description}</p></div><div class="interface-table"><table><thead><tr>{columns}</tr></thead><tbody>{rows}</tbody></table></div>{metric_note}{guide_html("contact_frequency")}</section>'''
+    return f'''<style>.interface-scorecard,.representative-frames{{margin:0 0 18px;padding:18px;border:1px solid rgba(24,255,139,.32);border-radius:17px;background:linear-gradient(145deg,#0d2130,#08101c)}}.interface-scorecard h2,.representative-frames h2{{margin:.2rem 0 .35rem}}.interface-scorecard p,.representative-frames p{{color:#9cb6d0;margin:.25rem 0 .8rem;max-width:900px}}.interface-table{{overflow:auto}}.interface-table table{{width:100%;border-collapse:collapse;font-size:.9rem}}.interface-table th{{color:#7aa6d9;text-align:left;text-transform:uppercase;font-size:.7rem;letter-spacing:.06em}}.interface-table td,.interface-table th{{padding:9px;border-bottom:1px solid #203653;white-space:nowrap}}.interface-table td:first-child{{color:#ffe66d;font-weight:900}}</style><section class="interface-scorecard"><div><div class="eyebrow">Start here · geometric interface anchors</div><h2>Which residue pairs stay physically near each other?</h2><p>These are the five peptide–protein pairs that were within the 4 Å heavy-atom interface cutoff most often. This is a proximity summary, not the same filter used by the colored interaction network below.</p></div><div class="interface-table"><table><thead><tr><th>Peptide</th><th>Protein partner</th><th>Geometrically near</th><th>Typical closest gap</th></tr></thead><tbody>{rows}</tbody></table></div>{metric_note}{guide_html("contact_frequency")}</section>'''
 
 
 def peptide_importance_plot(analysis: Path) -> str | None:
@@ -2471,6 +2460,47 @@ def section_html(title: str, eyebrow: str, text: str, cards: list[str]) -> str:
     return f'<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">{escape(eyebrow)}</div><h2>{escape(title)}</h2><p>{escape(text)}</p></div></div><div class="grid">{"".join(cards)}</div></section>'
 
 
+def component_lanes_section_html(root: Path, title: str, eyebrow: str, text: str,
+                                 shared_cards: list[str], component_cards: dict[int, list[str]]) -> str:
+    """Render a hierarchy for complex dossiers: shared first, then each chain.
+
+    The cyan lane contains genuine whole-complex or interface observables.  A
+    component plot is never silently mixed into that lane, even if the visual
+    grid happens to reflow on a smaller display.
+    """
+    if not shared_cards and not any(component_cards.values()):
+        return ""
+    entries = atomindex_components(root)
+    lanes = []
+    if shared_cards:
+        lanes.append(
+            '<section class="component-analysis-lane component-analysis-lane--shared">'
+            '<header><span class="component-analysis-kicker">Complex / shared</span>'
+            '<h3>Whole-complex and interface analysis</h3>'
+            '<p>These observables are calculated across the complete assembly or its defined interface. Cyan marks them as shared rather than chain-specific.</p>'
+            '</header><div class="grid">' + "".join(shared_cards) + '</div></section>'
+        )
+    for component_index in sorted(component_cards):
+        cards = component_cards[component_index]
+        if not cards:
+            continue
+        index = component_index - 1
+        entry = entries[index] if index < len(entries) else {}
+        label = str(entry.get("label") or f"component {component_index}")
+        chain = str(entry.get("current_chain") or entry.get("source_chain") or "?")
+        accent = CHAIN_COLORS[index % len(CHAIN_COLORS)]
+        lanes.append(
+            f'<section class="component-analysis-lane" style="--component-accent:{accent}"><header>'
+            f'<span class="component-analysis-kicker">Component {component_index}</span>'
+            f'<h3>{escape(label)} <small>chain {escape(chain)}</small></h3>'
+            '<p>Chain-local calculation: positions and values belong to this component only and never continue into another chain.</p>'
+            '</header><div class="grid">' + "".join(cards) + '</div></section>'
+        )
+    return ('<style>.component-analysis-lanes{display:grid;gap:19px}.component-analysis-lane{--component-accent:#35d0ff;border:1px solid #285a79;border-left:5px solid var(--component-accent);border-radius:18px;padding:16px;background:linear-gradient(135deg,#0b1a28,#080b14 48%)}.component-analysis-lane--shared{--component-accent:#35d0ff}.component-analysis-lane header{padding:0 2px 13px;margin-bottom:15px;border-bottom:1px solid #23375d}.component-analysis-lane h3{margin:3px 0;color:#cfe8ff;font-size:1.25rem}.component-analysis-lane h3 small{color:#8daac7;font-size:.75em;font-weight:700}.component-analysis-lane p{margin:0;color:#7aa6d9;font-size:.88rem;max-width:820px}.component-analysis-kicker{display:block;color:var(--component-accent);font-size:.72rem;font-weight:900;letter-spacing:.14em;text-transform:uppercase}</style><section class="gallery-section component-lanes-section"><div class="section-head"><div><div class="eyebrow">'
+            + escape(eyebrow) + '</div><h2>' + escape(title) + '</h2><p>' + escape(text) + '</p></div></div><div class="component-analysis-lanes">'
+            + "".join(lanes) + '</div></section>')
+
+
 def chain_secondary_section_html(cards_by_chain: dict[str, list[str]]) -> str:
     """Give each complex component a discrete, chain-local SSE reading lane."""
     blocks = []
@@ -2630,9 +2660,14 @@ def main() -> None:
     secondary_heatmap_cards = []
     chain_secondary_cards: dict[str, list[str]] = {}
     groups: dict[str, list[str]] = {"overview": [], "stability": [], "flexibility": [], "secondary": [], "contacts": [], "chemistry": [], "distances": [], "coupled": [], "structure": []}
-    def add(group: str, graph: str | None, title: str, source: Path, label: str = "Download exact source CSV", note: str = "") -> None:
+    component_cards: dict[str, dict[int, list[str]]] = {group: {} for group in groups}
+    def add(group: str, graph: str | None, title: str, source: Path, label: str = "Download exact source CSV", note: str = "", component: int | None = None) -> None:
         if graph:
-            groups[group].append(dashboard_card(graph, title, source.relative_to(output.parent).as_posix(), label, note))
+            card = dashboard_card(graph, title, source.relative_to(output.parent).as_posix(), label, note)
+            if is_multichain_system and component is not None:
+                component_cards[group].setdefault(component, []).append(card)
+            else:
+                groups[group].append(card)
     # Matrix outputs are promoted to dedicated scientific heatmaps.  They are
     # deliberately sampled along time so the report stays quick to publish and
     # open; the full matrix CSV remains downloadable from the card.
@@ -2681,14 +2716,13 @@ def main() -> None:
         if scorecard:
             source = analysis / "Protein_RMSD.csv"
             groups["overview"].append(dashboard_card(scorecard, "Binding scorecard", source.relative_to(output.parent).as_posix() if source.is_file() else "", note="Read this as a trajectory summary, then use the stability, contacts, chemistry, and distance tabs for the supporting evidence."))
-    if context.is_interface:
-        interface_scorecard = interface_scorecard_html(analysis, context)
+    if context.partner_kind == "peptide":
+        interface_scorecard = interface_scorecard_html(analysis)
         if interface_scorecard:
             groups["overview"].append(interface_scorecard)
         representative_frames = representative_interface_frames_html(analysis)
         if representative_frames:
             groups["overview"].append(representative_frames)
-    if context.partner_kind == "peptide":
         interface_source = analysis / "Interface_RIN" / "interface_node_summary.csv"
         importance = peptide_importance_plot(analysis)
         if importance and interface_source.is_file():
@@ -2720,7 +2754,9 @@ def main() -> None:
         stability_specs.insert(1, ("FullComplex_RMSD.csv", "Full-complex RMSD", "Time_ps", ["RMSD_Å"], "RMSD (Å)"))
     for file_name, title, x, ys, y_title in stability_specs:
         source = analysis / file_name
-        colors = [GREEN, ORANGE, MAGENTA] if "overlay" in title.lower() or "gyration" in title.lower() else [GREEN]
+        # Whole-complex observables are neutral cyan: reserve Miami orange and
+        # neon green exclusively for the individually resolved components.
+        colors = [CYAN, GREEN, MAGENTA] if "overlay" in title.lower() or "gyration" in title.lower() else [CYAN]
         if source.is_file(): add("stability", multiseries_plot(source, title.replace("Protein", protein_name), x, ys, y_title, colors=colors), title, source)
     if is_multichain_system:
         component_rg_sources = sorted(
@@ -2731,7 +2767,7 @@ def main() -> None:
             label = source.stem.removeprefix("Radius_of_Gyration_")
             add("stability", multiseries_plot(source, f"Component {component_index + 1}: {label} radius of gyration", "Time_ns", ["Rg_Component_Å"], "Radius of gyration (Å)", colors=[CHAIN_COLORS[component_index % len(CHAIN_COLORS)]]),
                 f"Component {component_index + 1}: {label} radius of gyration", source,
-                note="All atoms in this component are used for Rg. Compare each independent component with the whole-complex Rg rather than treating it as a backbone RMSD measure.")
+                note="All atoms in this component are used for Rg. Compare each independent component with the whole-complex Rg rather than treating it as a backbone RMSD measure.", component=component_index + 1)
     protein_rmsd = analysis / "Protein_RMSD.csv"
     if protein_rmsd.is_file():
         add("overview", multiseries_plot(protein_rmsd, f"{protein_name} RMSD", "Time_ps", ["Protein_RMSD"], "RMSD (Å)", colors=[GREEN]), f"{protein_name} RMSD", protein_rmsd)
@@ -2773,7 +2809,7 @@ def main() -> None:
             label = _chain_label_from_metric(source, "RMSF_", "_per_residue.csv")
             add("flexibility", chain_rmsf_plot([source], title=f"Component {component_index + 1}: {label} residue RMSF", colors=[CHAIN_COLORS[component_index % len(CHAIN_COLORS)]]),
                 f"Component {component_index + 1}: {label} residue RMSF", source,
-                note="This component is plotted independently with its own chain-local residue positions. Hover reports the original residue ID and anchor atom used for RMSF.")
+                note="This component is plotted independently with its own chain-local residue positions. Hover reports the original residue ID and anchor atom used for RMSF.", component=component_index + 1)
         add("overview", chain_rmsf_plot(chain_rmsf_sources), "Chain-resolved residue RMSF", chain_rmsf_sources[0],
             note="Comparison only: each color is an independent component beginning at local position 1; hover preserves the source residue identifier.")
     for source in sorted(analysis.glob("RMSF_*.csv")):
@@ -2885,7 +2921,9 @@ def main() -> None:
     # so they deliberately lead the report instead of being buried in exports.
     groups["secondary"] = secondary_heatmap_cards + groups["secondary"]
     groups["contacts"] = heatmap_cards + groups["contacts"]
-    cards = [card for values in groups.values() for card in values]
+    cards = ([card for values in groups.values() for card in values]
+             + [card for lanes in component_cards.values() for values in lanes.values() for card in values]
+             + [card for values in chain_secondary_cards.values() for card in values])
     if not cards and not has_interface_rin:
         cards.append('<article class="card"><h2>Analysis data is still being written</h2><p>No tabular analysis output was available when this report was generated. Re-run this report after 3A finishes.</p></article>')
     # Publish the chemistry drawing separately as well as embedding it in the
@@ -2900,7 +2938,9 @@ def main() -> None:
         "Read global structure and the first persistent chain interface before opening individual chain-pair views."
         if context.is_interface else ("Read global structure and interaction chemistry before drawing conclusions about the ligand." if has_ligand_evidence else "Read protein stability, fold retention, and secondary structure together.")
     )
-    overview = section_html(overview_title, "Start here", overview_text, groups["overview"])
+    overview = (component_lanes_section_html(root, overview_title, "Start here", overview_text,
+                                              groups["overview"], component_cards["overview"])
+                if is_multichain_system else section_html(overview_title, "Start here", overview_text, groups["overview"]))
     # Interface-only systems should never acquire a misleading empty ligand card.
     ligand_panel = ligand_html(root, ligand_name) if context.partner_kind == "ligand" else ""
     network_explorer = interactive_networx_html(analysis, ligand_expected=has_ligand_evidence)
@@ -2908,15 +2948,22 @@ def main() -> None:
     interface_evidence = interface_evidence_html(analysis, context, interface_rin)
     structure_panel = final_structure_html(root, context)
     trajectory_panel = trajectory_playback_html(root, analysis, context)
-    stability = section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"])
-    flexibility = section_html("Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"])
-    secondary = (chain_secondary_section_html(chain_secondary_cards) if is_multichain_system else "") or section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"])
-    contacts = section_html(context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"])
-    chemistry = section_html("Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"])
-    distances = section_html("Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"]) + distance_carousel_html(analysis)
-    coupled = section_html("Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"])
+    component_key = component_key_html(root) if is_multichain_system else ""
+    stability = component_key + (component_lanes_section_html(root, "Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends. Cyan denotes whole-complex observables; orange and neon green denote the individual components.", groups["stability"], component_cards["stability"])
+                               if is_multichain_system else section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"]))
+    flexibility = component_key + (component_lanes_section_html(root, "Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"], component_cards["flexibility"])
+                                 if is_multichain_system else section_html("Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"]))
+    secondary = component_key + ((chain_secondary_section_html(chain_secondary_cards) if is_multichain_system else "") or section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"]))
+    contacts = component_key + (component_lanes_section_html(root, context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"], component_cards["contacts"])
+                              if is_multichain_system else section_html(context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"]))
+    chemistry = component_key + (component_lanes_section_html(root, "Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"], component_cards["chemistry"])
+                               if is_multichain_system else section_html("Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"]))
+    distances = component_key + (component_lanes_section_html(root, "Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"], component_cards["distances"])
+                                 if is_multichain_system else section_html("Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"])) + distance_carousel_html(analysis)
+    coupled = component_key + (component_lanes_section_html(root, "Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"], component_cards["coupled"])
+                               if is_multichain_system else section_html("Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"]))
     dashboard = tabbed_sections([
-        ("overview", "Overview", overview + peptide_topology + interface_rin["overview"] + network_explorer),
+        ("overview", "Overview", component_key + overview + peptide_topology + interface_rin["overview"] + network_explorer),
         ("stability", "Stability", stability),
         ("flexibility", "Flexibility", flexibility),
         ("secondary", "Secondary structure", secondary),
