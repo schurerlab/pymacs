@@ -903,9 +903,23 @@ def interface_svg_snapshots(explorer: Path, threshold: float = .5) -> list[tuple
             contacts = node_edges[node]
             strongest = max((float(edge.get("fraction", 0)) for edge in contacts), default=0)
             component = "Component 1 / chain A" if node in left_nodes else "Component 2 / chain B"
+            partners: dict[str, dict] = {}
+            for edge in contacts:
+                partner = edge["b"] if edge["a"] == node else edge["a"]
+                entry = partners.setdefault(partner, {"fraction": 0.0, "types": set(), "distances": []})
+                entry["fraction"] = max(entry["fraction"], float(edge.get("fraction", 0)))
+                entry["types"].add(str(edge.get("type", "contact")))
+                entry["distances"].extend(float(row["distance_a"]) for row in (edge.get("evidence") or []) if row.get("distance_a") is not None)
+            ordered = sorted(partners.items(), key=lambda item: item[1]["fraction"], reverse=True)
+            partner_lines = []
+            for partner, entry in ordered[:7]:
+                geometry = f" · {min(entry['distances']):.2f} Å" if entry["distances"] else ""
+                partner_lines.append(f"  {short(partner)} · {'/'.join(sorted(entry['types']))} · {entry['fraction']:.1%}{geometry}")
+            if len(ordered) > 7:
+                partner_lines.append(f"  +{len(ordered) - 7} additional persistent partners")
             return (f"{short(node)}\n{component}\n"
-                    f"Persistent residue partners: {len(contacts)}\n"
-                    f"Strongest contact persistence: {strongest:.1%}")
+                    f"Persistent residue partners: {len(partners)} · strongest {strongest:.1%}\n"
+                    "PARTNERS · interaction · persistence · closest distance\n" + "\n".join(partner_lines))
         def y(index: int, count: int) -> int:
             return 128 + round(index * 220 / max(count - 1, 1))
         all_nodes = left_nodes + right_nodes
@@ -920,9 +934,9 @@ def interface_svg_snapshots(explorer: Path, threshold: float = .5) -> list[tuple
         }
         snapshots = []
         for layout, positions in layouts.items():
-            lines = ''.join(f'<path d="M{x1} {y1} L{x2} {y2}" stroke="#35d0ff" stroke-opacity="{.3 + .7 * edge["fraction"]:.2f}" stroke-width="{1 + 5 * edge["fraction"]:.1f}" stroke-linecap="round" style="cursor:help" data-interface-tooltip="{escape(edge_tooltip(edge), quote=True)}" aria-label="{escape(edge_tooltip(edge), quote=True)}"/>' for edge in edges for (x1, y1), (x2, y2) in [(positions[edge["a"]], positions[edge["b"]])])
-            nodes = ''.join(f'<g style="cursor:help" tabindex="0" data-interface-tooltip="{escape(node_tooltip(node), quote=True)}" aria-label="{escape(node_tooltip(node), quote=True)}"><circle cx="{x}" cy="{yy}" r="15" fill="{ORANGE if node in left_nodes else GREEN}"/><text x="{x}" y="{yy + 3}" text-anchor="middle" font-size="7" font-weight="800" pointer-events="none">{escape(short(node))}</text></g>' for node, (x, yy) in positions.items())
-            svg = f'<svg viewBox="0 0 560 400" role="img" aria-label="{escape(layout)} interface view"><rect data-interface-background="true" width="560" height="400" fill="#07111e"/><path d="M18 101H542" stroke="#35d0ff" stroke-opacity=".28"/><path d="M18 104H188" stroke="{ORANGE}" stroke-opacity=".75"/><path d="M372 104H542" stroke="{GREEN}" stroke-opacity=".75"/><text x="18" y="30" fill="#d9ecff" font-size="13" font-weight="800">{escape(layout)} · {escape(left)} ↔ {escape(right)} · ≥{threshold:.0%}</text><circle cx="24" cy="58" r="6" fill="{ORANGE}"/><text x="38" y="62" fill="{ORANGE}" font-size="10" font-weight="800">COMPONENT 1 · {escape(component_label(left))}</text><circle cx="222" cy="58" r="6" fill="{GREEN}"/><text x="236" y="62" fill="{GREEN}" font-size="10" font-weight="800">COMPONENT 2 · {escape(component_label(right))}</text><text x="18" y="84" fill="#8aa9bd" font-size="8">HOVER HUD · residue: partners + strongest persistence · cyan edge: contact chemistry + geometry</text>{lines}{nodes}</svg>'
+            lines = ''.join(f'<path d="M{x1} {y1} L{x2} {y2}" stroke="#35d0ff" stroke-opacity="{.3 + .7 * edge["fraction"]:.2f}" stroke-width="{1 + 5 * edge["fraction"]:.1f}" stroke-linecap="round" style="cursor:help" data-interface-tooltip-kind="edge" data-interface-tooltip="{escape(edge_tooltip(edge), quote=True)}" aria-label="{escape(edge_tooltip(edge), quote=True)}"/>' for edge in edges for (x1, y1), (x2, y2) in [(positions[edge["a"]], positions[edge["b"]])])
+            nodes = ''.join(f'<g style="cursor:help" tabindex="0" data-interface-tooltip-kind="node" data-interface-component="{"one" if node in left_nodes else "two"}" data-interface-tooltip="{escape(node_tooltip(node), quote=True)}" aria-label="{escape(node_tooltip(node), quote=True)}"><circle cx="{x}" cy="{yy}" r="15" fill="{ORANGE if node in left_nodes else GREEN}"/><text x="{x}" y="{yy + 3}" text-anchor="middle" font-size="7" font-weight="800" pointer-events="none">{escape(short(node))}</text></g>' for node, (x, yy) in positions.items())
+            svg = f'<svg viewBox="0 0 560 400" role="img" aria-label="{escape(layout)} interface view"><rect data-interface-background="true" width="560" height="400" fill="#07111e"/><path d="M18 101H542" stroke="#35d0ff" stroke-opacity=".28"/><path d="M18 104H188" stroke="{ORANGE}" stroke-opacity=".75"/><path d="M372 104H542" stroke="{GREEN}" stroke-opacity=".75"/><text data-interface-export-title="true" x="18" y="30" fill="#d9ecff" font-size="13" font-weight="800">{escape(layout)} · {escape(left)} ↔ {escape(right)} · ≥{threshold:.0%}</text><circle cx="24" cy="58" r="6" fill="{ORANGE}"/><text x="38" y="62" fill="{ORANGE}" font-size="10" font-weight="800">COMPONENT 1 · {escape(component_label(left))}</text><circle cx="222" cy="58" r="6" fill="{GREEN}"/><text x="236" y="62" fill="{GREEN}" font-size="10" font-weight="800">COMPONENT 2 · {escape(component_label(right))}</text><text data-interface-export-remove="true" x="18" y="84" fill="#8aa9bd" font-size="8">HOVER HUD · residue: partners + strongest persistence · cyan edge: contact chemistry + geometry</text>{lines}{nodes}</svg>'
             snapshots.append((svg, f"{layout} · ≥{threshold:.0%} persistence"))
         return snapshots
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -2654,7 +2668,9 @@ document.querySelectorAll('.interface-carousel').forEach(carousel=>{{
     download.style.cssText='border:1px solid #18ff8b;border-radius:9px;background:#08291d;color:#d9fff0;padding:8px 12px;font:800 .82rem inherit;cursor:pointer';
     download.addEventListener('click',()=>{{
       const svg=carousel.querySelector('.interface-slide:not([hidden]) svg'); if(!svg)return;
-      const copy=svg.cloneNode(true); copy.querySelectorAll('[data-interface-background]').forEach(node=>node.remove());
+      const copy=svg.cloneNode(true);
+      copy.querySelectorAll('[data-interface-background],[data-interface-export-remove]').forEach(node=>node.remove());
+      copy.querySelectorAll('[data-interface-export-title]').forEach(node=>node.setAttribute('fill','#10233b'));
       copy.setAttribute('xmlns','http://www.w3.org/2000/svg');
       const blob=new Blob([new XMLSerializer().serializeToString(copy)],{{type:'image/svg+xml;charset=utf-8'}});
       const link=document.createElement('a'); link.href=URL.createObjectURL(blob); link.download=`pymacs-interface-${{carousel.closest('[data-interface-threshold-set]')?.dataset.interfaceThresholdSet?.replace('%','pct')||'map'}}-${{index+1}}.svg`; link.click(); URL.revokeObjectURL(link.href);
@@ -2674,12 +2690,14 @@ document.querySelectorAll('.interface-threshold-controls').forEach(controls=>{{
 }});
 (() => {{
   const hud=document.createElement('div'); hud.id='interface-map-hud'; hud.setAttribute('role','status'); document.body.append(hud);
-  Object.assign(hud.style,{{position:'fixed',zIndex:'10001',maxWidth:'285px',padding:'10px 12px',border:'1px solid #35d0ff',borderRadius:'10px',background:'linear-gradient(135deg,rgba(4,12,27,.97),rgba(8,34,52,.97))',boxShadow:'0 0 26px rgba(53,208,255,.34),inset 0 0 18px rgba(53,208,255,.08)',color:'#dff5ff',font:'700 12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace',whiteSpace:'pre-line',pointerEvents:'none',opacity:'0',transform:'translateY(4px)',transition:'opacity 55ms linear,transform 55ms linear'}});
-  const place=event=>{{const x=Math.min(innerWidth-300,event.clientX+16),y=Math.min(innerHeight-140,event.clientY+16);hud.style.left=`${{Math.max(10,x)}}px`;hud.style.top=`${{Math.max(10,y)}}px`}};
+  Object.assign(hud.style,{{position:'fixed',zIndex:'10001',maxWidth:'390px',maxHeight:'270px',overflowY:'auto',padding:'11px 13px',border:'1px solid #35d0ff',borderRadius:'10px',background:'linear-gradient(135deg,rgba(4,12,27,.97),rgba(8,34,52,.97))',boxShadow:'0 0 26px rgba(53,208,255,.34),inset 0 0 18px rgba(53,208,255,.08)',color:'#dff5ff',font:'700 12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace',whiteSpace:'pre-line',pointerEvents:'none',opacity:'0',transform:'translateY(4px)',transition:'opacity 55ms linear,transform 55ms linear'}});
+  const themes={{one:{{accent:'#ff8a3d',glow:'rgba(255,138,61,.38)',background:'linear-gradient(135deg,rgba(40,18,7,.98),rgba(70,31,10,.98))'}},two:{{accent:'#18ff8b',glow:'rgba(24,255,139,.36)',background:'linear-gradient(135deg,rgba(4,34,20,.98),rgba(7,60,32,.98))'}},edge:{{accent:'#35d0ff',glow:'rgba(53,208,255,.34)',background:'linear-gradient(135deg,rgba(4,12,27,.98),rgba(8,34,52,.98))'}}}};
+  const paint=target=>{{const theme=target.dataset.interfaceTooltipKind==='edge'?themes.edge:(themes[target.dataset.interfaceComponent]||themes.edge);hud.style.borderColor=theme.accent;hud.style.boxShadow=`0 0 26px ${{theme.glow}},inset 0 0 18px ${{theme.glow}}`;hud.style.background=theme.background}};
+  const place=event=>{{const x=Math.min(innerWidth-405,event.clientX+16),y=Math.min(innerHeight-285,event.clientY+16);hud.style.left=`${{Math.max(10,x)}}px`;hud.style.top=`${{Math.max(10,y)}}px`}};
   document.querySelectorAll('[data-interface-tooltip]').forEach(target=>{{
-    const show=event=>{{hud.textContent=target.dataset.interfaceTooltip;place(event);hud.style.opacity='1';hud.style.transform='translateY(0)'}};
+    const show=event=>{{paint(target);hud.textContent=target.dataset.interfaceTooltip;place(event);hud.style.opacity='1';hud.style.transform='translateY(0)'}};
     target.addEventListener('pointerenter',show);target.addEventListener('pointermove',place);target.addEventListener('pointerleave',()=>{{hud.style.opacity='0';hud.style.transform='translateY(4px)'}});
-    target.addEventListener('focus',()=>{{hud.textContent=target.dataset.interfaceTooltip;hud.style.left='18px';hud.style.top='18px';hud.style.opacity='1';hud.style.transform='translateY(0)'}});target.addEventListener('blur',()=>{{hud.style.opacity='0';hud.style.transform='translateY(4px)'}});
+    target.addEventListener('focus',()=>{{paint(target);hud.textContent=target.dataset.interfaceTooltip;hud.style.left='18px';hud.style.top='18px';hud.style.opacity='1';hud.style.transform='translateY(0)'}});target.addEventListener('blur',()=>{{hud.style.opacity='0';hud.style.transform='translateY(4px)'}});
   }});
 }})();
 </script><script>
