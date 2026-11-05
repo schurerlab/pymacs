@@ -867,18 +867,24 @@ def interface_rin_context(analysis: Path) -> dict:
     }
 
 
-def interface_svg_snapshots(explorer: Path) -> list[tuple[str, str]]:
-    """Create lightweight 50%-persistence SVG previews from the explorer data."""
+def interface_svg_snapshots(explorer: Path, threshold: float = .5) -> list[tuple[str, str]]:
+    """Create thresholded, chain-coloured SVG previews from explorer data."""
     try:
         text = explorer.read_text(encoding="utf-8")
         match = re.search(r"<script>const DATA=(.*?);\n\(\(\)=>", text, re.DOTALL)
         data = json.loads(match.group(1)) if match else {}
         pair = (data.get("pairs") or [])[0]
         left, right = pair["left"], pair["right"]
-        edges = [edge for edge in data.get("edges", []) if edge.get("fraction", 0) >= .5 and
+        edges = [edge for edge in data.get("edges", []) if edge.get("fraction", 0) >= threshold and
                  {edge.get("a", "").split(":", 1)[0], edge.get("b", "").split(":", 1)[0]} == {left, right}]
-        left_nodes = list(dict.fromkeys(edge["a"] for edge in edges))
-        right_nodes = list(dict.fromkeys(edge["b"] for edge in edges))
+        # Component identity comes from the chain prefix, rather than the source
+        # table's arbitrary edge direction.
+        left_nodes = list(dict.fromkeys(node for edge in edges for node in (edge["a"], edge["b"])
+                                        if node.split(":", 1)[0] == left))
+        right_nodes = list(dict.fromkeys(node for edge in edges for node in (edge["a"], edge["b"])
+                                         if node.split(":", 1)[0] == right))
+        if not edges or not left_nodes or not right_nodes:
+            return []
         def short(label: str) -> str:
             return label.split(":")[-1]
         def y(index: int, count: int) -> int:
@@ -896,9 +902,9 @@ def interface_svg_snapshots(explorer: Path) -> list[tuple[str, str]]:
         snapshots = []
         for layout, positions in layouts.items():
             lines = ''.join(f'<path d="M{x1} {y1} L{x2} {y2}" stroke="#35d0ff" stroke-opacity="{.3 + .7 * edge["fraction"]:.2f}" stroke-width="{1 + 5 * edge["fraction"]:.1f}"/>' for edge in edges for (x1, y1), (x2, y2) in [(positions[edge["a"]], positions[edge["b"]])])
-            nodes = ''.join(f'<g><circle cx="{x}" cy="{yy}" r="13" fill="{"#ffe66d" if node in left_nodes else "#35d0ff"}"/><text x="{x}" y="{yy + 3}" text-anchor="middle" font-size="7" font-weight="800">{escape(short(node))}</text></g>' for node, (x, yy) in positions.items())
-            svg = f'<svg viewBox="0 0 500 250" role="img" aria-label="{escape(layout)} interface view"><rect width="500" height="250" fill="#07111e"/><text x="18" y="20" fill="#b9d8ef" font-size="11" font-weight="800">{escape(layout)} · {escape(left)} ↔ {escape(right)} · ≥50%</text>{lines}{nodes}</svg>'
-            snapshots.append((svg, f"{layout} · default ≥50% persistence"))
+            nodes = ''.join(f'<g><circle cx="{x}" cy="{yy}" r="13" fill="{ORANGE if node in left_nodes else GREEN}"/><text x="{x}" y="{yy + 3}" text-anchor="middle" font-size="7" font-weight="800">{escape(short(node))}</text></g>' for node, (x, yy) in positions.items())
+            svg = f'<svg viewBox="0 0 500 250" role="img" aria-label="{escape(layout)} interface view"><rect width="500" height="250" fill="#07111e"/><text x="18" y="20" fill="#b9d8ef" font-size="11" font-weight="800">{escape(layout)} · {escape(left)} ↔ {escape(right)} · ≥{threshold:.0%}</text><text x="18" y="37" fill="{ORANGE}" font-size="8" font-weight="800">{escape(left)}</text><text x="58" y="37" fill="#8aa9bd" font-size="8">vs</text><text x="74" y="37" fill="{GREEN}" font-size="8" font-weight="800">{escape(right)}</text>{lines}{nodes}</svg>'
+            snapshots.append((svg, f"{layout} · ≥{threshold:.0%} persistence"))
         return snapshots
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return []
@@ -911,14 +917,37 @@ def interface_evidence_html(analysis: Path, context: PartnerContext, rin: dict) 
     interface_dir = analysis / "Interface_RIN"
     explorer = interface_dir / "Interface_RIN_Explorer.html"
     if explorer.is_file():
-        previews = [f'<figure class="interface-preview">{svg}<figcaption>{escape(label)}</figcaption></figure>'
-                    for svg, label in interface_svg_snapshots(explorer)]
-        slides = ''.join(f'<article class="interface-slide"{" hidden" if index else ""}>{preview}</article>' for index, preview in enumerate(previews))
-        static_maps = f'<div class="interface-carousel"><div class="interface-carousel-track">{slides}</div><div class="interface-carousel-controls"><button type="button" data-interface-carousel="previous">← Previous</button><span data-interface-carousel-label>1 / {len(previews)}</span><button type="button" data-interface-carousel="next">Next →</button></div></div>' if previews else ""
+        threshold_sets: list[str] = []
+        available_thresholds: list[str] = []
+        for threshold in (.5, .75, .9):
+            previews = [f'<figure class="interface-preview">{svg}<figcaption>{escape(label)}</figcaption></figure>'
+                        for svg, label in interface_svg_snapshots(explorer, threshold)]
+            percent = f"{threshold:.0%}"
+            if previews:
+                slides = ''.join(f'<article class="interface-slide"{" hidden" if index else ""}>{preview}</article>' for index, preview in enumerate(previews))
+                carousel = (
+                    f'<div class="interface-carousel"><div class="interface-carousel-track">{slides}</div>'
+                    f'<div class="interface-carousel-controls"><button type="button" data-interface-carousel="previous">← Previous</button>'
+                    f'<span data-interface-carousel-label>1 / {len(previews)}</span>'
+                    '<button type="button" data-interface-carousel="next">Next →</button></div></div>'
+                )
+            else:
+                carousel = f'<div class="empty-analysis"><p>No residue-pair contact reaches the selected ≥{percent} persistence threshold.</p></div>'
+            threshold_sets.append(
+                f'<div class="interface-threshold-set" data-interface-threshold-set="{percent}"'
+                f'{" hidden" if threshold != .5 else ""}>{carousel}</div>'
+            )
+            available_thresholds.append(percent)
+        controls = ''.join(
+            f'<button type="button" data-interface-threshold="{percent}" aria-pressed="{str(percent == "50%").lower()}">≥{percent}</button>'
+            for percent in available_thresholds
+        )
+        static_maps = (f'<div class="interface-threshold-controls" role="group" aria-label="Minimum contact persistence">{controls}</div>'
+                       f'{"".join(threshold_sets)}') if threshold_sets else ""
         return (
             '<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">Interface evidence</div>'
             f'<h2>{escape(context.relationship_label.title())} residue maps</h2>'
-            '<p>Five static SVG snapshots of the interface network are shown at the default 50% contact-persistence threshold. Use the carousel to compare layouts without mixing them with legacy PNG outputs.</p></div></div>'
+            '<p>Choose a minimum contact-persistence threshold: 50% shows the broad stable interface, 75% emphasizes stronger contacts, and 90% isolates its core. Component 1 is Miami orange, component 2 is neon green, and cyan edges are shared contacts.</p></div></div>'
             f'{static_maps}</section>'
         )
     expected = "Interface_RIN/Interface_RIN_Explorer.html and the interface residue-pair tables"
@@ -2601,6 +2630,16 @@ document.querySelectorAll('.interface-carousel').forEach(carousel=>{{
   carousel.querySelectorAll('.interface-slide').forEach(slide=>slide.style.padding='14px');
   carousel.querySelector('.interface-carousel-controls').style.cssText='display:flex;justify-content:center;align-items:center;gap:14px;padding:12px;border-top:1px solid #23375d;color:#b7d5ed;font-weight:800';
   carousel.querySelectorAll('[data-interface-carousel]').forEach(button=>{{button.style.cssText='border:1px solid #285a79;border-radius:9px;background:#0a253a;color:#dff5ff;padding:8px 12px;font:800 .82rem inherit;cursor:pointer';button.addEventListener('click',()=>{{index=(index+(button.dataset.interfaceCarousel==='next'?1:-1)+slides.length)%slides.length;slides.forEach((slide,i)=>slide.hidden=i!==index);label.textContent=`${{index+1}} / ${{slides.length}}`}})}});
+}});
+document.querySelectorAll('.interface-threshold-controls').forEach(controls=>{{
+  Object.assign(controls.style,{{display:'flex',gap:'8px',flexWrap:'wrap',margin:'0 0 12px'}});
+  const section=controls.closest('.gallery-section'); const buttons=[...controls.querySelectorAll('[data-interface-threshold]')];
+  const activate=threshold=>{{
+    section.querySelectorAll('[data-interface-threshold-set]').forEach(deck=>deck.hidden=deck.dataset.interfaceThresholdSet!==threshold);
+    buttons.forEach(button=>{{const active=button.dataset.interfaceThreshold===threshold;button.setAttribute('aria-pressed',active);Object.assign(button.style,{{border:`1px solid ${{active?'#35d0ff':'#285a79'}}`,borderRadius:'999px',background:active?'#123750':'#0a1928',color:active?'#dff5ff':'#9bbce0',padding:'8px 13px',font:'800 .82rem inherit',cursor:'pointer'}})}});
+  }};
+  buttons.forEach(button=>button.addEventListener('click',()=>activate(button.dataset.interfaceThreshold)));
+  activate(buttons.find(button=>button.getAttribute('aria-pressed')==='true')?.dataset.interfaceThreshold||buttons[0]?.dataset.interfaceThreshold);
 }});
 </script><script>
 /* Forward chain-aware explorer selections between independently sandboxed panels. */
