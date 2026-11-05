@@ -907,22 +907,22 @@ def interface_svg_snapshots(explorer: Path, threshold: float = .5) -> list[tuple
                     f"Persistent residue partners: {len(contacts)}\n"
                     f"Strongest contact persistence: {strongest:.1%}")
         def y(index: int, count: int) -> int:
-            return 94 + round(index * 190 / max(count - 1, 1))
+            return 128 + round(index * 220 / max(count - 1, 1))
         all_nodes = left_nodes + right_nodes
         def ring(nodes: list[str], cx: int, cy: int, rx: int, ry: int) -> dict[str, tuple[int, int]]:
             return {node: (round(cx + rx * np.cos(-np.pi / 2 + 2 * np.pi * index / max(len(nodes), 1))), round(cy + ry * np.sin(-np.pi / 2 + 2 * np.pi * index / max(len(nodes), 1)))) for index, node in enumerate(nodes)}
         layouts = {
-            "Force-directed": ring(all_nodes, 280, 190, 205, 108),
+            "Force-directed": ring(all_nodes, 280, 242, 205, 118),
             "Bipartite": {**{node: (92, y(index, len(left_nodes))) for index, node in enumerate(left_nodes)}, **{node: (468, y(index, len(right_nodes))) for index, node in enumerate(right_nodes)}},
-            "Concentric": {**ring(left_nodes, 280, 190, 205, 108), **ring(right_nodes, 280, 190, 112, 60)},
-            "Circular": ring(all_nodes, 280, 190, 205, 108),
-            "Chain-separated": {**{node: (96 + index * 368 / max(len(left_nodes) - 1, 1), 116) for index, node in enumerate(left_nodes)}, **{node: (96 + index * 368 / max(len(right_nodes) - 1, 1), 266) for index, node in enumerate(right_nodes)}},
+            "Concentric": {**ring(left_nodes, 280, 242, 205, 118), **ring(right_nodes, 280, 242, 112, 68)},
+            "Circular": ring(all_nodes, 280, 242, 205, 118),
+            "Chain-separated": {**{node: (96 + index * 368 / max(len(left_nodes) - 1, 1), 145) for index, node in enumerate(left_nodes)}, **{node: (96 + index * 368 / max(len(right_nodes) - 1, 1), 332) for index, node in enumerate(right_nodes)}},
         }
         snapshots = []
         for layout, positions in layouts.items():
-            lines = ''.join(f'<path d="M{x1} {y1} L{x2} {y2}" stroke="#35d0ff" stroke-opacity="{.3 + .7 * edge["fraction"]:.2f}" stroke-width="{1 + 5 * edge["fraction"]:.1f}" stroke-linecap="round" style="cursor:help"><title>{escape(edge_tooltip(edge))}</title></path>' for edge in edges for (x1, y1), (x2, y2) in [(positions[edge["a"]], positions[edge["b"]])])
-            nodes = ''.join(f'<g style="cursor:help"><title>{escape(node_tooltip(node))}</title><circle cx="{x}" cy="{yy}" r="15" fill="{ORANGE if node in left_nodes else GREEN}"/><text x="{x}" y="{yy + 3}" text-anchor="middle" font-size="7" font-weight="800">{escape(short(node))}</text></g>' for node, (x, yy) in positions.items())
-            svg = f'<svg viewBox="0 0 560 330" role="img" aria-label="{escape(layout)} interface view"><rect data-interface-background="true" width="560" height="330" fill="#07111e"/><text x="18" y="26" fill="#d9ecff" font-size="13" font-weight="800">{escape(layout)} · {escape(left)} ↔ {escape(right)} · ≥{threshold:.0%}</text><circle cx="24" cy="49" r="5" fill="{ORANGE}"/><text x="35" y="52" fill="{ORANGE}" font-size="9" font-weight="800">Component 1 · {escape(component_label(left))}</text><circle cx="170" cy="49" r="5" fill="{GREEN}"/><text x="181" y="52" fill="{GREEN}" font-size="9" font-weight="800">Component 2 · {escape(component_label(right))}</text><text x="18" y="70" fill="#8aa9bd" font-size="8">Hover a residue or cyan contact edge for identity, persistence, interaction type, and available geometry.</text>{lines}{nodes}</svg>'
+            lines = ''.join(f'<path d="M{x1} {y1} L{x2} {y2}" stroke="#35d0ff" stroke-opacity="{.3 + .7 * edge["fraction"]:.2f}" stroke-width="{1 + 5 * edge["fraction"]:.1f}" stroke-linecap="round" style="cursor:help" data-interface-tooltip="{escape(edge_tooltip(edge), quote=True)}" aria-label="{escape(edge_tooltip(edge), quote=True)}"/>' for edge in edges for (x1, y1), (x2, y2) in [(positions[edge["a"]], positions[edge["b"]])])
+            nodes = ''.join(f'<g style="cursor:help" tabindex="0" data-interface-tooltip="{escape(node_tooltip(node), quote=True)}" aria-label="{escape(node_tooltip(node), quote=True)}"><circle cx="{x}" cy="{yy}" r="15" fill="{ORANGE if node in left_nodes else GREEN}"/><text x="{x}" y="{yy + 3}" text-anchor="middle" font-size="7" font-weight="800" pointer-events="none">{escape(short(node))}</text></g>' for node, (x, yy) in positions.items())
+            svg = f'<svg viewBox="0 0 560 400" role="img" aria-label="{escape(layout)} interface view"><rect data-interface-background="true" width="560" height="400" fill="#07111e"/><path d="M18 101H542" stroke="#35d0ff" stroke-opacity=".28"/><path d="M18 104H188" stroke="{ORANGE}" stroke-opacity=".75"/><path d="M372 104H542" stroke="{GREEN}" stroke-opacity=".75"/><text x="18" y="30" fill="#d9ecff" font-size="13" font-weight="800">{escape(layout)} · {escape(left)} ↔ {escape(right)} · ≥{threshold:.0%}</text><circle cx="24" cy="58" r="6" fill="{ORANGE}"/><text x="38" y="62" fill="{ORANGE}" font-size="10" font-weight="800">COMPONENT 1 · {escape(component_label(left))}</text><circle cx="222" cy="58" r="6" fill="{GREEN}"/><text x="236" y="62" fill="{GREEN}" font-size="10" font-weight="800">COMPONENT 2 · {escape(component_label(right))}</text><text x="18" y="84" fill="#8aa9bd" font-size="8">HOVER HUD · residue: partners + strongest persistence · cyan edge: contact chemistry + geometry</text>{lines}{nodes}</svg>'
             snapshots.append((svg, f"{layout} · ≥{threshold:.0%} persistence"))
         return snapshots
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -2664,13 +2664,24 @@ document.querySelectorAll('.interface-carousel').forEach(carousel=>{{
 document.querySelectorAll('.interface-threshold-controls').forEach(controls=>{{
   Object.assign(controls.style,{{display:'flex',gap:'8px',flexWrap:'wrap',margin:'0 0 12px'}});
   const section=controls.closest('.gallery-section'); const buttons=[...controls.querySelectorAll('[data-interface-threshold]')];
+  const palette={{'50%':{{color:'#ff6adf',glow:'rgba(255,106,223,.34)',panel:'#32112d'}},'75%':{{color:'#35d0ff',glow:'rgba(53,208,255,.34)',panel:'#0b2940'}},'90%':{{color:'#18ff8b',glow:'rgba(24,255,139,.34)',panel:'#08291d'}}}};
   const activate=threshold=>{{
     section.querySelectorAll('[data-interface-threshold-set]').forEach(deck=>deck.hidden=deck.dataset.interfaceThresholdSet!==threshold);
-    buttons.forEach(button=>{{const active=button.dataset.interfaceThreshold===threshold;button.setAttribute('aria-pressed',active);Object.assign(button.style,{{border:`1px solid ${{active?'#35d0ff':'#285a79'}}`,borderRadius:'999px',background:active?'#123750':'#0a1928',color:active?'#dff5ff':'#9bbce0',padding:'8px 13px',font:'800 .82rem inherit',cursor:'pointer'}})}});
+    buttons.forEach(button=>{{const active=button.dataset.interfaceThreshold===threshold,theme=palette[button.dataset.interfaceThreshold];button.setAttribute('aria-pressed',active);Object.assign(button.style,{{border:`1px solid ${{theme.color}}`,borderRadius:'999px',background:active?theme.panel:'#0a1928',boxShadow:active?`0 0 16px ${{theme.glow}}`:'none',color:active?theme.color:'#9bbce0',padding:'8px 13px',font:'900 .82rem inherit',letterSpacing:'.03em',cursor:'pointer',transition:'background .16s,box-shadow .16s,color .16s'}})}});
   }};
   buttons.forEach(button=>button.addEventListener('click',()=>activate(button.dataset.interfaceThreshold)));
   activate(buttons.find(button=>button.getAttribute('aria-pressed')==='true')?.dataset.interfaceThreshold||buttons[0]?.dataset.interfaceThreshold);
 }});
+(() => {{
+  const hud=document.createElement('div'); hud.id='interface-map-hud'; hud.setAttribute('role','status'); document.body.append(hud);
+  Object.assign(hud.style,{{position:'fixed',zIndex:'10001',maxWidth:'285px',padding:'10px 12px',border:'1px solid #35d0ff',borderRadius:'10px',background:'linear-gradient(135deg,rgba(4,12,27,.97),rgba(8,34,52,.97))',boxShadow:'0 0 26px rgba(53,208,255,.34),inset 0 0 18px rgba(53,208,255,.08)',color:'#dff5ff',font:'700 12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace',whiteSpace:'pre-line',pointerEvents:'none',opacity:'0',transform:'translateY(4px)',transition:'opacity 55ms linear,transform 55ms linear'}});
+  const place=event=>{{const x=Math.min(innerWidth-300,event.clientX+16),y=Math.min(innerHeight-140,event.clientY+16);hud.style.left=`${{Math.max(10,x)}}px`;hud.style.top=`${{Math.max(10,y)}}px`}};
+  document.querySelectorAll('[data-interface-tooltip]').forEach(target=>{{
+    const show=event=>{{hud.textContent=target.dataset.interfaceTooltip;place(event);hud.style.opacity='1';hud.style.transform='translateY(0)'}};
+    target.addEventListener('pointerenter',show);target.addEventListener('pointermove',place);target.addEventListener('pointerleave',()=>{{hud.style.opacity='0';hud.style.transform='translateY(4px)'}});
+    target.addEventListener('focus',()=>{{hud.textContent=target.dataset.interfaceTooltip;hud.style.left='18px';hud.style.top='18px';hud.style.opacity='1';hud.style.transform='translateY(0)'}});target.addEventListener('blur',()=>{{hud.style.opacity='0';hud.style.transform='translateY(4px)'}});
+  }});
+}})();
 </script><script>
 /* Forward chain-aware explorer selections between independently sandboxed panels. */
 addEventListener('message',event=>{{const data=event.data||{{}};if(data.type!=='pymacs-rin-selection'||!data.residue)return;document.querySelectorAll('iframe[title*="interface explorer"]').forEach(frame=>{{if(frame.contentWindow!==event.source)frame.contentWindow?.postMessage(data,'*')}})}});
