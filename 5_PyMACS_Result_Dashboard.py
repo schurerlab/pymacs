@@ -1756,10 +1756,10 @@ def distance_carousel_html(analysis: Path) -> str:
         except (OSError, ValueError, pd.errors.ParserError):
             return ""
     elif interface_events_path.is_file():
-        # Peptide dossiers persist their exact pairwise contact distances in
-        # 3C's framewise table rather than the ligand-only AllContacts file.
-        # Retain only canonical peptide residues on the explicitly labelled
-        # peptide side; this also rejects a legacy terminal SOL row.
+        # Protein complexes and peptide complexes both persist exact pairwise
+        # interface distances in the 3C framewise table.  Retain peptide-only
+        # labels for peptide dossiers, but retain labelled residue *pairs* for
+        # protein–protein systems instead of leaving their Distance tab blank.
         try:
             raw = pd.read_csv(interface_events_path, compression="gzip", usecols=lambda column: column in {
                 "Time_ns", "ChainA_Label", "ChainB_Label", "ResidueA", "ResidueB", "MinDistance_A"
@@ -1774,14 +1774,23 @@ def distance_carousel_html(analysis: Path) -> str:
         amino = r":(?:ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL)-?\d+$"
         valid_a = raw["ResidueA"].astype(str).str.contains(amino, case=False, regex=True)
         valid_b = raw["ResidueB"].astype(str).str.contains(amino, case=False, regex=True)
-        raw = raw[(peptide_a & valid_a) | (peptide_b & valid_b)].copy()
-        if raw.empty:
+        is_peptide_interface = bool((peptide_a | peptide_b).any())
+        if is_peptide_interface:
+            raw = raw[(peptide_a & valid_a) | (peptide_b & valid_b)].copy()
+            events = pd.DataFrame({
+                "Time_ns": raw["Time_ns"],
+                "Residue": np.where(peptide_a.loc[raw.index], raw["ResidueB"], raw["ResidueA"]),
+                "Distance": raw["MinDistance_A"],
+            })
+        else:
+            raw = raw[valid_a & valid_b].copy()
+            events = pd.DataFrame({
+                "Time_ns": raw["Time_ns"],
+                "Residue": raw["ResidueA"].astype(str) + " ↔ " + raw["ResidueB"].astype(str),
+                "Distance": raw["MinDistance_A"],
+            })
+        if events.empty:
             return ""
-        events = pd.DataFrame({
-            "Time_ns": raw["Time_ns"],
-            "Residue": np.where(peptide_a.loc[raw.index], raw["ResidueB"], raw["ResidueA"]),
-            "Distance": raw["MinDistance_A"],
-        })
         events_path = interface_events_path
     else:
         return ""
@@ -1830,7 +1839,7 @@ def distance_carousel_html(analysis: Path) -> str:
                                   line={"color": ORANGE, "width": 1.8},
                                   hovertemplate="Time=%{x:.3f} ns<br>Closest separation=%{y:.3f} Å<extra></extra>"))
     figure.add_hline(y=median, line_dash="dash", line_color=CYAN, annotation_text=f"median {median:.2f} Å")
-    figure.update_layout(title="1 · Closest peptide–protein separation over time",
+    figure.update_layout(title="1 · Closest interface separation over time",
                          xaxis={"title": "Time (ns)", "gridcolor": GRID},
                          yaxis={"title": "Closest separation (Å)", "gridcolor": GRID},
                          annotations=[{"text": f"Observed range (5th–95th percentile): {q05:.2f}–{q95:.2f} Å · no missing frame is plotted as zero", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
@@ -1847,9 +1856,9 @@ def distance_carousel_html(analysis: Path) -> str:
                                    box_visible=True, meanline_visible=True, points=False,
                                    line_color=[CYAN, GREEN, MAGENTA, ORANGE, "#a78bfa"][index % 5],
                                    hovertemplate=f"Residue={escape(str(residue))}<br>Observed separation=%{{x:.3f}} Å<extra></extra>"))
-    figure.update_layout(title="2 · Separation distributions for the 12 most-observed residues",
-                         xaxis={"title": "Observed peptide–residue separation (Å)", "gridcolor": GRID},
-                         yaxis={"title": "Protein residue", "gridcolor": GRID},
+    figure.update_layout(title="2 · Separation distributions for the 12 most-observed contacts",
+                        xaxis={"title": "Observed contact separation (Å)", "gridcolor": GRID},
+                        yaxis={"title": "Residue or residue pair", "gridcolor": GRID},
                          annotations=[{"text": "Violin width reflects recorded contact-event samples only; boxes show median and quartiles.", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
     slides.append(("Residue distributions", graph_div(figure), "distance_distribution"))
 
@@ -1871,10 +1880,10 @@ def distance_carousel_html(analysis: Path) -> str:
     hover = np.column_stack([rank["ObservedEvents"], rank["PercentFrames"].fillna(-1)])
     figure = go.Figure(go.Bar(y=rank["Residue"].astype(str), x=rank["MedianDistance_A"], orientation="h", marker_color=GREEN,
                               customdata=hover,
-                              hovertemplate="Residue=%{y}<br>Median separation=%{x:.3f} Å<br>Observed contact events=%{customdata[0]:.0f}<br>Geometric occupancy=%{customdata[1]:.1f}%<extra></extra>"))
+                              hovertemplate="Contact=%{y}<br>Median separation=%{x:.3f} Å<br>Observed contact events=%{customdata[0]:.0f}<br>Geometric occupancy=%{customdata[1]:.1f}%<extra></extra>"))
     figure.update_layout(title="3 · Persistent-contact distance ranking",
-                         xaxis={"title": "Median observed separation (Å)", "gridcolor": GRID},
-                         yaxis={"title": "Protein residue", "gridcolor": GRID},
+                        xaxis={"title": "Median observed separation (Å)", "gridcolor": GRID},
+                        yaxis={"title": "Residue or residue pair", "gridcolor": GRID},
                          annotations=[{"text": "Ranked by published geometric-contact occupancy when available; otherwise by observed event count.", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
     slides.append(("Persistent-contact ranking", graph_div(figure), "distance_ranking"))
 
@@ -1899,10 +1908,10 @@ def distance_carousel_html(analysis: Path) -> str:
     if not lifetime.empty:
         lifetime = lifetime[lifetime["Duration_ns"] >= 0].sort_values("Duration_ns", ascending=False).head(30)
         figure = go.Figure(go.Bar(y=lifetime["Residue"], x=lifetime["Duration_ns"], orientation="h", marker_color=MAGENTA,
-                                  hovertemplate="Residue=%{y}<br>Continuous observed contact episode=%{x:.3f} ns<extra></extra>"))
+                                  hovertemplate="Contact=%{y}<br>Continuous observed contact episode=%{x:.3f} ns<extra></extra>"))
         figure.update_layout(title="4 · Longest uninterrupted observed contact episodes",
                              xaxis={"title": "Episode duration at sampled-frame resolution (ns)", "gridcolor": GRID},
-                             yaxis={"title": "Protein residue", "gridcolor": GRID},
+                             yaxis={"title": "Residue or residue pair", "gridcolor": GRID},
                              annotations=[{"text": "Episodes break when a residue is absent from the recorded contact-event frame; this is not an inferred binding lifetime.", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
         slides.append(("Contact episodes", graph_div(figure), "contact_episode"))
     if not slides:
@@ -1912,8 +1921,8 @@ def distance_carousel_html(analysis: Path) -> str:
         f'{content}{guide_html(guide, "ⓘ Explain this graph")}</div>'
         for index, (title, content, guide) in enumerate(slides)
     )
-    return f'''<style>.distance-carousel{{border-radius:21px;padding:20px;margin-top:18px;background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.distance-carousel-controls{{display:flex;align-items:center;gap:10px;justify-content:center;margin:0 0 12px;flex-wrap:wrap}}.distance-carousel-controls button{{border:1px solid #285a79;border-radius:10px;background:#0a253a;color:#cfe8ff;padding:9px 12px;font:800 .82rem inherit;cursor:pointer}}.distance-carousel-controls button:hover{{background:#116887;color:#fff;border-color:#35d0ff}}.distance-carousel-controls span{{min-width:205px;text-align:center;color:#7aa6d9;font-size:.88rem;font-weight:700}}.distance-carousel-stage{{border:1px solid rgba(53,208,255,.28);border-radius:16px;background:#070b14;overflow:hidden}}.distance-slide{{display:none;margin:0;padding:7px}}.distance-slide.is-active{{display:block}}.distance-evidence{{margin:12px 3px 3px;color:#a9c1dc;font-size:.84rem;line-height:1.45}}</style><section class="distance-carousel" aria-label="Peptide–protein distance analysis">
-<div class="section-head"><div><div class="eyebrow">Distance evidence · observed events only</div><h2>Peptide–protein distance analysis</h2><p>Four complementary views make separation, persistence, residue specificity, and contact continuity readable without treating a missing contact as a zero-distance measurement.</p></div></div>
+    return f'''<style>.distance-carousel{{border-radius:21px;padding:20px;margin-top:18px;background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.distance-carousel-controls{{display:flex;align-items:center;gap:10px;justify-content:center;margin:0 0 12px;flex-wrap:wrap}}.distance-carousel-controls button{{border:1px solid #285a79;border-radius:10px;background:#0a253a;color:#cfe8ff;padding:9px 12px;font:800 .82rem inherit;cursor:pointer}}.distance-carousel-controls button:hover{{background:#116887;color:#fff;border-color:#35d0ff}}.distance-carousel-controls span{{min-width:205px;text-align:center;color:#7aa6d9;font-size:.88rem;font-weight:700}}.distance-carousel-stage{{border:1px solid rgba(53,208,255,.28);border-radius:16px;background:#070b14;overflow:hidden}}.distance-slide{{display:none;margin:0;padding:7px}}.distance-slide.is-active{{display:block}}.distance-evidence{{margin:12px 3px 3px;color:#a9c1dc;font-size:.84rem;line-height:1.45}}</style><section class="distance-carousel" aria-label="Interface distance analysis">
+<div class="section-head"><div><div class="eyebrow">Distance evidence · observed events only</div><h2>Interface distance analysis</h2><p>Four complementary views make separation, persistence, residue specificity, and contact continuity readable without treating a missing contact as a zero-distance measurement.</p></div></div>
 <div class="distance-carousel-controls"><button type="button" data-distance-prev aria-label="Previous distance view">← Previous</button><span data-distance-status></span><button type="button" data-distance-next aria-label="Next distance view">Next →</button></div>
 <div class="distance-carousel-stage">{rendered}</div><p class="distance-evidence">All summaries are derived from <code>{escape(events_path.name)}</code>{" and " + escape(timeseries.name) if timeseries.is_file() else ""}. Use the exact source files in the report downloads for full-resolution values.</p></section><script>(()=>{{const root=document.currentScript.previousElementSibling,slides=[...root.querySelectorAll('[data-distance-slide]')],status=root.querySelector('[data-distance-status]');let index=0;const render=()=>{{slides.forEach((slide,i)=>slide.classList.toggle('is-active',i===index));status.textContent=`${{index+1}} / ${{slides.length}} · ${{slides[index].dataset.title}}`;requestAnimationFrame(()=>slides[index].querySelectorAll('.js-plotly-plot').forEach(plot=>Plotly.Plots.resize(plot)))}};root.querySelector('[data-distance-prev]').addEventListener('click',()=>{{index=(index-1+slides.length)%slides.length;render()}});root.querySelector('[data-distance-next]').addEventListener('click',()=>{{index=(index+1)%slides.length;render()}});render()}})();</script>'''
 
@@ -2894,8 +2903,6 @@ def main() -> None:
     changepoints = analysis / "LIG_ChangePoint_Summary.csv"
     if changepoints.is_file(): add("coupled", categorical_bar_plot(changepoints, "Change-point segments", "Segment", ["MeanContacts", "MeanHelix", "MeanSheet", "MeanCoil"], "Mean value"), "Change-point segments", changepoints, note="Hover the bars to compare the average contact and secondary-structure values for each detected trajectory segment.")
     for group, title, source, graph in interface_rin_plots(analysis):
-        if group == "distances":
-            continue
         add(group, graph, title, source, note="This panel is isolated to the labelled chain or chain pair; it is not pooled across unrelated interfaces.")
     for index, csv_file in enumerate(csv_files):
         # Keep raw frame-wise tables and alternate selections in the download
