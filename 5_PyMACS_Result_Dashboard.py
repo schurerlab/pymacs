@@ -121,6 +121,22 @@ def component_display_labels(root: Path, context: PartnerContext) -> list[str]:
     return labels
 
 
+def component_key_html(root: Path) -> str:
+    """Compact dossier-wide key for multi-component color semantics."""
+    entries = atomindex_components(root)
+    if len(entries) < 2:
+        return ""
+    chips = []
+    for index, entry in enumerate(entries):
+        color = CHAIN_COLORS[index % len(CHAIN_COLORS)]
+        chain = entry.get("current_chain") or entry.get("source_chain") or "?"
+        chips.append(
+            f'<span class="component-key-chip" style="--component-color:{color}"><i></i>'
+            f'Component {index + 1} · {escape(entry["label"])} <small>chain {escape(chain)}</small></span>'
+        )
+    return ('<style>.component-key{display:flex;gap:9px;flex-wrap:wrap;margin:0 0 15px}.component-key-chip{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--component-color) 52%,#285a79);border-radius:999px;background:#091423;color:#dff5ff;font-size:.79rem;font-weight:850}.component-key-chip i{width:9px;height:9px;border-radius:50%;background:var(--component-color);box-shadow:0 0 10px var(--component-color)}.component-key-chip small{color:#8daac7;font-weight:700}</style><aside class="component-key" aria-label="Component color key">' + "".join(chips) + '</aside>')
+
+
 def legacy_receptor_label(root: Path) -> str:
     """Recover a receptor name for a legacy ligand run without atomIndex.
 
@@ -1088,7 +1104,7 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
     preview_href = browser_preview.relative_to(analysis).as_posix()
     # 3Dmol uses an absolutely positioned canvas; anchor it to this stage
     # instead of allowing it to escape to the top of the dossier page.
-    raw_links = '<style>.trajectory-stage{position:relative}</style>'
+    raw_links = '''<style>.trajectory-stage{position:relative}.trajectory-component-key{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 12px;color:#cfe8ff;font-size:.82rem;font-weight:800}.trajectory-component-key span{display:inline-flex;align-items:center;gap:6px}.trajectory-component-key i{width:10px;height:10px;border-radius:50%;display:inline-block}</style><script>(()=>{const palette={A:'#ff8a3d',B:'#18ff8b',C:'#ff2bd6',D:'#35d0ff',E:'#ffe66d',F:'#a78bfa'},holder=document.currentScript.parentElement;holder.insertAdjacentHTML('beforebegin','<div class="trajectory-component-key"><span><i style="background:#ff8a3d"></i>Component 1 · chain A</span><span><i style="background:#18ff8b"></i>Component 2 · chain B</span></div>');const original=window.$3Dmol?.createViewer;if(!original)return;window.$3Dmol.createViewer=function(...args){const viewer=original.apply(this,args),add=viewer.addModelsAsFrames.bind(viewer);viewer.addModelsAsFrames=function(...modelArgs){const model=add(...modelArgs),set=model.setStyle.bind(model);model.setStyle=function(selection,style){if(!Object.keys(selection||{}).length&&style?.cartoon?.color==='#496985'){Object.entries(palette).forEach(([chain,color])=>set({chain},{cartoon:{color}}));return model;}return set(selection,style)};return model};return viewer}})();</script>'''
     if pymol_session.is_file():
         raw_links += (
             f'<a href="{escape(pymol_session.relative_to(analysis).as_posix())}" download>'
@@ -1104,6 +1120,17 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
         for name in source_files if (asset_dir / name).is_file()
     )
     peptide_chains = ",".join(context.partner_chain_ids) if context.partner_kind == "peptide" else ""
+    component_styles = []
+    for index, entry in enumerate(atomindex_components(root)):
+        chain = entry.get("current_chain") or entry.get("source_chain")
+        if chain:
+            component_styles.append({"chain": chain, "label": entry["label"], "color": CHAIN_COLORS[index % len(CHAIN_COLORS)]})
+    component_key = "".join(
+        f'<span><i style="background:{escape(item["color"])}"></i>{escape(item["label"])} · chain {escape(item["chain"])}</span>'
+        for item in component_styles
+    )
+    playback_note = ("Orange is the first protein component and neon green is the second; the same colors identify these components throughout this dossier."
+                     if len(component_styles) > 1 else "Component colors match the chain-resolved plots in this dossier.")
     frame_count = int(preview_info.get("frames", 0))
     source_frame_count = int(preview_info.get("source_frames", frame_count))
     time_values = preview_info.get("times_ns", [])
@@ -2664,7 +2691,9 @@ def main() -> None:
         stability_specs.insert(1, ("FullComplex_RMSD.csv", "Full-complex RMSD", "Time_ps", ["RMSD_Å"], "RMSD (Å)"))
     for file_name, title, x, ys, y_title in stability_specs:
         source = analysis / file_name
-        colors = [GREEN, ORANGE, MAGENTA] if "overlay" in title.lower() or "gyration" in title.lower() else [GREEN]
+        # Whole-complex observables are neutral cyan: reserve Miami orange and
+        # neon green exclusively for the individually resolved components.
+        colors = [CYAN, GREEN, MAGENTA] if "overlay" in title.lower() or "gyration" in title.lower() else [CYAN]
         if source.is_file(): add("stability", multiseries_plot(source, title.replace("Protein", protein_name), x, ys, y_title, colors=colors), title, source)
     protein_rmsd = analysis / "Protein_RMSD.csv"
     if protein_rmsd.is_file():
@@ -2834,15 +2863,16 @@ def main() -> None:
     interface_evidence = interface_evidence_html(analysis, context, interface_rin)
     structure_panel = final_structure_html(root, context)
     trajectory_panel = trajectory_playback_html(root, analysis, context)
-    stability = section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"])
-    flexibility = section_html("Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"])
-    secondary = (chain_secondary_section_html(chain_secondary_cards) if is_multichain_system else "") or section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"])
-    contacts = section_html(context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"])
-    chemistry = section_html("Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"])
+    component_key = component_key_html(root) if is_multichain_system else ""
+    stability = component_key + section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends. Cyan denotes whole-complex observables; orange and neon green denote the individual components.", groups["stability"])
+    flexibility = component_key + section_html("Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"])
+    secondary = component_key + ((chain_secondary_section_html(chain_secondary_cards) if is_multichain_system else "") or section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"]))
+    contacts = component_key + section_html(context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"])
+    chemistry = component_key + section_html("Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"])
     distances = section_html("Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"]) + distance_carousel_html(analysis)
     coupled = section_html("Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"])
     dashboard = tabbed_sections([
-        ("overview", "Overview", overview + peptide_topology + interface_rin["overview"] + network_explorer),
+        ("overview", "Overview", component_key + overview + peptide_topology + interface_rin["overview"] + network_explorer),
         ("stability", "Stability", stability),
         ("flexibility", "Flexibility", flexibility),
         ("secondary", "Secondary structure", secondary),
