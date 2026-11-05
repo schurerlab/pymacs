@@ -2416,6 +2416,27 @@ def section_html(title: str, eyebrow: str, text: str, cards: list[str]) -> str:
     return f'<section class="gallery-section"><div class="section-head"><div><div class="eyebrow">{escape(eyebrow)}</div><h2>{escape(title)}</h2><p>{escape(text)}</p></div></div><div class="grid">{"".join(cards)}</div></section>'
 
 
+def chain_secondary_section_html(cards_by_chain: dict[str, list[str]]) -> str:
+    """Give each complex component a discrete, chain-local SSE reading lane."""
+    blocks = []
+    for index, (chain, cards) in enumerate(cards_by_chain.items()):
+        if not cards:
+            continue
+        accent = CHAIN_COLORS[index % len(CHAIN_COLORS)]
+        blocks.append(
+            f'<section class="chain-dynamics-group" style="--chain-accent:{accent}"><header>'
+            f'<span class="chain-dynamics-kicker">Component {index + 1}</span><h3>Chain {escape(chain)}</h3>'
+            '<p>Read this component independently: residue positions, SSE evolution, and persistence never continue into another chain.</p>'
+            '</header><div class="chain-dynamics-grid">' + "".join(cards) + "</div></section>"
+        )
+    if not blocks:
+        return ""
+    return ('<style>.chain-dynamics-stack{display:grid;gap:19px}.chain-dynamics-group{border:1px solid #285a79;border-left:5px solid var(--chain-accent);border-radius:18px;padding:16px;background:linear-gradient(135deg,#0b1a28,#080b14 48%)}.chain-dynamics-group header{padding:0 2px 13px;border-bottom:1px solid #23375d}.chain-dynamics-group h3{margin:3px 0;color:#cfe8ff;font-size:1.35rem}.chain-dynamics-group p{margin:0;color:#7aa6d9;font-size:.88rem;max-width:780px}.chain-dynamics-kicker{display:block;color:var(--chain-accent);font-size:.72rem;font-weight:900;letter-spacing:.14em;text-transform:uppercase}.chain-dynamics-grid{display:grid;grid-template-columns:repeat(3,minmax(290px,1fr));gap:15px;margin-top:15px;overflow-x:auto}.chain-dynamics-grid .card{min-width:290px}@media(max-width:700px){.chain-dynamics-grid{grid-template-columns:1fr}.chain-dynamics-grid .card{min-width:0}}</style><section class="gallery-section chain-secondary-section"><div class="section-head"><div>'
+            '<div class="eyebrow">Fold evolution · chain-resolved</div><h2>Secondary structure by chain</h2>'
+            '<p>Each component has its own reading lane. Compare chains only after reading their local maps and persistence profiles.</p>'
+            '</div></div><div class="chain-dynamics-stack">' + "".join(blocks) + "</div></section>")
+
+
 def tabbed_sections(sections: list[tuple[str, str, str]]) -> str:
     """Build one dashboard surface with tabs, without duplicating plot markup."""
     visible = [(ident, label, body) for ident, label, body in sections if body]
@@ -2552,6 +2573,7 @@ def main() -> None:
     colours = [CYAN, GREEN, MAGENTA, ORANGE]
     heatmap_cards = []
     secondary_heatmap_cards = []
+    chain_secondary_cards: dict[str, list[str]] = {}
     groups: dict[str, list[str]] = {"overview": [], "stability": [], "flexibility": [], "secondary": [], "contacts": [], "chemistry": [], "distances": [], "coupled": [], "structure": []}
     def add(group: str, graph: str | None, title: str, source: Path, label: str = "Download exact source CSV", note: str = "") -> None:
         if graph:
@@ -2571,11 +2593,15 @@ def main() -> None:
         chain_label = source.stem.removeprefix("DSSP_chain_")
         graph = heatmap_plot(source, "dssp", f"Chain {chain_label} secondary-structure evolution")
         if graph:
-            secondary_heatmap_cards.append(dashboard_card(
+            card = dashboard_card(
                 graph, f"Chain {chain_label} SSE evolution",
                 source.relative_to(output.parent).as_posix(), "Download chain SSE matrix CSV",
                 "This map is chain-local: residue positions do not continue into another protein chain.",
-            ))
+            )
+            if is_multichain_system:
+                chain_secondary_cards.setdefault(chain_label, []).append(card)
+            else:
+                secondary_heatmap_cards.append(card)
     interaction_file = analysis / "InteractionTypes_Framewise.csv"
     if interaction_file.is_file():
         graph = heatmap_plot(interaction_file, "interactions")
@@ -2700,11 +2726,21 @@ def main() -> None:
     if persistence.is_file() and not is_multichain_system:
         add("secondary", categorical_bar_plot(persistence, "Residue SSE persistence", "Residue_Index", ["Helix_Persistence", "Sheet_Persistence", "Coil_Persistence"], "Fraction", stacked=True), "Residue SSE persistence", persistence)
     for source in sorted(analysis.glob("SSE_chain_*_fractions.csv")):
-        add("secondary", multiseries_plot(source, source.stem.replace("_", " "), "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction"), source.stem.replace("_", " "), source)
+        chain_label = source.stem.removeprefix("SSE_chain_").removesuffix("_fractions")
+        graph = multiseries_plot(source, f"Chain {chain_label} SSE fractions", "Time_ns", ["Helix", "Sheet", "Coil"], "Fraction")
+        if is_multichain_system and graph:
+            chain_secondary_cards.setdefault(chain_label, []).append(dashboard_card(graph, f"Chain {chain_label} SSE fractions", source.relative_to(output.parent).as_posix()))
+        else:
+            add("secondary", graph, source.stem.replace("_", " "), source)
     for source in sorted(analysis.glob("Residue_SSE_Persistence_chain_*.csv")):
         chain_label = source.stem.removeprefix("Residue_SSE_Persistence_chain_")
-        add("secondary", chain_sse_persistence_plot(source, chain_label), f"Chain {chain_label} residue SSE persistence", source,
-            note="Bars are chain-local. Hover reports the deposited residue identifier, so no numbering is merged across chains.")
+        graph = chain_sse_persistence_plot(source, chain_label)
+        if is_multichain_system and graph:
+            chain_secondary_cards.setdefault(chain_label, []).append(dashboard_card(
+                graph, f"Chain {chain_label} residue SSE persistence", source.relative_to(output.parent).as_posix(),
+                note="Bars are chain-local. Hover reports the deposited residue identifier, so no numbering is merged across chains."))
+        else:
+            add("secondary", graph, f"Chain {chain_label} residue SSE persistence", source)
 
     frequency = frequency_for_ligand or (analysis / "LIG_contact_frequency_filtered.csv")
     if frequency.is_file(): add("contacts", categorical_bar_plot(frequency, "Ligand-contact frequency", "Residue", ["PercentFrames"], "Frames with contact (%)"), "Ligand-contact frequency", frequency)
@@ -2800,7 +2836,7 @@ def main() -> None:
     trajectory_panel = trajectory_playback_html(root, analysis, context)
     stability = section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"])
     flexibility = section_html("Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"])
-    secondary = section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"])
+    secondary = (chain_secondary_section_html(chain_secondary_cards) if is_multichain_system else "") or section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"])
     contacts = section_html(context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"])
     chemistry = section_html("Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"])
     distances = section_html("Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"]) + distance_carousel_html(analysis)
