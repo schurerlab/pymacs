@@ -2713,9 +2713,11 @@ def main() -> None:
         colors = [CYAN, GREEN, MAGENTA] if "overlay" in title.lower() or "gyration" in title.lower() else [CYAN]
         if source.is_file(): add("stability", multiseries_plot(source, title.replace("Protein", protein_name), x, ys, y_title, colors=colors), title, source)
     if is_multichain_system:
-        for component_index, source in enumerate(sorted(analysis.glob("Radius_of_Gyration_*.csv"))):
-            if source.name in {"Radius_of_Gyration_Protein.csv", "Radius_of_Gyration_Protein_Ligand_Complex.csv"}:
-                continue
+        component_rg_sources = sorted(
+            source for source in analysis.glob("Radius_of_Gyration_*.csv")
+            if source.name not in {"Radius_of_Gyration_Protein.csv", "Radius_of_Gyration_Protein_Ligand_Complex.csv"}
+        )
+        for component_index, source in enumerate(component_rg_sources):
             label = source.stem.removeprefix("Radius_of_Gyration_")
             add("stability", multiseries_plot(source, f"Component {component_index + 1}: {label} radius of gyration", "Time_ns", ["Rg_Component_Å"], "Radius of gyration (Å)", colors=[CHAIN_COLORS[component_index % len(CHAIN_COLORS)]]),
                 f"Component {component_index + 1}: {label} radius of gyration", source,
