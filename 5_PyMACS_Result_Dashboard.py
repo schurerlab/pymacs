@@ -110,9 +110,43 @@ def atomindex_components(root: Path) -> list[dict[str, str]]:
     return entries
 
 
-def component_display_labels(root: Path, context: PartnerContext) -> list[str]:
+def metric_components(analysis: Path) -> list[dict[str, str]]:
+    """Recover component identities from saved per-component metric names.
+
+    Older imported runs can retain RMSD/RMSF/DSSP products while their
+    ``atomIndex.txt`` provenance file is no longer present.  The metric stem
+    is still an honest component identity (for example H2A, H2B, IE1), while
+    the original simulation-chain letter is not.  Keep that distinction: the
+    caller gets named components but never a fabricated chain assignment.
+    """
+    labels: list[str] = []
+    patterns = (
+        ("RMSD_*.csv", "RMSD_", ""),
+        ("RMSF_*_per_residue.csv", "RMSF_", "_per_residue.csv"),
+        ("DSSP_chain_*.csv", "DSSP_chain_", ""),
+    )
+    excluded = {"Protein", "FullComplex", "Protein_Ligand_Complex"}
+    for glob_pattern, prefix, suffix in patterns:
+        for source in sorted(analysis.glob(glob_pattern)):
+            label = source.stem.removeprefix(prefix)
+            if suffix:
+                label = label.removesuffix(suffix)
+            if label and label not in excluded and label not in labels:
+                labels.append(label)
+    return [{"label": label, "chain_type": "protein", "derived_from_metrics": "true"} for label in labels]
+
+
+def resolved_components(root: Path, analysis: Path | None = None) -> list[dict[str, str]]:
+    """Prefer deposited provenance; fall back only to saved component metrics."""
+    entries = atomindex_components(root)
+    if len(entries) >= 2 or analysis is None:
+        return entries
+    return metric_components(analysis)
+
+
+def component_display_labels(root: Path, context: PartnerContext, analysis: Path | None = None) -> list[str]:
     labels = []
-    for entry in atomindex_components(root):
+    for entry in resolved_components(root, analysis):
         chain = entry.get("current_chain") or entry.get("source_chain") or ""
         is_partner = context.partner_kind == "peptide" and chain in context.partner_chain_ids
         role = "peptide" if is_partner else "receptor" if context.partner_kind == "peptide" else entry.get("chain_type", "protein")
@@ -122,18 +156,19 @@ def component_display_labels(root: Path, context: PartnerContext) -> list[str]:
     return labels
 
 
-def component_key_html(root: Path) -> str:
+def component_key_html(root: Path, analysis: Path | None = None) -> str:
     """Compact dossier-wide key for multi-component color semantics."""
-    entries = atomindex_components(root)
+    entries = resolved_components(root, analysis)
     if len(entries) < 2:
         return ""
     chips = []
     for index, entry in enumerate(entries):
         color = CHAIN_COLORS[index % len(CHAIN_COLORS)]
-        chain = entry.get("current_chain") or entry.get("source_chain") or "?"
+        chain = entry.get("current_chain") or entry.get("source_chain") or ""
+        chain_html = f' <small>chain {escape(chain)}</small>' if chain else ""
         chips.append(
             f'<span class="component-key-chip" style="--component-color:{color}"><i></i>'
-            f'Component {index + 1} · {escape(entry["label"])} <small>chain {escape(chain)}</small></span>'
+            f'Component {index + 1} · {escape(entry["label"])}{chain_html}</span>'
         )
     return ('<style>.component-key{display:flex;gap:9px;flex-wrap:wrap;margin:0 0 15px}.component-key-chip{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--component-color) 52%,#285a79);border-radius:999px;background:#091423;color:#dff5ff;font-size:.79rem;font-weight:850}.component-key-chip i{width:9px;height:9px;border-radius:50%;background:var(--component-color);box-shadow:0 0 10px var(--component-color)}.component-key-chip small{color:#8daac7;font-weight:700}</style><aside class="component-key" aria-label="Component color key">' + "".join(chips) + '</aside>')
 
@@ -3483,7 +3518,8 @@ def section_html(title: str, eyebrow: str, text: str, cards: list[str]) -> str:
 
 
 def component_lanes_section_html(root: Path, title: str, eyebrow: str, text: str,
-                                 shared_cards: list[str], component_cards: dict[int, list[str]]) -> str:
+                                 shared_cards: list[str], component_cards: dict[int, list[str]],
+                                 analysis: Path | None = None) -> str:
     """Render a hierarchy for complex dossiers: shared first, then each chain.
 
     The cyan lane contains genuine whole-complex or interface observables.  A
@@ -3492,7 +3528,7 @@ def component_lanes_section_html(root: Path, title: str, eyebrow: str, text: str
     """
     if not shared_cards and not any(component_cards.values()):
         return ""
-    entries = atomindex_components(root)
+    entries = resolved_components(root, analysis)
     lanes = []
     if shared_cards:
         lanes.append(
@@ -3509,12 +3545,13 @@ def component_lanes_section_html(root: Path, title: str, eyebrow: str, text: str
         index = component_index - 1
         entry = entries[index] if index < len(entries) else {}
         label = str(entry.get("label") or f"component {component_index}")
-        chain = str(entry.get("current_chain") or entry.get("source_chain") or "?")
+        chain = str(entry.get("current_chain") or entry.get("source_chain") or "")
+        chain_html = f' <small>chain {escape(chain)}</small>' if chain else ""
         accent = CHAIN_COLORS[index % len(CHAIN_COLORS)]
         lanes.append(
             f'<section class="component-analysis-lane" style="--component-accent:{accent}"><header>'
             f'<span class="component-analysis-kicker">Component {component_index}</span>'
-            f'<h3>{escape(label)} <small>chain {escape(chain)}</small></h3>'
+            f'<h3>{escape(label)}{chain_html}</h3>'
             '<p>Chain-local calculation: positions and values belong to this component only and never continue into another chain.</p>'
             '</header><div class="grid">' + "".join(cards) + '</div></section>'
         )
@@ -3707,7 +3744,7 @@ def main() -> None:
         or len(list(analysis.glob("RMSD_*.csv"))) > 1
     )
     protein_name = (
-        " / ".join(component_display_labels(root, context))
+        " / ".join(component_display_labels(root, context, analysis))
         or " / ".join(chain_labels)
         or legacy_receptor_label(root)
         or "Protein"
@@ -4116,7 +4153,7 @@ def main() -> None:
         if context.is_interface else ("Read global structure and interaction chemistry before drawing conclusions about the ligand." if has_ligand_evidence else "Read protein stability, fold retention, and secondary structure together.")
     )
     overview = (component_lanes_section_html(root, overview_title, "Start here", overview_text,
-                                              groups["overview"], component_cards["overview"])
+                                              groups["overview"], component_cards["overview"], analysis)
                 if is_multichain_system else section_html(overview_title, "Start here", overview_text, groups["overview"]))
     # Interface-only systems should never acquire a misleading empty ligand card.
     ligand_panel = ligand_html(root, ligand_name) if context.partner_kind == "ligand" else ""
@@ -4126,19 +4163,19 @@ def main() -> None:
     structure_panel = final_structure_html(root, context)
     trajectory_panel = trajectory_playback_html(root, analysis, context)
     provenance_panel = data_provenance_html(analysis, output)
-    component_key = component_key_html(root) if is_multichain_system else ""
-    stability = component_key + (component_lanes_section_html(root, "Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends. Cyan denotes whole-complex observables; orange and neon green denote the individual components.", groups["stability"], component_cards["stability"])
+    component_key = component_key_html(root, analysis) if is_multichain_system else ""
+    stability = component_key + (component_lanes_section_html(root, "Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends. Cyan denotes whole-complex observables; orange and neon green denote the individual components.", groups["stability"], component_cards["stability"], analysis)
                                if is_multichain_system else section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"]))
-    flexibility = component_key + (component_lanes_section_html(root, "Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"], component_cards["flexibility"])
+    flexibility = component_key + (component_lanes_section_html(root, "Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"], component_cards["flexibility"], analysis)
                                  if is_multichain_system else section_html("Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"]))
     secondary = component_key + ((chain_secondary_section_html(chain_secondary_cards) if is_multichain_system else "") or section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"]))
-    contacts = component_key + (component_lanes_section_html(root, context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"], component_cards["contacts"])
+    contacts = component_key + (component_lanes_section_html(root, context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"], component_cards["contacts"], analysis)
                               if is_multichain_system else section_html(context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"]))
-    chemistry = component_key + (component_lanes_section_html(root, "Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"], component_cards["chemistry"])
+    chemistry = component_key + (component_lanes_section_html(root, "Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"], component_cards["chemistry"], analysis)
                                if is_multichain_system else section_html("Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"]))
-    distances = component_key + (component_lanes_section_html(root, "Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"], component_cards["distances"])
+    distances = component_key + (component_lanes_section_html(root, "Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"], component_cards["distances"], analysis)
                                  if is_multichain_system else section_html("Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"])) + distance_carousel_html(analysis)
-    coupled = component_key + (component_lanes_section_html(root, "Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"], component_cards["coupled"])
+    coupled = component_key + (component_lanes_section_html(root, "Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"], component_cards["coupled"], analysis)
                                if is_multichain_system else section_html("Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"]))
     dashboard = tabbed_sections([
         ("overview", "Overview", component_key + overview + peptide_topology + interface_rin["overview"] + network_explorer),
