@@ -2308,6 +2308,64 @@ def ppi_chemistry_hub_plot(analysis: Path) -> str | None:
     return _plotly_div(figure)
 
 
+def md_performance_summary(analysis: Path) -> dict[str, object]:
+    """Return the final GROMACS throughput and preserve it with the analysis.
+
+    GROMACS writes the production rate at the end of ``md_0_1.log``.  Copying
+    that final value into Analysis_Results makes the dossier self-contained:
+    the published HTML no longer depends on the raw MD directory or a portal
+    cache to report ns/day.  Existing summaries win so historical reports can
+    be backfilled without their original log.
+    """
+    summary_path = analysis / "md_performance_summary.json"
+    try:
+        saved = json.loads(summary_path.read_text(encoding="utf-8"))
+        if isinstance(saved, dict) and isinstance(saved.get("rate_ns_day"), (int, float)):
+            return saved
+    except (OSError, ValueError, TypeError):
+        pass
+    log_path = analysis.parent / "md_0_1.log"
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")[-200_000:]
+    except OSError:
+        return {}
+    matches = re.findall(r"Performance:\s+[^\n]*?([0-9]+(?:\.[0-9]+)?)\s+ns/day", text, re.I)
+    if not matches:
+        matches = re.findall(r"Performance:\s*\n\s*([0-9]+(?:\.[0-9]+)?)\s+[0-9]+(?:\.[0-9]+)?", text, re.I)
+    if not matches:
+        matches = re.findall(r"Performance:\s*([0-9]+(?:\.[0-9]+)?)", text, re.I)
+    if not matches:
+        return {}
+    summary = {
+        "schema_version": 1,
+        "rate_ns_day": float(matches[-1]),
+        "source": "final GROMACS Performance in md_0_1.log",
+        "log_relative_path": "md_0_1.log",
+    }
+    try:
+        summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return summary
+
+
+def rmsd_award(peak_angstrom: float) -> tuple[str, str, str]:
+    """Mirror the portal's peak-RMSD award ladder for component scorecards."""
+    tiers = (
+        (1, "🌟🌟🌟🌟🌟", "5 gold stars", "under 1 Å"),
+        (2, "🌟🌟🌟🌟", "4 gold stars", "under 2 Å"),
+        (3, "🌟🌟🌟", "3 gold stars", "under 3 Å"),
+        (4, "🌟🌟", "2 gold stars", "under 4 Å"),
+        (5, "🌟", "gold star", "under 5 Å"),
+        (8, "🥈", "silver medal", "under 8 Å"),
+        (12, "🥉", "bronze medal", "under 12 Å"),
+    )
+    for ceiling, symbol, label, threshold in tiers:
+        if peak_angstrom < ceiling:
+            return symbol, label, threshold
+    return "😞", "needs review", "12 Å or higher"
+
+
 def ppi_scorecard_html(analysis: Path) -> str:
     """A transparent MD evidence scorecard, explicitly not an affinity score."""
     interface, _ = _interface_time_data(analysis)
@@ -2315,6 +2373,10 @@ def ppi_scorecard_html(analysis: Path) -> str:
     pairs_path = analysis / "Interface_RIN" / "interface_residue_pair_contacts.csv"
     q_path = analysis / "protein_native_contact_q.csv"
     cards: list[tuple[str, str, str, str]] = []
+    performance = md_performance_summary(analysis)
+    rate = performance.get("rate_ns_day")
+    if isinstance(rate, (int, float)):
+        cards.append(("Simulation rate", f"{rate:.2f} ns/day", "final GROMACS production throughput", "cyan"))
     if not interface.empty:
         cards.extend([
             ("Interface contact", f"{interface['ContactCount'].mean():.1f}", "mean residue-pair contacts per sampled frame", "cyan"),
@@ -2357,6 +2419,8 @@ def ppi_scorecard_html(analysis: Path) -> str:
         if not values.empty:
             label = _chain_label_from_metric(source, "RMSD_")
             cards.append((f"{label} RMSD", f"{values.mean():.2f} Å", "mean component Cα RMSD", f"component{index + 1}"))
+            symbol, award, threshold = rmsd_award(float(values.max()))
+            cards.append((f"{label} RMSD award", symbol, f"{award}; peak {values.max():.2f} Å ({threshold})", f"component{index + 1}"))
     for index, source in enumerate(sorted(analysis.glob("Radius_of_Gyration_*.csv"))):
         if source.name in {"Radius_of_Gyration_Protein.csv", "Radius_of_Gyration_Protein_Ligand_Complex.csv"}:
             continue
@@ -3596,11 +3660,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Create a one-run interactive PyMACS result dashboard.")
     parser.add_argument("--root", default=".", help="MD system directory")
     parser.add_argument("--out", default="Analysis_Results/PyMACS_Result_Dashboard.html", help="HTML destination relative to root")
+    parser.add_argument("--rate-ns-day", type=float, help="Optional historical backfill of the final GROMACS ns/day rate")
     args = parser.parse_args()
     root = Path(args.root).resolve()
     analysis = root / "Analysis_Results"
     output = root / args.out
     output.parent.mkdir(parents=True, exist_ok=True)
+    if args.rate_ns_day is not None:
+        # Historical archives may retain the portal index value after the raw
+        # md_0_1.log has been pruned.  Persist the recovered value in the same
+        # schema that new runs write automatically from that log.
+        (analysis / "md_performance_summary.json").write_text(json.dumps({
+            "schema_version": 1,
+            "rate_ns_day": args.rate_ns_day,
+            "source": "historical backfill from final GROMACS Performance",
+            "log_relative_path": "md_0_1.log",
+        }, indent=2) + "\n", encoding="utf-8")
     metadata = read_metadata(root)
     system_name = str(metadata.get("system_name") or root.name)
     interface_rin = interface_rin_context(analysis)
