@@ -2944,7 +2944,7 @@ def distance_carousel_html(analysis: Path) -> str:
                                    box_visible=True, meanline_visible=True, points=False,
                                    line_color=[CYAN, GREEN, MAGENTA, ORANGE, "#a78bfa"][index % 5],
                                    hovertemplate=f"Residue={escape(str(residue))}<br>Observed separation=%{{x:.3f}} Å<extra></extra>"))
-    figure.update_layout(title="2 · Separation distributions for the 12 most-observed contacts",
+    figure.update_layout(title="2 · Separation distributions for the 12 most-observed residues",
                         xaxis={"title": "Observed contact separation (Å)", "gridcolor": GRID},
                         yaxis={"title": "Residue or residue pair", "gridcolor": GRID},
                          annotations=[{"text": "Violin width reflects recorded contact-event samples only; boxes show median and quartiles.", "showarrow": False, "x": .5, "xref": "paper", "y": 1.16, "yref": "paper", "font": {"color": MUTED}}])
