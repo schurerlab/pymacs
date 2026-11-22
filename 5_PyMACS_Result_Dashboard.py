@@ -148,7 +148,9 @@ def component_display_labels(root: Path, context: PartnerContext, analysis: Path
     labels = []
     for entry in resolved_components(root, analysis):
         chain = entry.get("current_chain") or entry.get("source_chain") or ""
-        is_partner = context.partner_kind == "peptide" and chain in context.partner_chain_ids
+        is_partner = context.partner_kind == "peptide" and (
+            chain in context.partner_chain_ids or entry.get("chain_type", "").casefold() == "peptide"
+        )
         role = "peptide" if is_partner else "receptor" if context.partner_kind == "peptide" else entry.get("chain_type", "protein")
         # Older runs can have a valid component name but no explicit chain
         # provenance. Never render a fictitious-looking “chain ?” label.
@@ -156,7 +158,8 @@ def component_display_labels(root: Path, context: PartnerContext, analysis: Path
     return labels
 
 
-def component_key_html(root: Path, analysis: Path | None = None) -> str:
+def component_key_html(root: Path, analysis: Path | None = None,
+                       context: PartnerContext | None = None) -> str:
     """Compact dossier-wide key for multi-component color semantics."""
     entries = resolved_components(root, analysis)
     if len(entries) < 2:
@@ -166,9 +169,13 @@ def component_key_html(root: Path, analysis: Path | None = None) -> str:
         color = CHAIN_COLORS[index % len(CHAIN_COLORS)]
         chain = entry.get("current_chain") or entry.get("source_chain") or ""
         chain_html = f' <small>chain {escape(chain)}</small>' if chain else ""
+        is_peptide = context is not None and context.partner_kind == "peptide" and (
+            chain in context.partner_chain_ids or entry.get("chain_type", "").casefold() == "peptide"
+        )
+        role = "Peptide" if is_peptide else "Receptor" if context is not None and context.partner_kind == "peptide" else f"Component {index + 1}"
         chips.append(
             f'<span class="component-key-chip" style="--component-color:{color}"><i></i>'
-            f'Component {index + 1} · {escape(entry["label"])}{chain_html}</span>'
+            f'{escape(role)} · {escape(entry["label"])}{chain_html}</span>'
         )
     return ('<style>.component-key{display:flex;gap:9px;flex-wrap:wrap;margin:0 0 15px}.component-key-chip{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid color-mix(in srgb,var(--component-color) 52%,#285a79);border-radius:999px;background:#091423;color:#dff5ff;font-size:.79rem;font-weight:850}.component-key-chip i{width:9px;height:9px;border-radius:50%;background:var(--component-color);box-shadow:0 0 10px var(--component-color)}.component-key-chip small{color:#8daac7;font-weight:700}</style><aside class="component-key" aria-label="Component color key">' + "".join(chips) + '</aside>')
 
@@ -269,14 +276,17 @@ def partner_context(root: Path, analysis: Path, setup: dict, metadata: dict,
     peptide_pairs = [pair for pair in pairs if any("peptide" in chain_types.get(label, "") for label in pair)]
     ligand = str(metadata.get("ligand_name") or metadata.get("ligand_residue") or setup.get("ligand") or "").strip()
     mode = str((simulation or {}).get("mode") or setup.get("mode") or "").casefold()
-    if ligand and ligand.casefold() not in {"none", "no ligand label", "proteinonly"}:
-        return PartnerContext("ligand", ligand, tuple(chain_ids), tuple(pairs), "ligand_complex")
     atomindex_peptide = next((entry for entry in atomindex_entries
                               if entry.get("current_chain") in peptide_chain_ids or entry.get("chain_type", "").casefold() == "peptide"), None)
     if peptide_pairs or mode == "peptide" or identity_name or has_peptide_metrics:
         peptide_labels = [label for pair in peptide_pairs for label in pair if "peptide" in chain_types.get(label, "")]
         label = identity_name or (atomindex_peptide or {}).get("label") or next(iter(peptide_labels), "Peptide")
         return PartnerContext("peptide", label, tuple(peptide_chain_ids or chain_ids), tuple(pairs), "peptide_protein_complex")
+    # Some historical peptide submissions also populated a generic ``ligand``
+    # field.  Peptide provenance and mode are authoritative above; only use
+    # that field when there is no peptide evidence.
+    if ligand and ligand.casefold() not in {"none", "no ligand label", "proteinonly"}:
+        return PartnerContext("ligand", ligand, tuple(chain_ids), tuple(pairs), "ligand_complex")
     if pairs or len(chain_ids) > 1:
         label = " / ".join(chain_ids) if chain_ids else "Chain interface"
         return PartnerContext("protein_chain", label, tuple(chain_ids), tuple(pairs), "protein_complex")
@@ -1070,14 +1080,28 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
     coordinates or allocates WebGL memory for them.
     """
     topology, trajectory = root / "Final_Trajectory.pdb", root / "Final_Trajectory.xtc"
-    if not (topology.is_file() and trajectory.is_file()):
+    asset_dir = analysis / "Trajectory_Playback"
+    preview = asset_dir / "centered_trajectory_preview.pdb"
+    # A published preview is intentionally sufficient for browser playback.
+    # Historical dossiers need not duplicate a multi-GB XTC merely to retain
+    # an honest, sampled animation in the portal.
+    if not (topology.is_file() and (trajectory.is_file() or preview.is_file())):
+        if topology.is_file():
+            # Historical publications occasionally retained only the final
+            # coordinate snapshot.  Keep that useful and interactive, but do
+            # not present one model as an MD animation.
+            component_palette = {"A": "#ff8a3d", "B": "#18ff8b", "C": "#ff2bd6", "D": "#35d0ff", "E": "#ffe66d", "F": "#a78bfa"}
+            chain_styles = "".join(
+                f"model.setStyle({{chain:'{chain}'}},{{cartoon:{{color:'{color}'}}}});"
+                for chain, color in component_palette.items()
+            )
+            topology_href = escape(topology.relative_to(analysis).as_posix() if topology.is_relative_to(analysis) else "../Final_Trajectory.pdb")
+            return f'''<style>.trajectory-card{{border-radius:21px;padding:20px;margin-top:18px;background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.trajectory-stage{{height:min(62vw,650px);min-height:410px;border:1px solid rgba(53,208,255,.30);border-radius:17px;background:#05060a;overflow:hidden}}.trajectory-stage:empty:before{{content:'Load the final structure viewer';display:grid;place-items:center;height:100%;color:#7aa6d9}}.trajectory-toolbar{{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:14px 0 10px}}.trajectory-toolbar button,.trajectory-downloads a{{border:1px solid #285a79;border-radius:10px;background:#0a253a;color:#dff5ff;padding:9px 12px;font:800 .82rem inherit;text-decoration:none;cursor:pointer}}.trajectory-toolbar button:hover:not(:disabled),.trajectory-downloads a:hover{{background:#116887;border-color:#35d0ff}}.trajectory-downloads{{display:flex;flex-wrap:wrap;gap:8px;margin-top:13px}}</style><section class="trajectory-card" data-final-structure="{topology_href}"><div class="section-head"><div><div class="eyebrow">Final structure viewer · archived snapshot</div><h2>Inspect the final published complex</h2><p>This historical run retained its final coordinate snapshot but not its multi-frame XTC trajectory. The viewer below is therefore a <b>single final structure</b>, not a playback animation. Chain colors still follow the dossier palette.</p></div></div><div class="trajectory-toolbar"><button type="button" data-structure-load>Load final structure</button><button type="button" data-structure-reset disabled>Reset view</button></div><div class="trajectory-stage" data-structure-stage></div><details class="guide"><summary>ⓘ ELI5: why is this not animated?</summary><p>The analysis CSVs and final PDB were archived, but the original multi-frame coordinate trajectory was not. Showing a single frame as though it moved through time would be misleading, so this is intentionally a static interactive structure viewer.</p></details><div class="trajectory-downloads"><a href="{topology_href}" download>Download final structure PDB</a></div></section><script>(()=>{{const root=document.currentScript.previousElementSibling,load=root.querySelector('[data-structure-load]'),reset=root.querySelector('[data-structure-reset]'),stage=root.querySelector('[data-structure-stage]');let viewer;load.addEventListener('click',async()=>{{if(!window.$3Dmol)return;load.disabled=true;try{{const response=await fetch(root.dataset.finalStructure);if(!response.ok)throw new Error('structure fetch failed');viewer=$3Dmol.createViewer(stage,{{backgroundColor:'#05060a',antialias:true}});const model=viewer.addModel(await response.text(),'pdb');model.setStyle({{}},{{cartoon:{{color:'#496985'}}}});{chain_styles}viewer.zoomTo();viewer.render();reset.disabled=false;addEventListener('resize',()=>viewer&&viewer.resize())}}catch(error){{load.disabled=false}}}});reset.addEventListener('click',()=>{{if(viewer){{viewer.zoomTo();viewer.render()}}}})}})();</script>'''
         return (
             '<section class="trajectory-card"><div class="eyebrow">Trajectory playback</div>'
             '<h2>Interactive simulation playback is not available yet</h2>'
             '<p>The final topology PDB and XTC must both be published for this run. The ordinary Structure tab remains available.</p></section>'
         )
-    asset_dir = analysis / "Trajectory_Playback"
-    preview = asset_dir / "centered_trajectory_preview.pdb"
     # A PBC-repaired preview, when made during analysis, is the only
     # trajectory that should be opened by default in an interactive viewer.
     # The raw XTC remains downloadable but can show a molecule on opposite
@@ -1157,7 +1181,7 @@ def trajectory_playback_html(root: Path, analysis: Path, context: PartnerContext
             print(f"PyMOL session bundle generation skipped: {error}")
 
     preview_info: dict[str, object] = {}
-    needs_preview = not preview.is_file() or preview.stat().st_mtime < max(topology.stat().st_mtime, trajectory.stat().st_mtime)
+    needs_preview = trajectory.is_file() and (not preview.is_file() or preview.stat().st_mtime < max(topology.stat().st_mtime, trajectory.stat().st_mtime))
     if needs_preview:
         temporary = preview.with_suffix(".pdb.partial")
         try:
@@ -2401,7 +2425,7 @@ def rmsd_award(peak_angstrom: float) -> tuple[str, str, str]:
     return "😞", "needs review", "12 Å or higher"
 
 
-def ppi_scorecard_html(analysis: Path) -> str:
+def ppi_scorecard_html(analysis: Path, context: PartnerContext | None = None) -> str:
     """A transparent MD evidence scorecard, explicitly not an affinity score."""
     interface, _ = _interface_time_data(analysis)
     summary_path = analysis / "Interface_RIN" / "interface_chain_pair_summary.csv"
@@ -2497,7 +2521,8 @@ def ppi_scorecard_html(analysis: Path) -> str:
         return ""
     blocks = "".join(f'<article class="evidence-score evidence-score--{color}"><span>{escape(label)}</span><strong>{escape(value)}</strong><small>{escape(detail)}</small></article>' for label, value, detail, color in cards)
     style = '<style>.md-evidence-scorecard{grid-column:1/-1;margin:0 0 18px;border:1px solid #285a79;border-radius:18px;padding:18px;background:linear-gradient(135deg,#081a29,#080b14 58%)}.md-evidence-scorecard header{border-left:4px solid #35d0ff;padding-left:12px;margin-bottom:15px}.md-evidence-scorecard header p{margin:.35rem 0 0;color:#7aa6d9;max-width:980px}.evidence-score-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:10px}.evidence-score{border:1px solid #285a79;border-top:4px solid #35d0ff;border-radius:13px;padding:12px;background:#07111e}.evidence-score--orange,.evidence-score--component1{border-top-color:#ff8a3d}.evidence-score--green,.evidence-score--component2{border-top-color:#12f28a}.evidence-score--component3{border-top-color:#ae65ff}.evidence-score--component4{border-top-color:#ff4fb8}.evidence-score--component5{border-top-color:#ffd44d}.evidence-score--blue{border-top-color:#35d0ff}.evidence-score--pink{border-top-color:#ff2bd6}.evidence-score--cyan{border-top-color:#35d0ff}.evidence-score span,.evidence-score small{display:block}.evidence-score span{font-size:.77rem;font-weight:850;color:#cfe8ff}.evidence-score strong{display:block;color:#fff;font-size:1.55rem;margin:6px 0}.evidence-score small{color:#7aa6d9;line-height:1.35}</style>'
-    return (style + '<section class="md-evidence-scorecard"><header><div class="eyebrow">MD evidence scorecard</div><h2>Interface, fold, and component behavior at a glance</h2>'
+    assembly = "peptide–protein" if context is not None and context.partner_kind == "peptide" else "protein–protein"
+    return (style + f'<section class="md-evidence-scorecard"><header><div class="eyebrow">MD evidence scorecard</div><h2>{assembly.title()} interface, fold, and component behavior at a glance</h2>'
             '<p>ELI5: these are measurements from this trajectory, arranged as a reading checklist. They summarize persistence and structure; they are not a binding-affinity, safety, or experimental-activity score.</p></header>'
             f'<div class="evidence-score-grid">{blocks}</div></section>')
 
@@ -2656,8 +2681,14 @@ def contact_persistence_plot(events_file: Path, denominator_file: Path,
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
-def interface_scorecard_html(analysis: Path) -> str:
-    """Plain-language, five-row answer to: what holds this interface together?"""
+def interface_scorecard_html(analysis: Path, context: PartnerContext | None = None) -> str:
+    """Show the five most persistent geometric interface anchors.
+
+    This compact Overview scorecard is intentionally shared by peptide--protein
+    and protein--protein dossiers.  It gives each report the same fast answer
+    to “what is holding this interface together?” while the detailed network
+    tabs retain the full, typed interaction evidence.
+    """
     source = analysis / "Interface_RIN" / "interface_residue_pair_contacts.csv"
     table = _read_table(source)
     needed = {"ChainA_Label", "ChainB_Label", "ResidueA", "ResidueB", "ContactFraction", "MeanMinDistance_A"}
@@ -2666,22 +2697,31 @@ def interface_scorecard_html(analysis: Path) -> str:
     table = table.copy()
     peptide_a = table["ChainA_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)
     peptide_b = table["ChainB_Label"].astype(str).str.contains(r"\(peptide,", case=False, regex=True)
-    table = table[peptide_a | peptide_b].copy()
-    if table.empty:
-        return ""
-    table["Peptide position"] = pd.Series(np.where(peptide_a, table["ResidueA"], table["ResidueB"]), index=table.index).astype(str).str.rsplit(":", n=1).str[-1]
-    table["Protein partner"] = pd.Series(np.where(peptide_a, table["ResidueB"], table["ResidueA"]), index=table.index).astype(str).str.rsplit(":", n=1).str[-1]
-    # Interface source tables can retain waters/ions as peptide-chain records.
-    # They are useful provenance, but never meaningful peptide positions.
-    canonical_peptide = r"^(?:ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL)-?\d+$"
-    table = table[table["Peptide position"].str.match(canonical_peptide, case=False, na=False)].copy()
+    is_peptide = context is not None and context.partner_kind == "peptide"
+    if is_peptide:
+        table = table[peptide_a | peptide_b].copy()
+        if table.empty:
+            return ""
+        table["Left residue"] = pd.Series(np.where(peptide_a, table["ResidueA"], table["ResidueB"]), index=table.index).astype(str).str.rsplit(":", n=1).str[-1]
+        table["Right residue"] = pd.Series(np.where(peptide_a, table["ResidueB"], table["ResidueA"]), index=table.index).astype(str).str.rsplit(":", n=1).str[-1]
+        # Interface source tables can retain waters/ions as peptide-chain records.
+        # They are useful provenance, but never meaningful peptide positions.
+        canonical_peptide = r"^(?:ALA|ARG|ASN|ASP|CYS|GLN|GLU|GLY|HIS|ILE|LEU|LYS|MET|PHE|PRO|SER|THR|TRP|TYR|VAL)-?\d+$"
+        table = table[table["Left residue"].str.match(canonical_peptide, case=False, na=False)].copy()
+        left_heading, right_heading, relationship = "Peptide", "Protein partner", "peptide–protein"
+    else:
+        table["Left residue"] = table["ResidueA"].astype(str).str.rsplit(":", n=1).str[-1]
+        table["Right residue"] = table["ResidueB"].astype(str).str.rsplit(":", n=1).str[-1]
+        table["Left residue"] = table["ChainA_Label"].astype(str) + " · " + table["Left residue"]
+        table["Right residue"] = table["ChainB_Label"].astype(str) + " · " + table["Right residue"]
+        left_heading, right_heading, relationship = "Component A", "Component B", "protein–protein"
     table["ContactFraction"] = pd.to_numeric(table["ContactFraction"], errors="coerce")
     table["MeanMinDistance_A"] = pd.to_numeric(table["MeanMinDistance_A"], errors="coerce")
     table = table.dropna(subset=["ContactFraction", "MeanMinDistance_A"]).sort_values("ContactFraction", ascending=False).head(5)
     if table.empty:
         return ""
     rows = "".join(
-        f'<tr><td>{escape(row["Peptide position"])}</td><td>{escape(row["Protein partner"])}</td>'
+        f'<tr><td>{escape(row["Left residue"])}</td><td>{escape(row["Right residue"])}</td>'
         f'<td>{row["ContactFraction"] * 100:.1f}%</td><td>{row["MeanMinDistance_A"]:.2f} Å</td></tr>'
         for _, row in table.iterrows()
     )
@@ -2689,7 +2729,7 @@ def interface_scorecard_html(analysis: Path) -> str:
                    '<p><b>This table uses geometric proximity:</b> it counts a pair whenever any peptide/protein heavy atoms are within the 4 Å interface cutoff.</p>'
                    '<p><b>The interactive network is stricter:</b> it shows a specific classified interaction (hydrogen bond, ionic, hydrophobic, or other) only when that interaction passes its current occupancy filter. A pair can stay physically close in every frame but form a particular hydrogen bond in fewer than 50% of frames.</p>'
                    '<p>So a row here is an interface-nearness clue. The network answers the narrower question: which <em>specific interaction type</em> remains persistent at the selected threshold?</p></details>')
-    return f'''<style>.interface-scorecard,.representative-frames{{margin:0 0 18px;padding:18px;border:1px solid rgba(24,255,139,.32);border-radius:17px;background:linear-gradient(145deg,#0d2130,#08101c)}}.interface-scorecard h2,.representative-frames h2{{margin:.2rem 0 .35rem}}.interface-scorecard p,.representative-frames p{{color:#9cb6d0;margin:.25rem 0 .8rem;max-width:900px}}.interface-table{{overflow:auto}}.interface-table table{{width:100%;border-collapse:collapse;font-size:.9rem}}.interface-table th{{color:#7aa6d9;text-align:left;text-transform:uppercase;font-size:.7rem;letter-spacing:.06em}}.interface-table td,.interface-table th{{padding:9px;border-bottom:1px solid #203653;white-space:nowrap}}.interface-table td:first-child{{color:#ffe66d;font-weight:900}}</style><section class="interface-scorecard"><div><div class="eyebrow">Start here · geometric interface anchors</div><h2>Which residue pairs stay physically near each other?</h2><p>These are the five peptide–protein pairs that were within the 4 Å heavy-atom interface cutoff most often. This is a proximity summary, not the same filter used by the colored interaction network below.</p></div><div class="interface-table"><table><thead><tr><th>Peptide</th><th>Protein partner</th><th>Geometrically near</th><th>Typical closest gap</th></tr></thead><tbody>{rows}</tbody></table></div>{metric_note}{guide_html("contact_frequency")}</section>'''
+    return f'''<style>.interface-scorecard,.representative-frames{{margin:0 0 18px;padding:18px;border:1px solid rgba(24,255,139,.32);border-radius:17px;background:linear-gradient(145deg,#0d2130,#08101c)}}.interface-scorecard h2,.representative-frames h2{{margin:.2rem 0 .35rem}}.interface-scorecard p,.representative-frames p{{color:#9cb6d0;margin:.25rem 0 .8rem;max-width:900px}}.interface-table{{overflow:auto}}.interface-table table{{width:100%;border-collapse:collapse;font-size:.9rem}}.interface-table th{{color:#7aa6d9;text-align:left;text-transform:uppercase;font-size:.7rem;letter-spacing:.06em}}.interface-table td,.interface-table th{{padding:9px;border-bottom:1px solid #203653;white-space:nowrap}}.interface-table td:first-child{{color:#ffe66d;font-weight:900}}</style><section class="interface-scorecard"><div><div class="eyebrow">Start here · geometric interface anchors</div><h2>Which residue pairs stay physically near each other?</h2><p>These are the five {relationship} residue pairs that were within the 4 Å heavy-atom interface cutoff most often. This is a proximity summary, not the same filter used by the colored interaction network below.</p></div><div class="interface-table"><table><thead><tr><th>{left_heading}</th><th>{right_heading}</th><th>Geometrically near</th><th>Typical closest gap</th></tr></thead><tbody>{rows}</tbody></table></div>{metric_note}{guide_html("contact_frequency")}</section>'''
 
 
 def peptide_importance_plot(analysis: Path) -> str | None:
@@ -3210,6 +3250,161 @@ def rmsd_rg_scatter_plot(overlay_file: Path, rg_file: Path) -> str | None:
     return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
 
 
+def ligand_atom_occupancy_plot(events_file: Path) -> str | None:
+    """Show which ligand atoms repeatedly contact the protein."""
+    table = _read_table(events_file)
+    if table is None or not {"Time_ns", "LigAtomName"}.issubset(table.columns):
+        return None
+    total = table["Time_ns"].nunique()
+    if not total:
+        return None
+    values = (table.dropna(subset=["LigAtomName"]).groupby("LigAtomName")["Time_ns"].nunique()
+              .sort_values(ascending=False).head(35).sort_values())
+    if values.empty:
+        return None
+    figure = go.Figure(go.Bar(y=values.index.astype(str), x=100 * values.to_numpy() / total,
+                              orientation="h", marker_color=ORANGE,
+                              hovertemplate="Ligand atom=%{y}<br>Contact occupancy=%{x:.1f}%<extra></extra>"))
+    figure.update_layout(title="Ligand-atom contact occupancy", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
+                         margin={"l": 110, "r": 25, "t": 55, "b": 52}, height=max(360, 20 * len(values)),
+                         xaxis={"title": "Sampled frames with any protein contact (%)", "gridcolor": GRID},
+                         yaxis={"title": "Ligand atom", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def ligand_atom_residue_heatmap(events_file: Path) -> str | None:
+    """Preserve the exact ligand-atom/protein-residue contact map."""
+    table = _read_table(events_file)
+    if table is None or not {"Time_ns", "LigAtomName", "Residue"}.issubset(table.columns):
+        return None
+    total = table["Time_ns"].nunique()
+    if not total:
+        return None
+    matrix = pd.crosstab(table["Residue"].astype(str), table["LigAtomName"].astype(str))
+    matrix = matrix.loc[matrix.sum(axis=1).sort_values(ascending=False).head(35).index]
+    matrix = matrix.loc[:, matrix.sum(axis=0).sort_values(ascending=False).head(24).index]
+    if matrix.empty:
+        return None
+    figure = go.Figure(go.Heatmap(z=100 * matrix.to_numpy(dtype=float) / total,
+                                  x=matrix.columns.astype(str), y=matrix.index.astype(str),
+                                  colorscale="Turbo", colorbar={"title": "Frames (%)"},
+                                  hovertemplate="Protein residue=%{y}<br>Ligand atom=%{x}<br>Contact occupancy=%{z:.1f}%<extra></extra>"))
+    figure.update_layout(title="Protein-residue × ligand-atom contact map", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
+                         margin={"l": 115, "r": 25, "t": 55, "b": 90}, height=max(420, 19 * len(matrix)),
+                         xaxis={"title": "Ligand atom", "gridcolor": GRID}, yaxis={"title": "Protein residue", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def ligand_distance_occupancy_plot(events_file: Path) -> str | None:
+    """Relate residue contact persistence to its observed geometry."""
+    table = _read_table(events_file)
+    if table is None or not {"Time_ns", "Residue", "Distance"}.issubset(table.columns):
+        return None
+    total = table["Time_ns"].nunique()
+    table = table.copy(); table["Distance"] = pd.to_numeric(table["Distance"], errors="coerce")
+    summary = table.dropna(subset=["Distance"]).groupby("Residue").agg(
+        Occupancy=("Time_ns", "nunique"), MeanDistance=("Distance", "mean"), MinDistance=("Distance", "min"),
+    ).reset_index()
+    if summary.empty or not total:
+        return None
+    summary["Occupancy"] = 100 * summary["Occupancy"] / total
+    summary = summary.nlargest(45, "Occupancy")
+    figure = go.Figure(go.Scatter(x=summary["MeanDistance"], y=summary["Occupancy"], mode="markers+text",
+                                  text=summary["Residue"].astype(str), textposition="top center",
+                                  marker={"size": 9, "color": summary["MinDistance"], "colorscale": "Viridis", "showscale": True,
+                                          "colorbar": {"title": "Minimum Å"}},
+                                  customdata=summary[["MinDistance"]],
+                                  hovertemplate="Residue=%{text}<br>Mean distance=%{x:.2f} Å<br>Contact occupancy=%{y:.1f}%<br>Minimum distance=%{customdata[0]:.2f} Å<extra></extra>"))
+    figure.update_layout(title="Residue contact persistence versus distance", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"},
+                         margin={"l": 65, "r": 25, "t": 55, "b": 75}, height=440,
+                         xaxis={"title": "Mean closest contact distance (Å)", "gridcolor": GRID},
+                         yaxis={"title": "Contact occupancy (%)", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def native_q_contact_coupling_plot(q_file: Path, events_file: Path) -> str | None:
+    """Link fold retention with the number of protein residues contacting ligand."""
+    q, events = _read_table(q_file), _read_table(events_file)
+    if q is None or events is None or not {"Time_ns", "Q_native_contact_fraction"}.issubset(q.columns) or not {"Time_ns", "Residue"}.issubset(events.columns):
+        return None
+    contacts = events.groupby("Time_ns")["Residue"].nunique().rename("Contacting_residues").reset_index()
+    q = q[["Time_ns", "Q_native_contact_fraction"]].copy()
+    for frame in (q, contacts): frame["Time_ns"] = pd.to_numeric(frame["Time_ns"], errors="coerce")
+    merged = pd.merge_asof(q.dropna().sort_values("Time_ns"), contacts.dropna().sort_values("Time_ns"), on="Time_ns", direction="nearest")
+    merged = _sample_table(merged.dropna())
+    if len(merged) < 3:
+        return None
+    figure = go.Figure(go.Scatter(x=merged["Contacting_residues"], y=merged["Q_native_contact_fraction"], mode="markers",
+                                  marker={"size": 7, "color": merged["Time_ns"], "colorscale": "Viridis", "showscale": True,
+                                          "colorbar": {"title": "Time (ns)"}},
+                                  hovertemplate="Contacting residues=%{x}<br>Native-contact Q=%{y:.3f}<extra></extra>"))
+    figure.update_layout(title="Fold retention versus ligand-pocket engagement", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 65, "r": 25, "t": 55, "b": 55}, height=410,
+                         xaxis={"title": "Unique contacting protein residues", "gridcolor": GRID}, yaxis={"title": "Native-contact Q", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def typed_interaction_residence_plot(events_file: Path) -> str | None:
+    """Rank uninterrupted sampled residence for exact residue/atom/type events."""
+    table = _read_table(events_file)
+    needed = {"Time_ns", "Residue", "Type", "LigAtomName"}
+    if table is None or not needed.issubset(table.columns):
+        return None
+    table = table.copy(); table["Time_ns"] = pd.to_numeric(table["Time_ns"], errors="coerce")
+    table = table.dropna(subset=list(needed)).sort_values("Time_ns")
+    if table.empty:
+        return None
+    step = float(np.median(np.diff(np.unique(table["Time_ns"])))) if table["Time_ns"].nunique() > 1 else 0.0
+    if step <= 0:
+        return None
+    rows = []
+    for key, group in table.groupby(["Residue", "LigAtomName", "Type"]):
+        times = np.unique(group["Time_ns"].to_numpy(dtype=float)); runs = []; start = last = times[0]
+        for time in times[1:]:
+            if time > last + step * 1.5:
+                runs.append(last - start + step); start = time
+            last = time
+        runs.append(last - start + step)
+        rows.append((" · ".join(map(str, key)), max(runs), key[2]))
+    rows = sorted(rows, key=lambda row: row[1], reverse=True)[:30]
+    if not rows:
+        return None
+    labels, values, types = zip(*rows)
+    palette = {"H-bond": CYAN, "Ionic": MAGENTA, "Hydrophobic": ORANGE, "Water bridge": GREEN}
+    figure = go.Figure(go.Bar(y=list(labels)[::-1], x=list(values)[::-1], orientation="h",
+                              marker_color=[palette.get(str(kind), GREEN) for kind in list(types)[::-1]],
+                              hovertemplate="Residue · ligand atom · type=%{y}<br>Longest uninterrupted sampled residence=%{x:.3f} ns<extra></extra>"))
+    figure.update_layout(title="Longest typed interaction residence episodes", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 220, "r": 25, "t": 55, "b": 55},
+                         height=max(430, 21 * len(rows)), xaxis={"title": "Longest uninterrupted sampled episode (ns)", "gridcolor": GRID}, yaxis={"gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
+def ligand_pose_engagement_plot(overlay_file: Path, events_file: Path) -> str | None:
+    """Relate ligand positional drift to the observed pocket-contact count."""
+    overlay, events = _read_table(overlay_file), _read_table(events_file)
+    if overlay is None or events is None or not {"Time_ns", "Ligand_RMSD"}.issubset(overlay.columns) or not {"Time_ns", "Residue"}.issubset(events.columns):
+        return None
+    contacts = events.groupby("Time_ns")["Residue"].nunique().rename("Contacting_residues").reset_index()
+    overlay = overlay[["Time_ns", "Ligand_RMSD"]].copy()
+    for frame in (overlay, contacts): frame["Time_ns"] = pd.to_numeric(frame["Time_ns"], errors="coerce")
+    merged = pd.merge_asof(overlay.dropna().sort_values("Time_ns"), contacts.dropna().sort_values("Time_ns"), on="Time_ns", direction="nearest")
+    merged = _sample_table(merged.dropna())
+    if len(merged) < 3:
+        return None
+    figure = go.Figure(go.Scatter(x=merged["Ligand_RMSD"], y=merged["Contacting_residues"], mode="markers",
+                                  marker={"size": 7, "color": merged["Time_ns"], "colorscale": "Viridis", "showscale": True,
+                                          "colorbar": {"title": "Time (ns)"}},
+                                  hovertemplate="Ligand RMSD=%{x:.3f} Å<br>Contacting protein residues=%{y}<extra></extra>"))
+    figure.update_layout(title="Ligand pose motion versus pocket engagement", paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+                         font={"color": TEXT, "family": "Inter, ui-sans-serif, system-ui"}, margin={"l": 65, "r": 25, "t": 55, "b": 55}, height=410,
+                         xaxis={"title": "Ligand RMSD (Å)", "gridcolor": GRID}, yaxis={"title": "Unique contacting protein residues", "gridcolor": GRID})
+    return plot(figure, include_plotlyjs=False, output_type="div", config={"responsive": True, "displaylogo": False})
+
+
 def rmsf_persistence_scatter_plot(rmsf_file: Path, frequency_file: Path, interaction_file: Path | None) -> str | None:
     rmsf, frequency = _read_table(rmsf_file), _read_table(frequency_file)
     if rmsf is None or frequency is None or not {"Residue", "RMSF_Å"}.issubset(rmsf.columns) or not {"Residue", "PercentFrames"}.issubset(frequency.columns):
@@ -3519,7 +3714,8 @@ def section_html(title: str, eyebrow: str, text: str, cards: list[str]) -> str:
 
 def component_lanes_section_html(root: Path, title: str, eyebrow: str, text: str,
                                  shared_cards: list[str], component_cards: dict[int, list[str]],
-                                 analysis: Path | None = None) -> str:
+                                 analysis: Path | None = None,
+                                 context: PartnerContext | None = None) -> str:
     """Render a hierarchy for complex dossiers: shared first, then each chain.
 
     The cyan lane contains genuine whole-complex or interface observables.  A
@@ -3529,13 +3725,15 @@ def component_lanes_section_html(root: Path, title: str, eyebrow: str, text: str
     if not shared_cards and not any(component_cards.values()):
         return ""
     entries = resolved_components(root, analysis)
+    peptide_system = context is not None and context.partner_kind == "peptide"
+    assembly = "peptide–protein assembly" if peptide_system else "complete assembly"
     lanes = []
     if shared_cards:
         lanes.append(
             '<section class="component-analysis-lane component-analysis-lane--shared">'
             '<header><span class="component-analysis-kicker">Complex / shared</span>'
-            '<h3>Whole-complex and interface analysis</h3>'
-            '<p>These observables are calculated across the complete assembly or its defined interface. Cyan marks them as shared rather than chain-specific.</p>'
+            f'<h3>{"Peptide–protein" if peptide_system else "Whole-complex"} and interface analysis</h3>'
+            f'<p>These observables are calculated across the {assembly} or its defined interface. Cyan marks them as shared rather than component-specific.</p>'
             '</header><div class="grid">' + "".join(shared_cards) + '</div></section>'
         )
     for component_index in sorted(component_cards):
@@ -3547,12 +3745,14 @@ def component_lanes_section_html(root: Path, title: str, eyebrow: str, text: str
         label = str(entry.get("label") or f"component {component_index}")
         chain = str(entry.get("current_chain") or entry.get("source_chain") or "")
         chain_html = f' <small>chain {escape(chain)}</small>' if chain else ""
+        is_peptide = peptide_system and (chain in context.partner_chain_ids or entry.get("chain_type", "").casefold() == "peptide")
+        role = "Peptide" if is_peptide else "Receptor" if peptide_system else f"Component {component_index}"
         accent = CHAIN_COLORS[index % len(CHAIN_COLORS)]
         lanes.append(
             f'<section class="component-analysis-lane" style="--component-accent:{accent}"><header>'
-            f'<span class="component-analysis-kicker">Component {component_index}</span>'
+            f'<span class="component-analysis-kicker">{escape(role)}</span>'
             f'<h3>{escape(label)}{chain_html}</h3>'
-            '<p>Chain-local calculation: positions and values belong to this component only and never continue into another chain.</p>'
+            f'<p>{"Peptide-local" if is_peptide else "Component-local"} calculation: positions and values belong to this component only and never continue into another chain.</p>'
             '</header><div class="grid">' + "".join(cards) + '</div></section>'
         )
     return ('<style>.component-analysis-lanes{display:grid;gap:19px}.component-analysis-lane{--component-accent:#35d0ff;border:1px solid #285a79;border-left:5px solid var(--component-accent);border-radius:18px;padding:16px;background:linear-gradient(135deg,#0b1a28,#080b14 48%)}.component-analysis-lane--shared{--component-accent:#35d0ff}.component-analysis-lane header{padding:0 2px 13px;margin-bottom:15px;border-bottom:1px solid #23375d}.component-analysis-lane h3{margin:3px 0;color:#cfe8ff;font-size:1.25rem}.component-analysis-lane h3 small{color:#8daac7;font-size:.75em;font-weight:700}.component-analysis-lane p{margin:0;color:#7aa6d9;font-size:.88rem;max-width:820px}.component-analysis-kicker{display:block;color:var(--component-accent);font-size:.72rem;font-weight:900;letter-spacing:.14em;text-transform:uppercase}</style><section class="gallery-section component-lanes-section"><div class="section-head"><div><div class="eyebrow">'
@@ -3560,17 +3760,18 @@ def component_lanes_section_html(root: Path, title: str, eyebrow: str, text: str
             + "".join(lanes) + '</div></section>')
 
 
-def chain_secondary_section_html(cards_by_chain: dict[str, list[str]]) -> str:
+def chain_secondary_section_html(cards_by_chain: dict[str, list[str]], context: PartnerContext | None = None) -> str:
     """Give each complex component a discrete, chain-local SSE reading lane."""
     blocks = []
     for index, (chain, cards) in enumerate(cards_by_chain.items()):
         if not cards:
             continue
         accent = CHAIN_COLORS[index % len(CHAIN_COLORS)]
+        role = "Peptide" if context is not None and context.partner_kind == "peptide" and chain in context.partner_chain_ids else "Receptor" if context is not None and context.partner_kind == "peptide" else f"Component {index + 1}"
         blocks.append(
             f'<section class="chain-dynamics-group" style="--chain-accent:{accent}"><header>'
-            f'<span class="chain-dynamics-kicker">Component {index + 1}</span><h3>Chain {escape(chain)}</h3>'
-            '<p>Read this component independently: residue positions, SSE evolution, and persistence never continue into another chain.</p>'
+            f'<span class="chain-dynamics-kicker">{escape(role)}</span><h3>{escape(chain)}</h3>'
+            f'<p>Read this {"peptide" if role == "Peptide" else "component"} independently: residue positions, SSE evolution, and persistence never continue into another chain.</p>'
             '</header><div class="chain-dynamics-grid">' + "".join(cards) + "</div></section>"
         )
     if not blocks:
@@ -3599,11 +3800,47 @@ def tabbed_sections(sections: list[tuple[str, str, str]]) -> str:
     return f'<section id="analysis-tabs" class="dashboard-tabs-shell"><div class="dashboard-tabs" role="tablist" aria-label="Result analyses">{tabs}</div>{panels}</section>'
 
 
+def portal_chrome_html() -> tuple[str, str, str]:
+    """Return the portal identity that must travel with every dossier.
+
+    The dashboard is deliberately a standalone HTML artifact, so it cannot
+    rely on Flask/Jinja wrapping it later.  All URLs are portal-root relative:
+    a published dossier has the same navigation, footer, favicon, and theme
+    controls whether it is opened through the Results page or directly.
+    """
+    head = '''<script>document.documentElement.dataset.theme=localStorage.getItem('pymacs-portal-theme')||'tron';</script>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png?v=2">
+<link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16.png?v=2">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png?v=2">
+<link rel="stylesheet" href="/static/portal.css?v=20261028-hosted-tools-1">
+<script defer src="/static/portal-theme.js?v=20261024-theme-fix-1"></script>'''
+    header = '''<header class="site-header dossier-site-header">
+  <a class="site-brand" href="/" aria-label="Schürer Digital Drug Discovery Lab Job Portal home">
+    <span class="portal-brand-badge" aria-hidden="true"><img class="badge-light" src="/static/images/ssdd-badge-light.png" alt=""><img class="badge-dark" src="/static/images/ssdd-badge-dark.png" alt=""></span>
+    <span class="portal-brand-copy"><span>Schürer Digital Drug Discovery Lab</span><small>Job Portal</small></span>
+  </a>
+  <nav aria-label="Primary navigation">
+    <a class="nav-link" href="/">Home</a><a class="nav-link" href="/docking">Docking</a><a class="nav-link" href="/molecular-dynamics">Molecular dynamics</a><a class="nav-link" href="/job-monitor">Job monitor</a><a class="nav-link" href="/machines">Machines</a><a class="nav-link is-active" href="/results">Results</a><a class="nav-link" href="/compare">Compare</a><a class="nav-link" href="/analytics">Analytics</a>
+    <button type="button" class="theme-toggle" data-theme-toggle aria-label="Switch portal theme" aria-pressed="true"><span aria-hidden="true">◐</span><span data-theme-label>Light</span></button>
+  </nav>
+</header>'''
+    footer = '''<footer class="site-footer dossier-site-footer" aria-label="Portal footer">
+  <div class="footer-main"><a class="footer-brand" href="/"><span class="footer-mark" aria-hidden="true">SD</span><span><strong>Schürer Digital Drug Discovery Lab</strong><small>Computational drug discovery, connected.</small></span></a><p>Launch, track, and review computational chemistry workflows from one lab portal.</p></div>
+  <nav class="footer-column" aria-label="Lab links"><h2>Lab</h2><a href="https://schurelab.org" target="_blank" rel="noopener noreferrer">Schürer Lab website <span aria-hidden="true">↗</span></a></nav>
+  <nav class="footer-column" aria-label="Portal links"><h2>Portal</h2><a href="/docking">Dock a library</a><a href="/molecular-dynamics">Run molecular dynamics</a><a href="/job-monitor">Monitor lab jobs</a><a href="/results">Browse results</a><a href="/compare">Compare dossiers</a><a href="/analytics">Lab analytics</a></nav>
+  <nav class="footer-column footer-tools" aria-label="Related Schürer Lab tools"><h2>Related tools</h2><a href="https://pymacs.com" target="_blank" rel="noopener noreferrer">PyMACS ↗</a><a href="https://autodockvina.com" target="_blank" rel="noopener noreferrer">AutoDock Vina ↗</a><a href="https://protacbuilder.com" target="_blank" rel="noopener noreferrer">PROTAC Builder ↗</a><a href="https://warheadheadhunter.com" target="_blank" rel="noopener noreferrer">Warhead Headhunter ↗</a><a href="https://e3ligandalyzer.com" target="_blank" rel="noopener noreferrer">E3 Ligandalyzer ↗</a><a href="https://vlisemod.com" target="_blank" rel="noopener noreferrer">VLISE Mod ↗</a><a href="https://protacbuilder.com/jari" target="_blank" rel="noopener noreferrer">JARI-PROTACS ↗</a></nav>
+  <nav class="footer-column footer-research" aria-label="Research and data tools"><h2>Research &amp; data</h2><a href="https://www.opioiddrugontology.org/" target="_blank" rel="noopener noreferrer">ODO Data Portal ↗</a><a href="https://drugcentral.org/" target="_blank" rel="noopener noreferrer">DrugCentral ↗</a><a href="https://datascience.unm.edu/tin-x/" target="_blank" rel="noopener noreferrer">TIN-X ↗</a><a href="https://knet.ccs.miami.edu/" target="_blank" rel="noopener noreferrer">KNET ↗</a><a href="https://schurerlab.shinyapps.io/CKIApp/" target="_blank" rel="noopener noreferrer">Clinical Kinase Index ↗</a><a href="https://bioassayontology.org/ontolobridge/" target="_blank" rel="noopener noreferrer">OntoloBridge ↗</a></nav>
+  <div class="footer-bottom"><span>© 2026 Schürer Digital Drug Discovery Lab</span><a class="footer-contact" href="mailto:jmschulz@med.miami.edu"><span aria-hidden="true">✦</span> Contact the Portal Administrator</a></div>
+</footer>'''
+    return head, header, footer
+
+
 def build_document(system_name: str, context: PartnerContext, cards: list[str], dashboard: str) -> str:
     """Return the Kyle-hosted, self-contained single-run reading room."""
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(system_name)} · PyMACS results</title><script>{plotlyjs()}</script><script src="/static/3Dmol-min.js"></script><style>
+    portal_head, portal_header, portal_footer = portal_chrome_html()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(system_name)} · PyMACS results</title>{portal_head}<script>{plotlyjs()}</script><script src="/static/3Dmol-min.js"></script><style>
 :root{{--bg:#05060a;--panel:#0b1020;--grid:#1c2a4a;--text:#cfe8ff;--muted:#7aa6d9;--cyan:#35d0ff;--green:#18ff8b;--yellow:#ffe66d;--magenta:#ff2bd6;--orange:#ff8a3d}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 90% 0,rgba(53,208,255,.15),transparent 30%),radial-gradient(circle at 4% 25%,rgba(255,43,214,.10),transparent 27%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}}.page{{max-width:1560px;margin:auto;padding:32px 24px 70px}}.hero,.card,.ligand-card,.gallery-section,.structure-card,.dashboard-tabs-shell{{background:linear-gradient(155deg,#10172b,#060912);border:1px solid #23375d;box-shadow:0 18px 50px rgba(0,0,0,.35)}}.hero{{position:relative;overflow:hidden;border-radius:25px;padding:34px;margin-bottom:20px}}.hero:before{{content:"";position:absolute;inset:-48%;background:conic-gradient(from 180deg,transparent,rgba(53,208,255,.16),transparent,rgba(255,43,214,.13),transparent);animation:slow-spin 28s linear infinite;pointer-events:none}}.hero>*{{position:relative;z-index:1}}@keyframes slow-spin{{to{{transform:rotate(360deg)}}}}.eyebrow{{color:var(--green);font-size:.75rem;font-weight:900;letter-spacing:.16em;text-transform:uppercase}}h1{{font-size:clamp(2.5rem,5.2vw,5.2rem);letter-spacing:-.065em;line-height:.92;margin:.35rem 0 1rem}}h2{{letter-spacing:-.025em;margin:.2rem 0 .45rem;font-size:1.5rem}}p{{line-height:1.55}}.sub,.section-head p,.muted,.asset-note{{color:var(--muted);max-width:960px}}.pills,.portal-actions{{display:flex;gap:9px;flex-wrap:wrap;margin-top:18px}}.pill,.portal-action{{border:1px solid rgba(53,208,255,.28);padding:8px 11px;border-radius:999px;background:rgba(53,208,255,.08);font-size:.88rem}}.portal-actions{{margin-top:12px}}.portal-action{{color:var(--text);font-weight:800;text-decoration:none;transition:transform .16s ease,background .16s ease}}.portal-action:hover{{transform:translateY(-1px);background:rgba(53,208,255,.20)}}.portal-action--primary{{background:linear-gradient(90deg,#18b7e6,#1988e6);border-color:transparent;color:#03101b}}details.guide,.overview{{margin:11px 0 2px;border:1px solid rgba(53,208,255,.22);border-radius:13px;background:rgba(5,10,23,.68)}}details.guide summary,.overview summary{{cursor:pointer;padding:10px 12px;color:var(--cyan);font-weight:800;font-size:.88rem}}details.guide p,.overview p{{margin:0;padding:0 12px 11px;color:var(--muted);font-size:.87rem}}.overview{{margin-top:22px;max-width:1020px}}.overview ol{{margin:0;padding:0 28px 15px;color:var(--muted);line-height:1.55}}.gallery-section,.ligand-card,.structure-card{{border-radius:21px;padding:20px;margin-top:18px}}.section-head{{border-left:3px solid var(--green);padding-left:13px;margin-bottom:16px}}.interface-pair{{margin:12px 0;border:1px solid rgba(53,208,255,.24);border-radius:15px;background:rgba(5,10,23,.58);padding:0 14px 14px}}.interface-pair summary{{cursor:pointer;padding:14px 2px 10px;color:var(--cyan);font-weight:900;font-size:1rem}}.interface-pair summary span{{color:var(--muted);font-size:.8rem;font-weight:700;margin-left:8px}}.interface-preview-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}}.interface-preview{{margin:0;border:1px solid rgba(53,208,255,.25);border-radius:14px;overflow:hidden;background:#05070d}}.interface-preview img{{display:block;width:100%;height:250px;object-fit:contain;background:#fff}}.interface-preview svg{{display:block;width:100%;height:auto;min-height:330px}}.interface-preview figcaption{{padding:9px 11px;color:var(--muted);font-size:.84rem;font-weight:800}}.dashboard-tabs-shell{{margin-top:18px;border-radius:21px;overflow:hidden}}.dashboard-tabs{{display:flex;gap:7px;overflow:auto;padding:14px 16px 0;border-bottom:1px solid #23375d}}.dashboard-tabs button,.structure-toolbar button{{border:1px solid #285a79;border-radius:10px 10px 0 0;background:#0a253a;color:#cfe8ff;padding:10px 13px;font:800 .82rem inherit;white-space:nowrap;cursor:pointer}}.dashboard-tabs button[aria-selected="true"],.dashboard-tabs button:hover{{background:#116887;color:#fff;border-color:var(--cyan)}}.dashboard-panel{{padding:2px 20px 20px}}.dashboard-panel[hidden]{{display:none}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px}}.card{{border-radius:17px;padding:13px;overflow:hidden}}.card .js-plotly-plot{{cursor:zoom-in}}.card a{{display:inline-block;color:var(--cyan);font-size:.8rem;font-weight:800;margin:8px 10px 5px}}.heatmap-note{{margin:7px 10px;color:var(--muted);font-size:.82rem;line-height:1.4}}.ligand-grid{{display:grid;grid-template-columns:minmax(300px,1fr) minmax(300px,1fr);gap:18px;align-items:stretch}}.ligand-2d,.ligand-3d,.complex-3d{{min-height:330px;border:1px solid rgba(255,230,109,.30);border-radius:17px;background:radial-gradient(circle at center,rgba(255,230,109,.08),rgba(5,6,10,.7) 70%);overflow:hidden;position:relative}}.ligand-2d svg{{display:block;width:100%;height:330px;max-width:100%}}.ligand-3d,.complex-3d{{border-color:rgba(53,208,255,.30)}}.complex-3d{{height:min(62vw,650px);min-height:410px}}.structure-toolbar{{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 11px}}.structure-toolbar button{{border-radius:10px;padding:8px 11px}}.structure-toolbar button:hover,.structure-toolbar button.is-active{{background:#116887;color:#fff;border-color:var(--cyan)}}.viewer-label{{color:var(--yellow);font-size:.78rem;font-weight:900;text-transform:uppercase;letter-spacing:.1em;margin:2px 0 8px}}.missing-visual{{padding:24px;color:var(--muted)}}.asset-note{{font-size:.8rem;margin:.7rem 0 0}}code{{display:block;white-space:pre-wrap;overflow-wrap:anywhere;padding:0 12px 12px;color:var(--yellow)}}.graph-modal{{display:none;position:fixed;z-index:9999;inset:0;padding:3vh 3vw;background:rgba(0,0,0,.78);backdrop-filter:blur(7px)}}.graph-modal.open{{display:flex;align-items:center;justify-content:center}}.graph-modal-panel{{position:relative;width:min(1500px,94vw);height:min(900px,92vh);padding:20px 16px 12px;border:1px solid var(--cyan);background:#080d1b;box-shadow:0 0 70px rgba(53,208,255,.18);border-radius:20px}}.graph-modal-close{{position:absolute;right:17px;top:13px;z-index:2;border:1px solid var(--cyan);border-radius:999px;background:#101b33;color:var(--text);font-weight:800;padding:8px 12px;cursor:pointer}}.graph-modal-plot{{width:100%;height:100%}}@media(max-width:700px){{.page{{padding:18px 12px 42px}}.grid,.ligand-grid{{grid-template-columns:1fr}}.hero{{padding:24px 19px}}.dashboard-panel{{padding:2px 12px 12px}}.complex-3d{{height:68vw;min-height:330px}}.graph-modal{{padding:1vh 1vw}}.graph-modal-panel{{width:98vw;height:96vh;padding:14px 4px 4px}}}}
-</style></head><body><main class="page"><section class="hero"><div class="eyebrow">PyMACS · single-system results</div><h1>{escape(system_name)}</h1><p class="sub">{escape({"ligand": "Start with global stability, then inspect ligand pose and pocket chemistry.", "peptide": "Start with global stability, then inspect peptide conformation and peptide–protein interface persistence.", "protein_chain": "Start with global and chain stability, then inspect persistent chain interfaces.", "none": "Start with global stability, fold retention, and secondary-structure evolution."}[context.partner_kind])} Every graph is a native Plotly analysis: hover for values, use the legend to isolate traces, and double-click for a large view.</p><div class="pills"><span class="pill">{escape({"ligand": "Ligand / PROTAC", "peptide": "Peptide", "protein_chain": "Chains / interfaces", "none": "Protein / chain"}[context.partner_kind])}: {escape(context.partner_label)}</span><span class="pill">{len(cards)} interactive analyses</span><span class="pill">Kyle-local, fast delivery</span></div><!--PORTAL_ACTIONS--><details class="overview"><summary>ⓘ How to read this result—start here</summary><ol><li><b>Check the fold:</b> protein RMSD, radius of gyration, and secondary-structure evolution should be considered together.</li><li><b>Check the partner:</b> interpret {escape(context.relationship_label)} RMSD/RMSF and contact persistence together—not in isolation.</li><li><b>Check the chemistry:</b> solid-color interaction types show which residues make hydrophobic, ionic, or hydrogen-bond interactions over time.</li><li><b>Do not overclaim:</b> these trajectories test stability of a modeled system; they do not by themselves establish binding affinity or experimental activity.</li></ol></details></section>{dashboard}</main><div class="graph-modal" id="graph-modal" aria-hidden="true"><div class="graph-modal-panel"><button class="graph-modal-close" id="graph-modal-close" type="button">Close ×</button><div class="graph-modal-plot" id="graph-modal-plot"></div></div></div><script>
+</style><style id="pymacs-portal-chrome-guard">.dossier-site-header{{position:relative;z-index:20;margin-bottom:0}}.dossier-site-header h1,.dossier-site-header h2,.dossier-site-header p{{font-size:inherit;letter-spacing:normal;line-height:normal}}.dossier-site-footer{{position:relative;z-index:10}}.dossier-site-footer h2{{font-size:.73rem;letter-spacing:.11em;line-height:normal}}.dossier-site-footer p{{line-height:1.55}}@media(max-width:780px){{.dossier-site-header{{padding-inline:16px}}}}</style></head><body>{portal_header}<main class="page"><section class="hero"><div class="eyebrow">PyMACS · single-system results</div><h1>{escape(system_name)}</h1><p class="sub">{escape({"ligand": "Start with global stability, then inspect ligand pose and pocket chemistry.", "peptide": "Start with global stability, then inspect peptide conformation and peptide–protein interface persistence.", "protein_chain": "Start with global and chain stability, then inspect persistent chain interfaces.", "none": "Start with global stability, fold retention, and secondary-structure evolution."}[context.partner_kind])} Every graph is a native Plotly analysis: hover for values, use the legend to isolate traces, and double-click for a large view.</p><div class="pills"><span class="pill">{escape({"ligand": "Ligand / PROTAC", "peptide": "Peptide", "protein_chain": "Chains / interfaces", "none": "Protein / chain"}[context.partner_kind])}: {escape(context.partner_label)}</span><span class="pill">{len(cards)} interactive analyses</span><span class="pill">Kyle-local, fast delivery</span></div><!--PORTAL_ACTIONS--><details class="overview"><summary>ⓘ How to read this result—start here</summary><ol><li><b>Check the fold:</b> protein RMSD, radius of gyration, and secondary-structure evolution should be considered together.</li><li><b>Check the partner:</b> interpret {escape(context.relationship_label)} RMSD/RMSF and contact persistence together—not in isolation.</li><li><b>Check the chemistry:</b> solid-color interaction types show which residues make hydrophobic, ionic, or hydrogen-bond interactions over time.</li><li><b>Do not overclaim:</b> these trajectories test stability of a modeled system; they do not by themselves establish binding affinity or experimental activity.</li></ol></details></section>{dashboard}</main><div class="graph-modal" id="graph-modal" aria-hidden="true"><div class="graph-modal-panel"><button class="graph-modal-close" id="graph-modal-close" type="button">Close ×</button><div class="graph-modal-plot" id="graph-modal-plot"></div></div></div>{portal_footer}<script>
 (() => {{
  const modal=document.getElementById('graph-modal'),destination=document.getElementById('graph-modal-plot');
  const close=()=>{{modal.classList.remove('open');modal.setAttribute('aria-hidden','true');Plotly.purge(destination)}};
@@ -3740,6 +3977,10 @@ def main() -> None:
     # runs whose metadata did not preserve a chain map.
     is_multichain_system = (
         context.partner_kind == "protein_chain"
+        # A peptide is a separately resolved macromolecular component.  It
+        # needs the same chain-aware analysis lanes as a protein partner;
+        # calling it a ligand here would incorrectly suppress those lanes.
+        or context.partner_kind == "peptide"
         or len(chain_labels) > 1
         or len(list(analysis.glob("RMSD_*.csv"))) > 1
     )
@@ -3822,13 +4063,13 @@ def main() -> None:
             source = analysis / "Protein_RMSD.csv"
             groups["overview"].append(dashboard_card(scorecard, "Binding scorecard", source.relative_to(output.parent).as_posix() if source.is_file() else "", note="Read this as a trajectory summary, then use the stability, contacts, chemistry, and distance tabs for the supporting evidence."))
     if is_multichain_system:
-        scorecard = ppi_scorecard_html(analysis)
+        scorecard = ppi_scorecard_html(analysis, context)
         if scorecard:
             groups["overview"].append(scorecard)
-    if context.partner_kind == "peptide":
-        interface_scorecard = interface_scorecard_html(analysis)
+        interface_scorecard = interface_scorecard_html(analysis, context)
         if interface_scorecard:
             groups["overview"].append(interface_scorecard)
+    if context.partner_kind == "peptide":
         representative_frames = representative_interface_frames_html(analysis)
         if representative_frames:
             groups["overview"].append(representative_frames)
@@ -3859,7 +4100,7 @@ def main() -> None:
         ("native_contact_q.csv", f"{context.relationship_label.title()} Q", "Time_ns", ["Q_native_contact_fraction"], "Contact fraction"),
         ("protein_native_contact_q.csv", "Protein fold/native-contact Q", "Time_ns", ["Q_protein_native_contact_fraction"], "Contact fraction"),
     ]
-    if is_multichain_system:
+    if is_multichain_system or context.partner_kind == "ligand":
         stability_specs.insert(1, ("FullComplex_RMSD.csv", "Full-complex RMSD", "Time_ps", ["RMSD_Å"], "RMSD (Å)"))
     for file_name, title, x, ys, y_title in stability_specs:
         source = analysis / file_name
@@ -4010,6 +4251,17 @@ def main() -> None:
             fingerprint = contact_fingerprint_html(filtered, frequency_for_ligand, interaction_file if interaction_file.is_file() else None)
             if fingerprint:
                 groups["contacts"].append(dashboard_card(fingerprint, "Residue contact fingerprint", filtered.relative_to(output.parent).as_posix(), note="Ranked residue summary: occupancy, dominant chemistry, distances, and the ligand atoms observed in the contact events."))
+    if all_contacts.is_file():
+        add("contacts", ligand_atom_occupancy_plot(all_contacts), "Ligand-atom contact occupancy", all_contacts,
+            note="Each bar is one ligand atom. It reports the fraction of sampled frames in which that atom contacts any protein atom.")
+        add("contacts", ligand_atom_residue_heatmap(all_contacts), "Protein-residue × ligand-atom contact map", all_contacts,
+            note="This preserves which exact ligand atoms contact which protein residues; colors are frame occupancies, not affinity.")
+        add("distances", ligand_distance_occupancy_plot(all_contacts), "Residue contact persistence versus distance", all_contacts,
+            note="Each point combines how often a residue contacts the ligand with its mean and minimum observed contact distance.")
+        q_source = analysis / "native_contact_q.csv"
+        if q_source.is_file():
+            add("coupled", native_q_contact_coupling_plot(q_source, all_contacts), "Fold retention versus ligand-pocket engagement", q_source,
+                note="Each point is a sampled moment. It relates protein native-contact retention to the number of distinct protein residues contacting the ligand.")
 
     summary = analysis / "InteractionTypes_Summary.csv"
     if summary.is_file(): add("chemistry", categorical_bar_plot(summary, "Interaction-type abundance by residue", "Residue", ["H-bond", "Hydrophobic", "Ionic"], "Observed interaction events", stacked=True), "Interaction-type abundance by residue", summary)
@@ -4024,6 +4276,8 @@ def main() -> None:
         if has_ligand_evidence:
             add("chemistry", chemistry_composition_plot(interaction_file), "Interaction chemistry composition over time", interaction_file, note="Counts are binned event observations, so use the persistent interaction explorer for exact residue–atom occupancy.")
             add("chemistry", residue_chemistry_heatmap(interaction_file), "Residue × interaction chemistry occupancy", interaction_file, note="Each row is normalized within that residue's observed interaction events.")
+            add("chemistry", typed_interaction_residence_plot(interaction_file), "Longest typed interaction residence episodes", interaction_file,
+                note="Each bar is one exact residue–ligand-atom interaction type. Episodes are bounded by the sampled frame interval and are descriptive, not kinetic-rate estimates.")
 
     # Protein–protein chemistry is written by the Interface_RIN stage in a
     # separate validated event bundle.  Surface it directly instead of
@@ -4076,6 +4330,10 @@ def main() -> None:
         add("coupled", multiseries_plot(coupling, "Rolling correlation", "Time_ns", ["Rolling_Corr_Contacts_vs_Sheet"], "Correlation"), "Rolling correlation", coupling)
     changepoints = analysis / "LIG_ChangePoint_Summary.csv"
     if changepoints.is_file(): add("coupled", categorical_bar_plot(changepoints, "Change-point segments", "Segment", ["MeanContacts", "MeanHelix", "MeanSheet", "MeanCoil"], "Mean value"), "Change-point segments", changepoints, note="Hover the bars to compare the average contact and secondary-structure values for each detected trajectory segment.")
+    overlay_source = next(iter(sorted(analysis.glob("*_Complex_RMSD_Overlay.csv"))), None)
+    if overlay_source and filtered.is_file():
+        add("coupled", ligand_pose_engagement_plot(overlay_source, filtered), "Ligand pose motion versus pocket engagement", overlay_source,
+            note="Each point is a sampled time. It relates ligand positional drift to the number of distinct protein residues contacting the ligand.")
     # Protein complexes preserve a different, richer coupling bundle than
     # peptide/ligand jobs.  These graphs deliberately reuse saved analysis
     # products rather than requiring an MD rerun: interface geometry, native
@@ -4153,7 +4411,7 @@ def main() -> None:
         if context.is_interface else ("Read global structure and interaction chemistry before drawing conclusions about the ligand." if has_ligand_evidence else "Read protein stability, fold retention, and secondary structure together.")
     )
     overview = (component_lanes_section_html(root, overview_title, "Start here", overview_text,
-                                              groups["overview"], component_cards["overview"], analysis)
+                                              groups["overview"], component_cards["overview"], analysis, context)
                 if is_multichain_system else section_html(overview_title, "Start here", overview_text, groups["overview"]))
     # Interface-only systems should never acquire a misleading empty ligand card.
     ligand_panel = ligand_html(root, ligand_name) if context.partner_kind == "ligand" else ""
@@ -4163,19 +4421,19 @@ def main() -> None:
     structure_panel = final_structure_html(root, context)
     trajectory_panel = trajectory_playback_html(root, analysis, context)
     provenance_panel = data_provenance_html(analysis, output)
-    component_key = component_key_html(root, analysis) if is_multichain_system else ""
-    stability = component_key + (component_lanes_section_html(root, "Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends. Cyan denotes whole-complex observables; orange and neon green denote the individual components.", groups["stability"], component_cards["stability"], analysis)
+    component_key = component_key_html(root, analysis, context) if is_multichain_system else ""
+    stability = component_key + (component_lanes_section_html(root, "Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends. Cyan denotes whole-complex observables; orange and neon green denote the individually resolved {'receptor and peptide' if context.partner_kind == 'peptide' else 'components'}.", groups["stability"], component_cards["stability"], analysis, context)
                                if is_multichain_system else section_html("Stability", "Trajectory stability", f"Compare global protein, complex, {context.relationship_label}, compactness, and native-contact trends.", groups["stability"]))
-    flexibility = component_key + (component_lanes_section_html(root, "Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"], component_cards["flexibility"], analysis)
+    flexibility = component_key + (component_lanes_section_html(root, "Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"], component_cards["flexibility"], analysis, context)
                                  if is_multichain_system else section_html("Flexibility", "Residue and partner mobility", f"Inspect protein and {context.partner_label if context.partner_kind != 'none' else 'chain'} RMSF at atom and residue levels.", groups["flexibility"]))
-    secondary = component_key + ((chain_secondary_section_html(chain_secondary_cards) if is_multichain_system else "") or section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"]))
-    contacts = component_key + (component_lanes_section_html(root, context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"], component_cards["contacts"], analysis)
+    secondary = component_key + ((chain_secondary_section_html(chain_secondary_cards, context) if is_multichain_system else "") or section_html("Secondary structure", "Fold evolution", "Read the residue-time secondary-structure maps alongside global SSE fractions and persistence.", groups["secondary"]))
+    contacts = component_key + (component_lanes_section_html(root, context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"], component_cards["contacts"], analysis, context)
                               if is_multichain_system else section_html(context.contact_tab_label, "Binding/interface evidence", f"Use {context.relationship_label} contact frequency, persistence, and event views together.", groups["contacts"]))
-    chemistry = component_key + (component_lanes_section_html(root, "Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"], component_cards["chemistry"], analysis)
+    chemistry = component_key + (component_lanes_section_html(root, "Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"], component_cards["chemistry"], analysis, context)
                                if is_multichain_system else section_html("Contact chemistry", f"{context.relationship_label.title()} interaction types", "Hydrogen-bond, ionic, and hydrophobic interaction events remain separate and hoverable.", groups["chemistry"]))
-    distances = component_key + (component_lanes_section_html(root, "Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"], component_cards["distances"], analysis)
+    distances = component_key + (component_lanes_section_html(root, "Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"], component_cards["distances"], analysis, context)
                                  if is_multichain_system else section_html("Distances", "Partner-residue separations", f"Explore every calculated {context.relationship_label} separation without collapsing pair context.", groups["distances"])) + distance_carousel_html(analysis)
-    coupled = component_key + (component_lanes_section_html(root, "Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"], component_cards["coupled"], analysis)
+    coupled = component_key + (component_lanes_section_html(root, "Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"], component_cards["coupled"], analysis, context)
                                if is_multichain_system else section_html("Coupled dynamics", "Structure and contacts", f"Compare secondary structure with {context.relationship_label} contacts and detected trajectory segments.", groups["coupled"]))
     dashboard = tabbed_sections([
         ("overview", "Overview", component_key + overview + peptide_topology + interface_rin["overview"] + network_explorer),
