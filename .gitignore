@@ -100,6 +100,9 @@ submissions.jsonl*
 *.xtc_offsets.lock
 *.xtc_offsets.npz
 pbc_reanalyze_*.lsf
+pbc_reanalysis_*.lsf
+pbc_refresh_*.lsf
+backfill_jobs/
 
 # Local website prototype for pymacs.com
 website/
