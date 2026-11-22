@@ -4440,6 +4440,23 @@ else:
 
 
 
+def run_native_contact_q_suite():
+    """Guarantee standardized protein, partner, and interface Q outputs."""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pymacs_compute_native_contact_q.py")
+    cmd = [sys.executable, script, "--topology", args.topo, "--trajectory", args.traj,
+           "--outdir", OUTPUT_DIR, "--stride", str(args.interface_frame_step)]
+    if PEPTIDE_LIKE and PEPTIDE_INFO and PEPTIDE_INFO.get("chain_id"):
+        cmd += ["--partner-selection", f"protein and chainID {PEPTIDE_INFO['chain_id']}", "--partner-kind", "peptide", "--partner-label", str(PEPTIDE_INFO['chain_id'])]
+    elif PARTNER_MODE and PARTNER_SELECTION_MDA:
+        cmd += ["--partner-selection", PARTNER_SELECTION_MDA, "--partner-kind", "ligand", "--partner-label", str(ligand_code or "ligand")]
+    if INTERFACE_RIN_MODE:
+        cmd.append("--interface-q")
+    if subprocess.call(cmd) != 0:
+        raise SystemExit("Native-contact Q suite failed.")
+
+
+run_native_contact_q_suite()
+
 if "u" in globals():
     del u
 gc.collect()
