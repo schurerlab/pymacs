@@ -95,6 +95,12 @@ REVIEWER_RESPONSE_IMPLEMENTATION_LOG.md
 *.old
 Pasted text*.txt
 
+# Local portal submission state and one-off recovery jobs
+submissions.jsonl*
+*.xtc_offsets.lock
+*.xtc_offsets.npz
+pbc_reanalyze_*.lsf
+
 # Local website prototype for pymacs.com
 website/
 
