@@ -104,6 +104,13 @@ pbc_reanalysis_*.lsf
 pbc_refresh_*.lsf
 backfill_jobs/
 
+# Historical generated previews and one-off repair utilities
+/PyMACS_Heatmap_Explorer.html
+/PyMACS_Result_Dashboard.html
+/Interface_RIN_Example2_Preview/
+/repair_compound32_pose.py
+/repair_lp1_virtual_site.py
+
 # Local website prototype for pymacs.com
 website/
 
