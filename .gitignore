@@ -110,6 +110,7 @@ backfill_jobs/
 /Interface_RIN_Example2_Preview/
 /repair_compound32_pose.py
 /repair_lp1_virtual_site.py
+validation/level3_interaction_chemistry_audit/
 
 # Local website prototype for pymacs.com
 website/
