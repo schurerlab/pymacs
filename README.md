@@ -228,6 +228,22 @@ for item in "$TMP_DIR/pymacs"/*; do
   cp -R "$item" "$TARGET_DIR/"
 done
 
+required_files=(
+  pymacs_run.py
+  3A_AutomateGromacs_chunks_MPI.py
+  pymacs_compute_native_contact_q.py
+  pymacs_native_contacts.py
+  pymacs_component_utils.py
+  pymacs_analysis_cache.py
+  pymacs_interaction_chemistry.py
+)
+for required_file in "${required_files[@]}"; do
+  if [ ! -f "$TARGET_DIR/$required_file" ]; then
+    echo "ERROR: installation is incomplete; missing $required_file"
+    exit 1
+  fi
+done
+
 echo "Cleaning up temporary clone..."
 cleanup
 trap - EXIT
@@ -343,6 +359,22 @@ for item in "$TMP_DIR/pymacs"/*; do
   fi
 
   cp -R "$item" "$TARGET_DIR/"
+done
+
+required_files=(
+  pymacs_run.py
+  3A_AutomateGromacs_chunks_MPI.py
+  pymacs_compute_native_contact_q.py
+  pymacs_native_contacts.py
+  pymacs_component_utils.py
+  pymacs_analysis_cache.py
+  pymacs_interaction_chemistry.py
+)
+for required_file in "${required_files[@]}"; do
+  if [ ! -f "$TARGET_DIR/$required_file" ]; then
+    echo "ERROR: installation is incomplete; missing $required_file"
+    exit 1
+  fi
 done
 
 echo "Cleaning up temporary clone..."
